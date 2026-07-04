@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      { "command": "./.cursor/probe-hook.sh", "timeout": 10, "failClosed": false }
+    ],
+    "beforeSubmitPrompt": [
+      { "command": "./.cursor/probe-hook.sh", "timeout": 10, "failClosed": false }
+    ],
+    "beforeShellExecution": [
+      { "command": "./.cursor/probe-hook.sh", "timeout": 10, "failClosed": false }
+    ],
+    "beforeReadFile": [
+      { "command": "./.cursor/probe-hook.sh", "timeout": 10, "failClosed": false }
+    ],
+    "beforeMCPExecution": [
+      { "command": "./.cursor/probe-hook.sh", "timeout": 10, "failClosed": false }
+    ],
+    "afterFileEdit": [
+      { "command": "./.cursor/probe-hook.sh", "timeout": 10, "failClosed": false }
+    ],
+    "stop": [
+      { "command": "./.cursor/probe-hook.sh", "timeout": 10, "failClosed": false }
+    ],
+    "sessionEnd": [
+      { "command": "./.cursor/probe-hook.sh", "timeout": 10, "failClosed": false }
+    ],
+    "workspaceOpen": [
+      { "command": "./.cursor/probe-hook.sh", "timeout": 10, "failClosed": false }
+    ]
+  }
+}

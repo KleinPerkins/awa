@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "awa"
+version = "1.0.0"
+description = "Agent Worktree Automation — kernel-first engine (durable state, recovery, single-instance daemon, MCP server, preview-first apply-back)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+authors = [{ name = "KleinPerkins" }]
+keywords = ["git", "worktree", "agent", "safety", "recovery"]
+dependencies = []
+
+[project.scripts]
+awa-engine = "engine.cli:main"
+
+[tool.setuptools]
+packages = ["engine"]
+
+[tool.setuptools.package-data]
+engine = ["../contracts/*.json"]

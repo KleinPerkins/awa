@@ -1,0 +1,54 @@
+{
+  "contract": "awa-kernel-contract",
+  "version": 1,
+  "frozen": "2026-07-04",
+  "rationale": "Phase-0 kernel-contract freeze (plan v2.1 §R Phase 0). These surfaces are the kernel's public interface. The engine (Phases 2-9) may only BACK them; it must NEVER change a frozen surface without a versioned bump (a v2 contract file). Additive, backward-compatible fields (new OPTIONAL keys) are allowed WITHIN v1; REMOVING or RENAMING a required verb/flag/key, or changing the schema string, is a breaking change that requires awa-contract.v2.json. _ops/checks/awa-contract-freeze.sh enforces the floor (every required surface is present) against the live shims.",
+  "cli": {
+    "tool": "_ops/bin/dev-worktree.sh",
+    "verbs": ["status", "ensure", "list", "clean", "doctor", "policy-check", "dashboard-data"],
+    "flags": {
+      "ensure": ["--base", "--branch", "--path", "--json"],
+      "clean": ["--path", "--bundle", "--force", "--delete-branch"],
+      "dashboard-data": ["--root", "--timeout"]
+    }
+  },
+  "dashboard_data": {
+    "schema": "awa-worktree/v1",
+    "top_keys": ["schema", "generated_at", "root", "default_base", "summary", "repos"],
+    "summary_keys": [
+      "repos", "included", "excluded", "advisory", "worktrees", "linked",
+      "dirty", "ahead_of_main", "behind_main", "diverged", "no_base", "orphan_branches"
+    ],
+    "repo_keys": [
+      "path", "rel", "name", "classification", "reason", "owner_repo",
+      "has_base", "base_ref", "default_base", "branches", "orphan_branches", "worktrees"
+    ],
+    "worktree_keys": [
+      "path", "branch", "detached", "is_primary", "is_linked", "locked", "prunable",
+      "head", "dirty", "dirty_count", "ahead", "behind", "ab_status",
+      "is_base_branch", "last_commit_ts", "last_commit_subject"
+    ],
+    "orphan_branch_keys": [
+      "branch", "head", "ahead", "behind", "ab_status", "last_commit_ts", "last_commit_subject"
+    ],
+    "additive_note": "The Phase-0/8 dashboard (X4) MAY add OPTIONAL top-level/summary keys (e.g. promise-state, scope, degraded, stale) additively without a version bump; the required key sets above are the immutable floor."
+  },
+  "guard_permission": {
+    "hook": "_ops/cursor-hooks/worktree-guard.sh",
+    "permission_values": ["allow", "ask", "deny"],
+    "allow_shape": ["permission"],
+    "ask_shape": ["permission", "user_message", "agent_message"],
+    "note": "beforeShellExecution is the ONE honored pre-mutation gate (ask/deny block). afterFileEdit is observation-only: the guard MUST return allow there and MUST NOT emit a no-op ask (X2)."
+  },
+  "lease": {
+    "path_relative_to_worktree": ".awa/lease.json",
+    "schema": "awa-lease/v1",
+    "required_keys": [
+      "schema", "lease_id", "worktree_path", "branch", "git_common_dir", "boot_id", "created_at"
+    ],
+    "identity_rule": "lease_id = hash(worktree_path + branch + git_common_dir + boot_id). NEVER a bare pid (a pid is reused across reboots/processes). pid MAY be recorded as an informational field but is never the identity.",
+    "collision_boundary": "The per-git_common_dir advisory lock (git rev-parse --git-common-dir) is the real collision boundary; branch/path uniqueness is necessary but not sufficient.",
+    "wal_placement": "SQLite state.db and its -wal/-shm sidecars MUST live under ${XDG_STATE_HOME:-~/.local/state}/awa on local disk, never a cloud-synced/network path.",
+    "note": "No component emits a lease yet (recovery/engine unbuilt). This shape is the FORWARD contract the kernel/engine must back when leases land (Phase 2). awa-contract-freeze.sh validates any lease file that DOES exist against this shape."
+  }
+}
