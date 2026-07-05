@@ -55,17 +55,16 @@ with **85** passing tests (`make verify`). Copy-honesty `recovery-manager` capab
 |-----|--------|-----------|
 | L9/L10 cloud project hooks | **OPEN** | `live-verify/cloud-hooks-runbook.md` |
 | Live AWA-MCP (`awa_*` + `beforeMCPExecution`) | **OPEN** | `live-verify/awa-mcp-runbook.md` |
-| R-A `move_agent_to_root` fetch/ff-merge | **Partially closed (Obs. A)** | Obs. B optional — `live-verify/move-agent-to-root-runbook.md` |
+| R-A `move_agent_to_root` fetch/ff-merge | **Verified (Obs. A+B)** | Optional Obs. C if you want a successful-move datapoint |
 
-**R-A (Observation A — Verified, Desktop 2026-07-05):** live `move_agent_to_root` with
-`rootPath=~/dev/personal/awa-move-uat.wt` on a local-only branch (`cursor/worktree/awa-move-test`,
-`BRANCH_ON_ORIGIN=no`, `origin` URL set but GitHub repo absent) **did not relocate** the agent;
-`pwd` stayed on the primary checkout. Cursor attempted **`git fetch origin`** during migration
-(checkout `main`) and failed with `Repository not found` / `Could not read from remote repository`.
-Worktrees remained intact on `d5ea248`. This **confirms v2.1 §H2**: the default relocation path must
-not depend on `move_agent_to_root` for unpublished/local-only worktrees. Evidence:
-`live-verify/RESULTS-R-A-2026-07-05.md`. **Observation B** (real remote + pushed branch → does move
-succeed?) remains optional/open.
+**R-A (Verified, Desktop 2026-07-05 — Obs. A + B):** `move_agent_to_root` with
+`rootPath=~/dev/personal/awa-move-uat.wt` **did not relocate** the agent in either observation;
+`pwd` stayed on the primary checkout; worktrees remained on `d5ea248`. **Fetch behavior:** Cursor
+always attempts **`git fetch origin` for `refs/heads/main`** during migration (not the worktree
+branch). **(A)** `origin` unreachable → `Repository not found`. **(B)** repo exists, worktree branch
+published, but **`main` absent on `origin`** → `couldn't find remote ref refs/heads/main`. This
+confirms v2.1 §H2: default relocation must be native-window adopt; `ensure` → printed move is
+unreliable unless `main` is on `origin`. Evidence: `live-verify/RESULTS-R-A-2026-07-05.md`.
 
 The §H1 copy-honesty gate remains honest: `shell-gate-and-native-detection` stays **not green**
 until the cloud hook run completes; `kernel-guarantee` stays **not green** until degraded-mode +

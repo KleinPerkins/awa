@@ -66,6 +66,10 @@ relocation should prefer native dropdown adopt, not this path.
 `git fetch origin` **was attempted** (failed: repository not found). See
 `RESULTS-R-A-2026-07-05.md`.
 
+**Result (Observation B, 2026-07-05 — Verified):** repo exists, worktree branch on `origin`, but
+**`main` not on `origin`** → move **failed** with `couldn't find remote ref refs/heads/main`; agent
+root **unchanged**. Move fetches **`main`**, not the worktree branch.
+
 ## Observation B — published branch (optional, explicit opt-in)
 
 Only if you want to test fetch/ff-merge:
