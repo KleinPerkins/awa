@@ -35,8 +35,21 @@ Phase-9 remote adapter, and were additionally exercised **live end-to-end** (rea
 the adapter's live network path (token split, SHA-binding, recovery-before-mutation, preview→confirm)
 is now proven, not just unit-tested. A production apply-back against a real target repo remains a
 per-repo operator decision, but is no longer an unverified surface. Phase 6 (hook
-adapters) stays gated on the §H1 copy-honesty gate + the live hook-probe (L3/L4/L9/L10), which
-needs a real Desktop+cloud agent.
+adapters) is gated on the §H1 copy-honesty gate + the live hook-probe. **Desktop half — Verified
+(probe, 2026-07-05)**: a live Cursor Desktop run of the committed hook-probe harness observed
+`beforeShellExecution` firing as a project hook with a `command`+`cwd`+`sandbox` payload (the
+load-bearing kernel-gate fact), `beforeSubmitPrompt` carrying raw `prompt`+`attachments` (L3), and
+`beforeMCPExecution`/`sessionStart`/`stop` with their payload shapes; `afterFileEdit` was
+operator-observed to be **observation-only** (a returned `{"permission":"deny"}` was ignored — the
+edit landed on disk), corroborating the X2 detect-only design (see `hook-probe/RESULTS-2026-07-05.md`
+for the per-event evidence and honest residuals — `afterFileEdit`/`beforeReadFile` hook records were
+not retained in the captured `events.jsonl`, so L4 rests on the live observation + on-disk mutation +
+the L2 doc-snapshot, and a targeted re-drive is recommended to capture those records). **Cloud half —
+still open**: **L9/L10** (committed project hooks firing on a real cloud VM), the live AWA-MCP
+tool-resolution + its `beforeMCPExecution` gate on real `awa.*` tools, and R-A `move_agent_to_root`
+fetch/ff-merge remain live/operator-gated and are **NOT** closed. The §H1 copy-honesty gate stays
+green: no gated protection verb unlocks, since the `shell-gate-and-native-detection` capability's
+named verifier still requires the cloud run and the recovery manager is unbuilt.
 
 ## Shell-gate interception scope (adversarial UATs)
 
