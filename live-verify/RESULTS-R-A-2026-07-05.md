@@ -58,12 +58,58 @@ BRANCH_ON_ORIGIN=no
 | Is agent root unchanged on failure? | **Yes** — primary cwd preserved |
 | Confirms v2.1 H2 (no default reliance on move)? | **Yes** |
 
-## Still open (optional Observation B)
+## Observation C — `main` on `origin`, both refs at `d5ea248` (certainty run, 2026-07-05)
 
-Whether move **succeeds** when `origin` exists and the worktree branch **is** pushed — drive
-`live-verify/move-agent-to-root-runbook.md` § Observation B.
+**Setup delta vs B:** `git push -u origin main` — both `origin/main` and
+`origin/cursor/worktree/awa-move-test` at `d5ea248`.
 
-## Observation B — repo exists, worktree branch pushed, `main` absent on origin (2026-07-05)
+**Before move:**
+
+```text
+pwd: /Users/laurence.duggan/dev/personal/awa-move-uat
+origin/main:                    d5ea248
+origin/cursor/worktree/awa-move-test: d5ea248
+```
+
+**Payload:** same `rootPath` as A/B.
+
+**Agent root relocated?** **No.** `pwd` remained primary.
+
+**Error (verbatim):**
+
+```text
+Failed to move agent root: Failed to checkout migrated branch "main": Command failed: git checkout main
+fatal: 'main' is already used by worktree at '/Users/laurence.duggan/dev/personal/awa-move-uat'
+```
+
+**Fetch/ff-merge?** **Not observed** in tool output — failure occurred on `git checkout main` inside
+the destination worktree. Past the fetch gate (Obs A/B); hit git's **one-branch-per-worktree**
+constraint because primary already holds `main` while `.wt` holds `cursor/worktree/awa-move-test`.
+
+## Verdict (Observation C)
+
+| Question | Answer |
+|----------|--------|
+| Does move succeed when `main` is on `origin` (AWA ensure layout)? | **No** |
+| Failure mode | `main` already checked out in primary worktree |
+| Fetch/ff-merge observed? | **No** — checkout conflict, not fetch |
+
+## Combined R-A verdict (Observations A + B + C) — **closed**
+
+`move_agent_to_root` **does not relocate** the agent for the AWA `ensure` layout (primary on `main`,
+linked worktree on `cursor/worktree/…`) in any tested condition:
+
+| Obs | Condition | Failure |
+|-----|-----------|---------|
+| A | `origin` unreachable | `git fetch origin` → repository not found |
+| B | repo exists; worktree branch on `origin`; `main` not on `origin` | fetch → `couldn't find remote ref refs/heads/main` |
+| C | both `main` and worktree branch on `origin` @ same SHA | `git checkout main` → `main` already used by primary worktree |
+
+**Mechanism:** Cursor's move migration tries to **`checkout main`** in the destination worktree after
+fetching `origin/main` — it does **not** adopt the worktree's current branch (`cursor/worktree/…`).
+That is incompatible with AWA's agent-created worktree pattern and fully confirms v2.1 §H2:
+**native-window adopt is the sole default**; `ensure` → printed `move_agent_to_root` must remain
+print-only fallback, never an automated relocation path.
 
 **Setup delta vs A:** `KleinPerkins/awa-move-uat` created on GitHub; `cursor/worktree/awa-move-test`
 pushed (`d5ea248`, tracks `origin/cursor/worktree/awa-move-test`). **`main` was NOT on `origin`**
@@ -98,14 +144,3 @@ worktree branch. No ff-merge; move aborted.
 | What does move fetch? | **`origin` `main`** (not the worktree branch name) |
 | Agent root on failure? | **Unchanged** (primary) |
 
-## Combined R-A verdict (Observations A + B)
-
-`move_agent_to_root` **always attempts `git fetch origin` for `main`** during migration. It **does
-not** relocate the agent when: (A) `origin` is unreachable/missing, or (B) `origin` exists but
-`refs/heads/main` is absent — even if the target worktree branch **is** published. This fully
-supports v2.1 §H2: **native-window adopt is the sole default**; `ensure` → printed
-`move_agent_to_root` is not a reliable relocation path unless **`main` is on `origin`** (and even
-then success was not re-tested here).
-
-**Optional Obs. C:** `git push -u origin main` then retry move — only needed if you want to record a
-successful relocation path; not required to close the AWA design question.

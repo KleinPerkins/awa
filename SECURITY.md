@@ -55,16 +55,18 @@ with **85** passing tests (`make verify`). Copy-honesty `recovery-manager` capab
 |-----|--------|-----------|
 | L9/L10 cloud project hooks | **OPEN** | `live-verify/cloud-hooks-runbook.md` |
 | Live AWA-MCP (`awa_*` + `beforeMCPExecution`) | **OPEN** | `live-verify/awa-mcp-runbook.md` |
-| R-A `move_agent_to_root` fetch/ff-merge | **Verified (Obs. A+B)** | Optional Obs. C if you want a successful-move datapoint |
+| R-A `move_agent_to_root` fetch/ff-merge | **Verified (Obs. A+B+C)** | — |
 
-**R-A (Verified, Desktop 2026-07-05 — Obs. A + B):** `move_agent_to_root` with
-`rootPath=~/dev/personal/awa-move-uat.wt` **did not relocate** the agent in either observation;
-`pwd` stayed on the primary checkout; worktrees remained on `d5ea248`. **Fetch behavior:** Cursor
-always attempts **`git fetch origin` for `refs/heads/main`** during migration (not the worktree
-branch). **(A)** `origin` unreachable → `Repository not found`. **(B)** repo exists, worktree branch
-published, but **`main` absent on `origin`** → `couldn't find remote ref refs/heads/main`. This
-confirms v2.1 §H2: default relocation must be native-window adopt; `ensure` → printed move is
-unreliable unless `main` is on `origin`. Evidence: `live-verify/RESULTS-R-A-2026-07-05.md`.
+**R-A (Verified, Desktop 2026-07-05 — Obs. A + B + C):** `move_agent_to_root` with
+`rootPath=~/dev/personal/awa-move-uat.wt` **never relocated** the agent across all three
+conditions; `pwd` stayed on the primary checkout. **(A)** `origin` unreachable → fetch failed
+(repository not found). **(B)** repo exists, worktree branch on `origin`, `main` absent on
+`origin` → `couldn't find remote ref refs/heads/main`. **(C)** both refs on `origin` @ `d5ea248` →
+`git checkout main` failed: `'main' is already used by worktree` at primary (git one-branch-per-
+worktree rule; move tries to checkout `main` in `.wt`, not the worktree branch). **Conclusion:**
+Cursor move migration fetches/checks out **`main`**, not `cursor/worktree/…`; incompatible with AWA
+`ensure` layout. Native-window adopt remains the sole default (v2.1 §H2). Evidence:
+`live-verify/RESULTS-R-A-2026-07-05.md`.
 
 The §H1 copy-honesty gate remains honest: `shell-gate-and-native-detection` stays **not green**
 until the cloud hook run completes; `kernel-guarantee` stays **not green** until degraded-mode +
