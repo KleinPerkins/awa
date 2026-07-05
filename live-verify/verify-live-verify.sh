@@ -8,6 +8,11 @@ for f in README.md OPERATOR-CLOSEOUT.md bootstrap-hook-probe-uat.sh cloud-hooks-
          RESULTS-R-A-2026-07-05.md; do
   if [ -f "$SELF/$f" ]; then echo "  PASS  $f"; else echo "  FAIL  missing $f"; fail=1; fi
 done
+if [ -f "$SELF/../hook-probe/RESULTS-CLOUD-2026-07-05.md" ]; then
+  echo "  PASS  ../hook-probe/RESULTS-CLOUD-2026-07-05.md"
+else
+  echo "  FAIL  missing ../hook-probe/RESULTS-CLOUD-2026-07-05.md"; fail=1
+fi
 if [ -x "$SELF/bootstrap-hook-probe-uat.sh" ]; then
   echo "  PASS  bootstrap-hook-probe-uat.sh executable"
 else
