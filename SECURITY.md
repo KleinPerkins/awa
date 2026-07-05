@@ -48,14 +48,14 @@ the L2 doc-snapshot; optional re-drive: `live-verify/desktop-hook-redrive-runboo
 build (reconciled 2026-07-05):** recovery manager, daemon/watcher, MCP server, and degraded-mode
 guard are **built** in this repo (`engine/recovery.py`, `daemon.py`, `mcp_server.py`, `guard.py`)
 with **85** passing tests (`make verify`). Copy-honesty `recovery-manager` capability is green when
-`engine.tests.test_recovery` passes (see host `operator-copy.json`). **Live rows still open
-(operator-gated):**
+`engine.tests.test_recovery` passes (see host `operator-copy.json`). **Live verification ledger
+(operator-driven, 2026-07-05):**
 
-| Row | Status | Close via |
-|-----|--------|-----------|
-| L9/L10 cloud project hooks | **Verified (probe, cloud 2026-07-05)** | `hook-probe/RESULTS-CLOUD-2026-07-05.md` |
-| Live AWA-MCP (`awa_*` + `beforeMCPExecution`) | **OPEN** | `live-verify/awa-mcp-runbook.md` |
-| R-A `move_agent_to_root` fetch/ff-merge | **Verified (Obs. A+B+C)** | `live-verify/RESULTS-R-A-2026-07-05.md` |
+| Row | Status | Evidence |
+|-----|--------|----------|
+| L9/L10 cloud project hooks | **Verified** | `hook-probe/RESULTS-CLOUD-2026-07-05.md` |
+| Live AWA-MCP (`awa_*` + `beforeMCPExecution`) | **Verified** | `hook-probe/RESULTS-MCP-2026-07-05.md` |
+| R-A `move_agent_to_root` | **Verified (A+B+C)** | `live-verify/RESULTS-R-A-2026-07-05.md` |
 
 **L9/L10 (Verified, cloud probe 2026-07-05):** live Cursor **Cloud** agent on committed project
 hooks in `KleinPerkins/awa-cloud-hook-uat` recorded 6 hook events: 3× `beforeShellExecution`
@@ -65,6 +65,11 @@ Desktop-only events (`sessionStart`, `beforeSubmitPrompt`, `beforeMCPExecution`,
 `hook-probe/RESULTS-CLOUD-2026-07-05.md`. Pairs with Desktop probe
 `hook-probe/RESULTS-2026-07-05.md` — together they close the §H5 hook-probe gate for L3/L4/L9/L10
 and the cloud kernel-gate row.
+
+**Live AWA-MCP (Verified, Desktop 2026-07-05):** in `~/awa-mcp-uat`, live agent called `awa_status`
+and `awa_guard_shell` via the `awa` MCP server; hook log recorded 2× `beforeMCPExecution` with
+`mcp_server_name: awa` and `tool_name` ∈ `{awa_status, awa_guard_shell}`. Evidence:
+`hook-probe/RESULTS-MCP-2026-07-05.md`.
 
 **R-A (Verified, Desktop 2026-07-05 — Obs. A + B + C):** `move_agent_to_root` with
 `rootPath=~/dev/personal/awa-move-uat.wt` **never relocated** the agent across all three
