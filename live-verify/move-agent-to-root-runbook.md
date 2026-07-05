@@ -9,19 +9,45 @@ origin). No push to governed remotes unless you explicitly opt into the quaranti
 
 ## Setup (local-only branch — expect move WITHOUT fetch to work or fail honestly)
 
+`dev-worktree.sh ensure` only runs on repos classified **`include`**. That requires **both**:
+
+1. Repo path under `~/dev/personal/*`, `~/dev/capabilities/*`, or `~/dev/affirm/src/*`
+2. A `remote.origin.url` configured (the remote does **not** need to exist on GitHub for Observation A)
+
+A bare `~/awa-move-uat` outside `~/dev` returns `{"action":"noop","reason":"no origin remote"}` or
+`outside governed include patterns` — that is policy, not a bug.
+
 ```bash
-UAT=~/awa-move-uat
-rm -rf "$UAT"
+UAT=~/dev/personal/awa-move-uat
+rm -rf "$UAT" "${UAT}.wt"
+
 mkdir -p "$UAT" && cd "$UAT"
-git init -q && git config user.email "awa-uat@local.invalid" && git config user.name "AWA UAT"
-echo base >README.md && git add . && git commit -q -m init
+git init -q
+git config user.email "awa-uat@local.invalid"
+git config user.name "AWA UAT"
+echo "base content" > README.md
+git add . && git commit -q -m "init"
+git branch -M main
+# Required for classify_repo — URL can be a not-yet-created private repo
+git remote add origin "git@github.com:KleinPerkins/awa-move-uat.git"
+
+# Preflight: must show classification: include
+~/dev/_ops/bin/dev-worktree.sh status
 
 # Create worktree via AWA shim (prints move_agent_to_root instruction)
-OUT=$(~/dev/_ops/bin/dev-worktree.sh ensure --json --path "$UAT.wt" --branch "cursor/worktree/awa-move-test")
+OUT=$(~/dev/_ops/bin/dev-worktree.sh ensure --json --path "${UAT}.wt" --branch "cursor/worktree/awa-move-test")
 echo "$OUT" | python3 -m json.tool
+
+# Fail fast if ensure noop'd
+echo "$OUT" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("action")=="created" else 1)' \
+  || { echo "ensure failed — check classification/status above"; exit 1; }
+
 WT=$(echo "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rootPath"])')
 BR=$(echo "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["branch"])')
-echo "worktree=$WT branch=$BR (NOT on origin)"
+echo "Primary:  $UAT"
+echo "Worktree: $WT"
+echo "Branch:   $BR (local only — not pushed)"
+git -C "$UAT" worktree list
 ```
 
 ## Observation A — unpublished branch (default fallback)
@@ -36,14 +62,17 @@ echo "worktree=$WT branch=$BR (NOT on origin)"
 **Hypothesis (v2.1 H2):** move on an **unpublished** local branch may fail or skip fetch; AWA default
 relocation should prefer native dropdown adopt, not this path.
 
+**Result (Observation A, 2026-07-05 — Verified):** move **failed**; agent root **unchanged**;
+`git fetch origin` **was attempted** (failed: repository not found). See
+`RESULTS-R-A-2026-07-05.md`.
+
 ## Observation B — published branch (optional, explicit opt-in)
 
 Only if you want to test fetch/ff-merge:
 
 ```bash
-cd "$UAT"
-git remote add origin "git@github.com:KleinPerkins/awa-move-uat.git"  # create private repo first
-git push -u origin main
+cd ~/dev/personal/awa-move-uat
+gh repo create KleinPerkins/awa-move-uat --private --source=. --push
 git push -u origin "$BR"
 ```
 
