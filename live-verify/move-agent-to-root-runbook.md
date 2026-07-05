@@ -70,6 +70,10 @@ relocation should prefer native dropdown adopt, not this path.
 **`main` not on `origin`** → move **failed** with `couldn't find remote ref refs/heads/main`; agent
 root **unchanged**. Move fetches **`main`**, not the worktree branch.
 
+**Result (Observation C, 2026-07-05 — Verified):** both `origin/main` and worktree branch @
+`d5ea248` → move **still failed**: `git checkout main` → `'main' is already used by worktree` at
+primary. No fetch/ff-merge observed; git one-branch-per-worktree conflict. **R-A closed.**
+
 ## Observation B — published branch (optional, explicit opt-in)
 
 Only if you want to test fetch/ff-merge:
@@ -81,6 +85,19 @@ git push -u origin "$BR"
 ```
 
 Repeat `move_agent_to_root` and record whether the agent lands in `$WT` with branch synced.
+
+## Observation C — certainty run (`main` on `origin`) — **Verified 2026-07-05**
+
+After Obs B, push `main` and retry:
+
+```bash
+git -C ~/dev/personal/awa-move-uat push -u origin main
+git -C ~/dev/personal/awa-move-uat ls-remote --heads origin main
+git -C ~/dev/personal/awa-move-uat ls-remote --heads origin cursor/worktree/awa-move-test
+```
+
+**Result:** move still failed — `git checkout main` in `.wt` conflicts because primary already
+holds `main`. See `RESULTS-R-A-2026-07-05.md` § Observation C. **R-A fully closed.**
 
 ## Evidence to record
 
