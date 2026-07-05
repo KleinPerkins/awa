@@ -1,12 +1,8 @@
 # AWA closeout — operator instructions (non-technical)
 
-> **You are finishing the last two live checks** for Agent Worktree Automation (AWA).
-> Everything else (including the `move_agent_to_root` tests) is already done.
->
-> **Time:** ~20–30 minutes total (two short Cursor sessions).
->
-> **You do not edit code or git.** You open Cursor, paste prompts, and copy results back to the
-> agent chat that gave you this document.
+> **Status (2026-07-05):** Both live checks below are **complete**. This doc is retained as the
+> record of how they were run. For ledger evidence see `hook-probe/RESULTS-CLOUD-2026-07-05.md`
+> and `hook-probe/RESULTS-MCP-2026-07-05.md`.
 
 ---
 

@@ -3,8 +3,8 @@
 Operator-driven checks that **cannot** run headlessly. Each runbook produces individually
 verifiable evidence (date, surface, command/output) for the security/hook ledger.
 
-**Non-technical operator?** Start here: **[OPERATOR-CLOSEOUT.md](OPERATOR-CLOSEOUT.md)** — Check **1
-(cloud hooks) is done** (2026-07-05); **Check 2 (AWA MCP)** remains.
+**Non-technical operator?** Start here: **[OPERATOR-CLOSEOUT.md](OPERATOR-CLOSEOUT.md)** — **both
+operator closeout checks completed** (cloud hooks + AWA MCP, 2026-07-05).
 
 | Runbook | Closes | Surface |
 |---------|--------|---------|
