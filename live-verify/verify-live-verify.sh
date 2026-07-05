@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# verify-live-verify.sh — static check that live-verify harness files exist and bootstrap is sane.
+set -euo pipefail
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+fail=0
+for f in README.md bootstrap-hook-probe-uat.sh cloud-hooks-runbook.md awa-mcp-runbook.md \
+         move-agent-to-root-runbook.md desktop-hook-redrive-runbook.md; do
+  if [ -f "$SELF/$f" ]; then echo "  PASS  $f"; else echo "  FAIL  missing $f"; fail=1; fi
+done
+if [ -x "$SELF/bootstrap-hook-probe-uat.sh" ]; then
+  echo "  PASS  bootstrap-hook-probe-uat.sh executable"
+else
+  echo "  FAIL  bootstrap-hook-probe-uat.sh not executable"; fail=1
+fi
+if [ "$fail" -eq 0 ]; then echo "verify-live-verify: OK"; else echo "verify-live-verify: FAILED"; exit 1; fi

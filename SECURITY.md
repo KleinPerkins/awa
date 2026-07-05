@@ -44,12 +44,23 @@ operator-observed to be **observation-only** (a returned `{"permission":"deny"}`
 edit landed on disk), corroborating the X2 detect-only design (see `hook-probe/RESULTS-2026-07-05.md`
 for the per-event evidence and honest residuals — `afterFileEdit`/`beforeReadFile` hook records were
 not retained in the captured `events.jsonl`, so L4 rests on the live observation + on-disk mutation +
-the L2 doc-snapshot, and a targeted re-drive is recommended to capture those records). **Cloud half —
-still open**: **L9/L10** (committed project hooks firing on a real cloud VM), the live AWA-MCP
-tool-resolution + its `beforeMCPExecution` gate on real `awa.*` tools, and R-A `move_agent_to_root`
-fetch/ff-merge remain live/operator-gated and are **NOT** closed. The §H1 copy-honesty gate stays
-green: no gated protection verb unlocks, since the `shell-gate-and-native-detection` capability's
-named verifier still requires the cloud run and the recovery manager is unbuilt.
+the L2 doc-snapshot; optional re-drive: `live-verify/desktop-hook-redrive-runbook.md`). **Engine
+build (reconciled 2026-07-05):** recovery manager, daemon/watcher, MCP server, and degraded-mode
+guard are **built** in this repo (`engine/recovery.py`, `daemon.py`, `mcp_server.py`, `guard.py`)
+with **85** passing tests (`make verify`). Copy-honesty `recovery-manager` capability is green when
+`engine.tests.test_recovery` passes (see host `operator-copy.json`). **Live rows still open
+(operator-gated):**
+
+| Row | Status | Close via |
+|-----|--------|-----------|
+| L9/L10 cloud project hooks | **OPEN** | `live-verify/cloud-hooks-runbook.md` |
+| Live AWA-MCP (`awa_*` + `beforeMCPExecution`) | **OPEN** | `live-verify/awa-mcp-runbook.md` |
+| R-A `move_agent_to_root` fetch/ff-merge | **OPEN** | `live-verify/move-agent-to-root-runbook.md` |
+
+The §H1 copy-honesty gate remains honest: `shell-gate-and-native-detection` stays **not green**
+until the cloud hook run completes; `kernel-guarantee` stays **not green** until degraded-mode +
+env-matrix live proof; gated protection verbs (`pristine`, `nothing lost`, …) do not ship in operator
+surfaces until their backing capability is green.
 
 ## Shell-gate interception scope (adversarial UATs)
 
