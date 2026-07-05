@@ -82,10 +82,11 @@ Cursor move migration fetches/checks out **`main`**, not `cursor/worktree/…`; 
 `ensure` layout. Native-window adopt remains the sole default (v2.1 §H2). Evidence:
 `live-verify/RESULTS-R-A-2026-07-05.md`.
 
-The §H1 copy-honesty gate: `shell-gate-and-native-detection` is **green** on the host when Desktop +
-cloud hook-probe results are present (see `operator-copy.json` verifier). `kernel-guarantee` stays
-**not green** until degraded-mode + env-matrix live proof; gated protection verbs (`pristine`,
-`nothing lost`, …) do not ship in operator surfaces until deliberately upgraded in `strings[]`.
+The §H1 copy-honesty gate: **all three capabilities are green** on the host (`operator-copy.json`):
+`shell-gate-and-native-detection` (Desktop + cloud hook-probe), `recovery-manager`
+(`engine.tests.test_recovery`), and `kernel-guarantee` (`engine.tests.test_guard` +
+`kernel-guarantee-verify.sh` env matrix). Operator surfaces use the upgraded `strings[]` table;
+copy-honesty-check enforces gated verbs at build time.
 
 ## Shell-gate interception scope (adversarial UATs)
 

@@ -13,6 +13,16 @@ if [ -f "$SELF/../hook-probe/RESULTS-MCP-2026-07-05.md" ]; then
 else
   echo "  FAIL  missing ../hook-probe/RESULTS-MCP-2026-07-05.md"; fail=1
 fi
+if [ -f "$SELF/../hook-probe/RESULTS-REDRIVE-2026-07-05.md" ]; then
+  echo "  PASS  ../hook-probe/RESULTS-REDRIVE-2026-07-05.md"
+else
+  echo "  FAIL  missing ../hook-probe/RESULTS-REDRIVE-2026-07-05.md"; fail=1
+fi
+if [ -x "$SELF/../hook-probe/redrive-capture.sh" ]; then
+  echo "  PASS  ../hook-probe/redrive-capture.sh executable"
+else
+  echo "  FAIL  ../hook-probe/redrive-capture.sh not executable"; fail=1
+fi
 if [ -x "$SELF/bootstrap-hook-probe-uat.sh" ]; then
   echo "  PASS  bootstrap-hook-probe-uat.sh executable"
 else
