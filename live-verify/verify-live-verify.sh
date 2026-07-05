@@ -3,7 +3,7 @@
 set -euo pipefail
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 fail=0
-for f in README.md bootstrap-hook-probe-uat.sh cloud-hooks-runbook.md awa-mcp-runbook.md \
+for f in README.md OPERATOR-CLOSEOUT.md bootstrap-hook-probe-uat.sh cloud-hooks-runbook.md awa-mcp-runbook.md \
          move-agent-to-root-runbook.md desktop-hook-redrive-runbook.md \
          RESULTS-R-A-2026-07-05.md; do
   if [ -f "$SELF/$f" ]; then echo "  PASS  $f"; else echo "  FAIL  missing $f"; fail=1; fi
