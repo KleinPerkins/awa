@@ -53,9 +53,18 @@ with **85** passing tests (`make verify`). Copy-honesty `recovery-manager` capab
 
 | Row | Status | Close via |
 |-----|--------|-----------|
-| L9/L10 cloud project hooks | **OPEN** | `live-verify/cloud-hooks-runbook.md` |
+| L9/L10 cloud project hooks | **Verified (probe, cloud 2026-07-05)** | `hook-probe/RESULTS-CLOUD-2026-07-05.md` |
 | Live AWA-MCP (`awa_*` + `beforeMCPExecution`) | **OPEN** | `live-verify/awa-mcp-runbook.md` |
-| R-A `move_agent_to_root` fetch/ff-merge | **Verified (Obs. A+B+C)** | — |
+| R-A `move_agent_to_root` fetch/ff-merge | **Verified (Obs. A+B+C)** | `live-verify/RESULTS-R-A-2026-07-05.md` |
+
+**L9/L10 (Verified, cloud probe 2026-07-05):** live Cursor **Cloud** agent on committed project
+hooks in `KleinPerkins/awa-cloud-hook-uat` recorded 6 hook events: 3× `beforeShellExecution`
+(`command`+`sandbox`), 1× `afterFileEdit` (edit to `sample.txt` landed), 2× `beforeReadFile`.
+Desktop-only events (`sessionStart`, `beforeSubmitPrompt`, `beforeMCPExecution`, `stop`) were
+**absent**. Shell was **not** blocked (cloud VM not bricked). Evidence:
+`hook-probe/RESULTS-CLOUD-2026-07-05.md`. Pairs with Desktop probe
+`hook-probe/RESULTS-2026-07-05.md` — together they close the §H5 hook-probe gate for L3/L4/L9/L10
+and the cloud kernel-gate row.
 
 **R-A (Verified, Desktop 2026-07-05 — Obs. A + B + C):** `move_agent_to_root` with
 `rootPath=~/dev/personal/awa-move-uat.wt` **never relocated** the agent across all three
@@ -68,10 +77,10 @@ Cursor move migration fetches/checks out **`main`**, not `cursor/worktree/…`; 
 `ensure` layout. Native-window adopt remains the sole default (v2.1 §H2). Evidence:
 `live-verify/RESULTS-R-A-2026-07-05.md`.
 
-The §H1 copy-honesty gate remains honest: `shell-gate-and-native-detection` stays **not green**
-until the cloud hook run completes; `kernel-guarantee` stays **not green** until degraded-mode +
-env-matrix live proof; gated protection verbs (`pristine`, `nothing lost`, …) do not ship in operator
-surfaces until their backing capability is green.
+The §H1 copy-honesty gate: `shell-gate-and-native-detection` is **green** on the host when Desktop +
+cloud hook-probe results are present (see `operator-copy.json` verifier). `kernel-guarantee` stays
+**not green** until degraded-mode + env-matrix live proof; gated protection verbs (`pristine`,
+`nothing lost`, …) do not ship in operator surfaces until deliberately upgraded in `strings[]`.
 
 ## Shell-gate interception scope (adversarial UATs)
 
