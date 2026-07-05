@@ -13,6 +13,7 @@ test: ## Run the engine (kernel + engine core) test suite
 
 verify: ## Full local verification (the suite includes test_zero_link)
 	@bash engine/tests/run-tests.sh
+	@bash live-verify/verify-live-verify.sh
 	@echo "verify: OK"
 
 version: ## Print the engine version
