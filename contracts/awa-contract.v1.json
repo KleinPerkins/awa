@@ -44,7 +44,7 @@
     "orphan_branch_keys": [
       "branch", "head", "ahead", "behind", "ab_status", "last_commit_ts", "last_commit_subject"
     ],
-    "additive_note": "The Phase-0/8 dashboard (X4) MAY add OPTIONAL top-level/summary keys (e.g. promise-state, scope, degraded, stale) additively without a version bump; the required key sets above are the immutable floor."
+    "additive_note": "The Phase-0/8 dashboard (X4) MAY add OPTIONAL top-level/summary keys (e.g. promise-state, scope, degraded, stale) additively without a version bump; the required key sets above are the immutable floor. Per-repo MODE (2026-07-06) is ADDITIVE WITHIN v1 — NOT a v2: the OPTIONAL keys summary.ask_on (count of ask_on-classified repos, emitted when ask_on repos exist or modes are configured), repo.mode (on|ask_on|off|invalid|\"\"), and repo.mode_error MAY be emitted without a version bump. The value `ask_on` is a valid entry of the OPEN-VOCABULARY repo.classification/reason fields (the contract freezes the KEY set + schema literals, never the value set), and `ask_on` is likewise a valid guard beforeShellExecution ask outcome: an ask_on-classified mutating primary command asks exactly like include/on, using the frozen guard_permission.ask_shape. The required summary_keys/repo_keys floors and the guard permission_values ([allow, ask, deny]) + allow_shape/ask_shape are UNCHANGED; existing awa-worktree/v1 consumers stay valid."
   },
   "guard_permission": {
     "hook": "kernel/hooks/worktree-guard.sh",

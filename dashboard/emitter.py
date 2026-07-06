@@ -311,26 +311,54 @@ def engine_status(timeout: float) -> dict:
     return off("engine off — kernel guard active")
 
 
+def mode_scan_bases(cfg) -> list[str]:
+    """First non-wildcard path prefix of each explicit-mode key.
+
+    Dashboard enumeration hint: a repo configured ONLY via a ``modes:`` entry (an explicit
+    OFF/ASK_ON/ON repo that sits outside the include globs) would otherwise never be
+    discovered. e.g. modes {'projects/*': ask_on, 'personal/legacy': off} -> ['projects',
+    'personal/legacy']. A prefix may be a directory of repos (scan its children) or name a
+    repo directly (the base itself is the repo).
+    """
+    bases: list[str] = []
+    for key in cfg.modes:
+        seg = str(key).split("*", 1)[0].rstrip("/")
+        if seg and seg not in bases:
+            bases.append(seg)
+    return bases
+
+
 def enumerate_repos(root: Path, cfg) -> list[Path]:
-    """Scanned root + shallow git-repo children of the policy include roots.
+    """Scanned root + shallow git-repo children of the policy include roots + mode-only roots.
 
     Absent include-root hints (standalone default), also shallow-scan the direct children of
-    the root so sibling repos under a governed root are still discovered.
+    the root so sibling repos under a governed root are still discovered. Mode-configured
+    roots (from ``modes:`` keys) are additionally enumerated so explicitly-set OFF/ASK_ON/ON
+    repos outside the include globs still surface — a scan base may be a directory of repos
+    or (for an exact mode key) the repo itself.
     """
     repos: list[Path] = []
     seen: set[str] = set()
-    if is_git_repo(root):
-        repos.append(root)
-        seen.add(str(root))
+
+    def add(p: Path) -> None:
+        if is_git_repo(p) and str(p) not in seen:
+            repos.append(p)
+            seen.add(str(p))
+
+    add(root)
     inc_roots = awa_policy.include_roots(cfg)
     scan_bases = [root / r for r in inc_roots] if inc_roots else [root]
+    for seg in mode_scan_bases(cfg):
+        base = root / seg
+        if base not in scan_bases:
+            scan_bases.append(base)
     for base in scan_bases:
         if not base.is_dir():
             continue
+        add(base)  # an exact mode key can name a repo directly
         for child in sorted(base.iterdir()):
-            if child.is_dir() and is_git_repo(child) and str(child) not in seen:
-                repos.append(child)
-                seen.add(str(child))
+            if child.is_dir():
+                add(child)
     return repos
 
 
@@ -339,6 +367,8 @@ def build(root: Path, timeout: float) -> dict:
     cfg = awa_policy.PolicyConfig.load(_policy_path())
     default_base = "main"
     repos_out: list[dict] = []
+
+    ask_on_count = 0
 
     summary = {
         "repos": 0,
@@ -359,6 +389,21 @@ def build(root: Path, timeout: float) -> dict:
         repo_str = str(repo)
         rel = awa_policy.rel_to_root(repo_str, str(root))
         cls, reason, owner_repo = classify_repo(repo_str, rel, cfg, timeout)
+
+        # Resolved explicit mode (additive-within-v1): "" (no matching modes entry),
+        # a valid value (on|ask_on|off), or "invalid" when a matching entry carries an
+        # unrecognized value. mode_error is populated only for the invalid case.
+        raw_mode = awa_policy.mode_for(rel, cfg)
+        if raw_mode == "":
+            mode = ""
+            mode_error = ""
+        elif raw_mode in awa_policy.MODE_VALUES:
+            mode = raw_mode
+            mode_error = ""
+        else:
+            mode = "invalid"
+            mode_error = f"invalid mode value {raw_mode!r} for '{rel}' (expected one of {', '.join(awa_policy.MODE_VALUES)})"
+
         base = base_ref(repo_str, timeout)
 
         rc, out = git(repo_str, "worktree", "list", "--porcelain", timeout=timeout)
@@ -389,6 +434,8 @@ def build(root: Path, timeout: float) -> dict:
             "name": repo.name,
             "classification": cls,
             "reason": reason,
+            "mode": mode,
+            "mode_error": mode_error,
             "owner_repo": owner_repo,
             "has_base": base is not None,
             "base_ref": base or "",
@@ -399,7 +446,13 @@ def build(root: Path, timeout: float) -> dict:
         })
 
         summary["repos"] += 1
-        summary[{"include": "included", "exclude": "excluded", "advisory": "advisory"}[cls]] += 1
+        # `ask_on` is a distinct bucket (tracked separately + surfaced as an optional key);
+        # .get() keeps this resilient to any future open-vocabulary classification value.
+        skey = {"include": "included", "exclude": "excluded", "advisory": "advisory"}.get(cls)
+        if skey:
+            summary[skey] += 1
+        if cls == awa_policy.ASK_ON:
+            ask_on_count += 1
         for wt in worktrees:
             summary["worktrees"] += 1
             if wt["is_linked"]:
@@ -415,6 +468,12 @@ def build(root: Path, timeout: float) -> dict:
             if wt["ab_status"] == "no-base":
                 summary["no_base"] += 1
         summary["orphan_branches"] += len(orphan_branches)
+
+    # Optional additive-within-v1 key: surface the ask_on bucket whenever any repo resolved
+    # to ask_on OR explicit modes are configured (so a host running the mode feature always
+    # sees the counter). Absent otherwise -> byte-stable with pre-mode emitter output.
+    if ask_on_count > 0 or cfg.modes:
+        summary["ask_on"] = ask_on_count
 
     return {
         "schema": SCHEMA,

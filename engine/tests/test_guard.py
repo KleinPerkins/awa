@@ -30,6 +30,25 @@ detectors:
     - husky
 """
 
+# Same shape as _POLICY_YAML, with an injectable body ({body}) for per-repo mode /
+# default_mode cases. `repo` is the rel of the default make_repo() under the governed root.
+_POLICY_MODE_YAML = """\
+version: 1
+governed_roots:
+  - {root}
+default: include
+include:
+  - '*'
+exclude:
+  - .
+{body}
+detectors:
+  governed_markers:
+    - _ops/POLICY.md
+  foreign_hook_frameworks:
+    - husky
+"""
+
 
 class TestMutatingClassifier(unittest.TestCase):
     def test_adversarial_bypasses(self):
@@ -62,6 +81,12 @@ class TestDecideShellDegraded(EngineTestCase):
     def _policy_for(self, root: str) -> str:
         p = tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False)
         p.write(_POLICY_YAML.format(root=root))
+        p.close()
+        return p.name
+
+    def _mode_policy_for(self, root: str, body: str) -> str:
+        p = tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False)
+        p.write(_POLICY_MODE_YAML.format(root=root, body=body))
         p.close()
         return p.name
 
@@ -107,6 +132,34 @@ class TestDecideShellDegraded(EngineTestCase):
         d = guard.decide_shell(repo, "git commit -am x", pol)
         self.assertEqual(d.permission, "allow")
         self.assertEqual(d.classification, "exclude")
+
+    def test_ask_on_primary_mutation_asks(self):
+        repo = self.make_repo()
+        pol = self._mode_policy_for(self._tmp.name, "default_mode: ask_on")
+        d = guard.decide_shell(repo, "git commit -am x", pol)
+        self.assertEqual(d.permission, "ask")
+        self.assertEqual(d.classification, "ask_on")
+
+    def test_ask_on_primary_readonly_allows(self):
+        repo = self.make_repo()
+        pol = self._mode_policy_for(self._tmp.name, "default_mode: ask_on")
+        d = guard.decide_shell(repo, "git status", pol)
+        self.assertEqual(d.permission, "allow")
+        self.assertEqual(d.classification, "ask_on")
+
+    def test_off_primary_mutation_allows(self):
+        repo = self.make_repo()
+        pol = self._mode_policy_for(self._tmp.name, "default_mode: off")
+        d = guard.decide_shell(repo, "git commit -am x", pol)
+        self.assertEqual(d.permission, "allow")
+        self.assertEqual(d.classification, "exclude")
+
+    def test_invalid_explicit_mode_asks(self):
+        repo = self.make_repo()
+        pol = self._mode_policy_for(self._tmp.name, "modes:\n  repo: bogus")
+        d = guard.decide_shell(repo, "git commit -am x", pol)
+        self.assertEqual(d.permission, "ask")
+        self.assertEqual(d.classification, "ask_on")
 
 
 class TestCanClean(EngineTestCase):
