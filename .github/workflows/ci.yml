@@ -29,20 +29,25 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ['3.9', '3.12']
-    env:
-      # Belt-and-suspenders: pin HOME/XDG into the runner temp so nothing touches a real home.
-      HOME: ${{ runner.temp }}/awa-home
-      XDG_DATA_HOME: ${{ runner.temp }}/awa-home/.local/share
-      XDG_CONFIG_HOME: ${{ runner.temp }}/awa-home/.config
-      XDG_STATE_HOME: ${{ runner.temp }}/awa-home/.local/state
     steps:
       # SHA-pinned (supply-chain hardening): tags are mutable, full commit SHAs are immutable.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Prepare throwaway HOME
-        run: mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
+      # Point HOME/XDG at a throwaway dir so CI never mutates a real home. $RUNNER_TEMP is a
+      # runtime env var (available in run: shells); the `runner` CONTEXT is NOT permitted in a
+      # job-level `env:` block, so export via $GITHUB_ENV from a step instead.
+      - name: Point HOME/XDG at a throwaway dir
+        run: |
+          H="$RUNNER_TEMP/awa-home"
+          mkdir -p "$H/.local/share" "$H/.config" "$H/.local/state"
+          {
+            echo "HOME=$H"
+            echo "XDG_DATA_HOME=$H/.local/share"
+            echo "XDG_CONFIG_HOME=$H/.config"
+            echo "XDG_STATE_HOME=$H/.local/state"
+          } >> "$GITHUB_ENV"
       - name: Verify (tests + contract freeze + zero-link + install --check)
         run: make verify
       - name: Verify full install lifecycle (throwaway HOME)

@@ -36,7 +36,7 @@ tool = os.environ.get("DEV_WORKTREE", "dev-worktree.sh")
 payload = {
     "cwd": cwd,
     "status": status,
-    "updated_at": datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    "updated_at": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
 }
 pathlib.Path(cache).write_text(json.dumps(payload, indent=2) + "\n")
 if status:
