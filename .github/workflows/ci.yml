@@ -1,8 +1,12 @@
 name: ci
-# CI for the AWA engine: run the full test suite (kernel + engine core, includes the
-# zero-link preflight) on every push/PR and on release tags. stdlib + sqlite3 only —
-# no third-party deps to install. The suite builds scratch git repos in the system temp
-# dir (committing with an inline identity), so no global git config is required.
+# CI for the AWA product (generic kernel + engine + dashboard). Runs the full verification
+# gate on every push/PR and on release tags: engine test suite (kernel + engine core, includes
+# the zero-link preflight + kernel/engine policy parity), the role-resolved contract-freeze
+# check, and the standalone installer's static preflight + full install lifecycle.
+#
+# HEADLESS-SAFE: every step runs with HOME pointed at a throwaway dir under $RUNNER_TEMP, so CI
+# never mutates a real home. stdlib + sqlite3 only — no third-party deps to install. Scratch git
+# repos commit with an inline identity, so no global git config is required.
 
 on:
   push:
@@ -10,7 +14,7 @@ on:
     tags: ['v*']
   pull_request:
 
-# Least privilege: read-only test runner; no write scopes required.
+# Least privilege: read-only runner; no write scopes required.
 permissions:
   contents: read
 
@@ -19,17 +23,27 @@ defaults:
     shell: bash
 
 jobs:
-  test:
+  verify:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ['3.9', '3.12']
+    env:
+      # Belt-and-suspenders: pin HOME/XDG into the runner temp so nothing touches a real home.
+      HOME: ${{ runner.temp }}/awa-home
+      XDG_DATA_HOME: ${{ runner.temp }}/awa-home/.local/share
+      XDG_CONFIG_HOME: ${{ runner.temp }}/awa-home/.config
+      XDG_STATE_HOME: ${{ runner.temp }}/awa-home/.local/state
     steps:
       # SHA-pinned (supply-chain hardening): tags are mutable, full commit SHAs are immutable.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Run the engine test suite
-        run: make test
+      - name: Prepare throwaway HOME
+        run: mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
+      - name: Verify (tests + contract freeze + zero-link + install --check)
+        run: make verify
+      - name: Verify full install lifecycle (throwaway HOME)
+        run: make verify-install
