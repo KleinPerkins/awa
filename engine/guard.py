@@ -36,7 +36,8 @@ _GIT_TAKES_ARG = ("-C", "-c", "--git-dir", "--work-tree", "--namespace",
 # `sudo -u root git commit`, `timeout 5 git commit`, `xargs -I{} git commit`, etc. classify
 # non-mutating and fast-path ALLOW — a silent bypass now that the host runs default ask_on.
 _PREFIX_WRAPPERS = ("sudo", "command", "nice", "env", "time", "nohup", "xargs",
-                    "timeout", "ionice", "chrt", "stdbuf")
+                    "timeout", "ionice", "chrt", "stdbuf", "builtin", "exec", "doas",
+                    "run0", "setsid")
 # Per-wrapper VALUE-TAKING options (consume the following token). Leading `-` flags NOT in
 # these sets are treated as valueless flags. Long `--opt=value` forms carry their own value.
 _WRAPPER_VALUE_OPTS = {
@@ -51,7 +52,13 @@ _WRAPPER_VALUE_OPTS = {
     "chrt": {"-p", "--pid"},
     "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
     "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "doas": {"-u", "-a", "-C", "-n", "-L", "-l", "-i", "-k", "-p", "-r", "-s", "-t", "-w"},
+    "run0": {"-u", "-g", "-G", "-D", "-M"},
 }
+# Shell/script interpreters whose -c/-e body must be recursively classified.
+_INTERPRETERS = frozenset({"bash", "sh", "dash", "zsh", "python3", "python", "perl", "ruby", "node"})
+_SCRIPT_BODY_PROGS = _INTERPRETERS | frozenset({"script"})
+_SCRIPT_OPTS = frozenset({"-c", "-e"})
 # Wrappers whose grammar carries a leading POSITIONAL value after their options (timeout
 # DURATION, chrt PRIORITY) that must also be consumed before the real program.
 _WRAPPER_POSITIONAL = {"timeout", "chrt"}
@@ -118,6 +125,26 @@ def _skip_wrappers(toks: list[str]) -> int:
     return i
 
 
+def _interpreter_script_body(rest: list[str]) -> str | None:
+    """Extract the script string from an interpreter's -c/-e option, if present."""
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        key = a.split("=", 1)[0]
+        if key in _SCRIPT_OPTS:
+            if "=" in a:
+                return a.split("=", 1)[1]
+            return rest[i + 1] if i + 1 < len(rest) else ""
+        if a.startswith("-") and not a.startswith("--"):
+            i += 1
+            continue
+        if a.startswith("--"):
+            i += 1
+            continue
+        break
+    return None
+
+
 def _rescan_for_mutation(toks: list[str]) -> bool:
     """Conservative backstop: our wrapper-option model left a dangling `-`-prefixed prog, so
     re-scan every token for a known mutating program (git is treated as mutating-capable) and
@@ -145,6 +172,13 @@ def _segment_is_mutating(toks: list[str]) -> bool:
     # Backstop: if stripping wrappers left a dangling option (unmodeled wrapper flag), re-scan.
     if prog.startswith("-"):
         return _rescan_for_mutation(toks[i:])
+    if prog in _SCRIPT_BODY_PROGS:
+        if prog in _INPLACE and any(a == "-i" or a.startswith("-i") for a in rest):
+            return True
+        body = _interpreter_script_body(rest)
+        if body is not None:
+            return classify_mutating(body)
+        return False
     if prog in _MUT:
         return True
     if prog in _INPLACE and any(a == "-i" or a.startswith("-i") for a in rest):

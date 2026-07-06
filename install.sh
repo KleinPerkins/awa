@@ -101,8 +101,14 @@ EOF
   # Cursor hooks (merged, soft backstop) — the installed hooks reference the installed kernel.
   AWA_HOOKS_JSON="$HOOKS_JSON" "$RUNTIME/kernel/hooks/install-hooks.sh"
 
-  # Add-only MCP server (never clobbers other servers).
-  awa_mcp_add "$MCP_JSON" "awa" "$RUNTIME/bin/awa-engine.sh" "mcp-serve"
+  # Add-only MCP server (never clobbers other servers). Emit AWA_POLICY + AWA_GOVERNED_ROOT so
+  # mode tools resolve the host-configured policy without patching _DEFAULT_POLICY at runtime.
+  local host_policy="${AWA_POLICY:-$default_policy}"
+  local governed_root="${AWA_GOVERNED_ROOT:-}"
+  local mcp_env="AWA_POLICY=${host_policy}"
+  [ -n "$governed_root" ] && mcp_env="${mcp_env}
+AWA_GOVERNED_ROOT=${governed_root}"
+  AWA_MCP_ENV="$mcp_env" awa_mcp_add "$MCP_JSON" "awa" "$RUNTIME/bin/awa-engine.sh" "mcp-serve"
   awa_log "registered MCP server 'awa' -> $MCP_JSON"
 
   # Self-describing release pointer. `installed_at` is preserved across re-installs whose

@@ -43,7 +43,8 @@ awa_sync_tree() {
 }
 
 # Add-only merge of an MCP server entry into ~/.cursor/mcp.json. Never clobbers other servers;
-# updates only the named server's command/args. $1=mcp.json path, $2=name, $3=command, rest=args.
+# updates only the named server's command/args/env. $1=mcp.json path, $2=name, $3=command,
+# rest=args. Optional env: pass AWA_MCP_ENV as newline-separated KEY=VALUE pairs.
 awa_mcp_add() {
   local dest="$1" name="$2" command="$3"; shift 3
   local tmp; tmp="$(mktemp)"
@@ -59,7 +60,19 @@ except Exception:
     data = {}
 servers = data.setdefault("mcpServers", {}) if isinstance(data.get("mcpServers", {}), dict) else data.setdefault("mcpServers", {})
 args = [a for a in os.environ.get("AWA_MCP_ARGS", "").split() if a]
-servers[os.environ["AWA_MCP_NAME"]] = {"command": os.environ["AWA_MCP_CMD"], "args": args}
+entry = {"command": os.environ["AWA_MCP_CMD"], "args": args}
+env_lines = os.environ.get("AWA_MCP_ENV", "").splitlines()
+env = {}
+for line in env_lines:
+    line = line.strip()
+    if not line or "=" not in line:
+        continue
+    k, v = line.split("=", 1)
+    if k:
+        env[k] = v
+if env:
+    entry["env"] = env
+servers[os.environ["AWA_MCP_NAME"]] = entry
 open(path, "w").write(json.dumps(data, indent=2) + "\n")
 PY
   awa_write_backup "$dest" < "$tmp"

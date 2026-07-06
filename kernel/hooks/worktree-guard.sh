@@ -87,7 +87,8 @@ _INPLACE = {"sed", "perl", "gawk", "awk"}
 # commit`, `env -C /r git commit`, `timeout 5 git commit`, `xargs -I{} git commit`, etc.
 # classify non-mutating and fast-path ALLOW — a silent bypass under default ask_on.
 _PREFIX_WRAPPERS = ("sudo", "command", "nice", "env", "time", "nohup", "xargs",
-                    "timeout", "ionice", "chrt", "stdbuf")
+                    "timeout", "ionice", "chrt", "stdbuf", "builtin", "exec", "doas",
+                    "run0", "setsid")
 _WRAPPER_VALUE_OPTS = {
     "env": {"-C", "--chdir", "-u", "--unset", "-S", "--split-string"},
     "nice": {"-n", "--adjustment"},
@@ -100,8 +101,13 @@ _WRAPPER_VALUE_OPTS = {
     "chrt": {"-p", "--pid"},
     "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
     "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "doas": {"-u", "-a", "-C", "-n", "-L", "-l", "-i", "-k", "-p", "-r", "-s", "-t", "-w"},
+    "run0": {"-u", "-g", "-G", "-D", "-M"},
 }
 _WRAPPER_POSITIONAL = {"timeout", "chrt"}
+_INTERPRETERS = frozenset({"bash", "sh", "dash", "zsh", "python3", "python", "perl", "ruby", "node"})
+_SCRIPT_BODY_PROGS = _INTERPRETERS | frozenset({"script"})
+_SCRIPT_OPTS = frozenset({"-c", "-e"})
 
 
 def _segments(command: str):
@@ -156,6 +162,26 @@ def _skip_wrappers(toks) -> int:
     return i
 
 
+def _interpreter_script_body(rest):
+    """Extract the script string from an interpreter's -c/-e option, if present."""
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        key = a.split("=", 1)[0]
+        if key in _SCRIPT_OPTS:
+            if "=" in a:
+                return a.split("=", 1)[1]
+            return rest[i + 1] if i + 1 < len(rest) else ""
+        if a.startswith("-") and not a.startswith("--"):
+            i += 1
+            continue
+        if a.startswith("--"):
+            i += 1
+            continue
+        break
+    return None
+
+
 def _rescan_for_mutation(toks) -> bool:
     """Conservative backstop when wrapper-stripping leaves a dangling `-`-prefixed prog."""
     for t in toks:
@@ -179,6 +205,13 @@ def _segment_is_mutating(toks) -> bool:
     rest = toks[i + 1:]
     if prog.startswith("-"):
         return _rescan_for_mutation(toks[i:])
+    if prog in _SCRIPT_BODY_PROGS:
+        if prog in _INPLACE and any(a == "-i" or a.startswith("-i") for a in rest):
+            return True
+        body = _interpreter_script_body(rest)
+        if body is not None:
+            return classify_mutating(body)
+        return False
     if prog in _MUT:
         return True
     if prog in _INPLACE and any(a == "-i" or a.startswith("-i") for a in rest):

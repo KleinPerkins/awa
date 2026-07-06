@@ -30,9 +30,10 @@ from . import (
 
 # The HOST supplies the policy file (include/exclude globs + governed-marker literals); the
 # engine ships none of its own (host-agnostic, §zero-link). Default to $AWA_POLICY when the host
-# sets it, else a repo-relative guess — an absent file degrades to the resolver's safe default.
+# sets it, else the installed kernel's generic default template (parity with worktree-guard.sh).
+_AWA_HOME = os.environ.get("AWA_HOME") or str(Path(__file__).resolve().parent.parent)
 _DEFAULT_POLICY = os.environ.get("AWA_POLICY") or str(
-    Path(__file__).resolve().parent.parent / "policy" / "worktree-policy.yml"
+    Path(_AWA_HOME) / "kernel" / "policy" / "default-worktree-policy.yml"
 )
 
 

@@ -99,11 +99,16 @@ a UAT asserting the gate returns `ask` on an included primary checkout:
 - `sed -i` / `perl -i` in-place edits.
 - `>` / `>>` file redirection (to a real path, not `/dev/null` or an fd-dup like `2>&1`).
 - in-place mutators (`rm`/`mv`/`cp`/`tee`/`truncate`/`dd`/`chmod`/…) and package installs.
+- interpreter one-liners (`bash -c "git commit"`, `python3 -c`, `perl -e`) and privilege wrappers
+  (`builtin`, `exec`, `doas`, `run0`, `setsid`, `script -c`) — the script body is recursively
+  classified.
 
 **Honest residual (documented, not hidden).** A shell gate is a **backstop, not a sandbox**. A
 determined command can always encode a write the classifier does not model (e.g.
 `python -c 'open("f","w").write(...)'`, a base64-decoded script, an interpreter one-liner). AWA does
-**not** claim to intercept every possible write path. Two compensations make this acceptable: (1) the
+**not** claim to intercept every possible write path. Cross-cwd `git -C <primary> commit` from a
+linked worktree is another documented blind spot (the gate classifies the payload cwd, not a `-C`
+target). Two compensations make this acceptable: (1) the
 gate only needs to fire on the **included primary** checkout, where the operator should be in a Safe
 Workspace anyway (the classifier is intentionally conservative / over-asks there); (2) native file
 edits to a primary are independently **detected** via the `afterFileEdit` metadata receipt
