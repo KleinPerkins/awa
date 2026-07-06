@@ -48,6 +48,36 @@ AWA ships a **generic** default policy with zero governed roots. To govern your 
 root(s), include/exclude globs, and detectors. The product stays generic; your policy is the only
 place org/host literals live, and it is never vendored or published.
 
+### Per-repo mode (ON / ASK_ON / OFF)
+
+Each governed repo has an explicit AWA **mode** you can set and inspect:
+
+- **ON** — AWA asks before a mutating command on your main checkout and steers work into a Safe
+  Workspace. Full protection; the only mode that may run a repo's committed worktree-setup.
+- **ASK_ON** — same ask-and-steer nudge as ON, but the repo shows in its own dashboard bucket and
+  will **not** run repo-committed setup. A good "protect but don't auto-run anything" default.
+- **OFF** — AWA leaves the repo alone (no ask, no Safe Workspace).
+
+Modes live in a tool-owned, source-tracked modes file (schema `awa-modes/v1`) that your policy
+points at via `modes_file:`. You never hand-edit it — set and inspect modes through the CLI or the
+MCP tools:
+
+```bash
+dev-worktree.sh mode list                 # show every configured repo + the default
+dev-worktree.sh mode get   projects/foo    # resolved mode for one repo
+dev-worktree.sh mode set   projects/foo on # set a repo to on | ask_on | off
+dev-worktree.sh mode remove projects/foo   # drop the explicit entry (fall back to the default)
+dev-worktree.sh mode sync                  # materialize eligible repos to the default (idempotent)
+```
+
+The same operations are exposed as MCP tools for plain-language use: `awa_mode_list` / `awa_mode_get`
+(read) and `awa_mode_set` / `awa_mode_remove` / `awa_mode_repair` / `awa_mode_sync` (write, scoped to
+the modes file only — they never touch a repo, git, or your primary checkout).
+
+**Default posture.** A repo with no explicit entry falls back to `default_mode`. The shipped default
+is `on` (byte-for-byte back-compatible). A host may set `default_mode: ask_on` so eligible repos are
+protected-and-asked by default without opting any of them into setup execution.
+
 ## Install verbs
 
 | Command | Effect |
@@ -64,7 +94,8 @@ them. `make verify-install` exercises the whole install lifecycle in a throwaway
 ## Command surface
 
 The kernel worktree CLI (`dev-worktree.sh`, frozen verbs): `status`, `ensure`, `list`, `clean`,
-`doctor`, `policy-check`, `dashboard-data`.
+`doctor`, `policy-check`, `dashboard-data`, plus the additive `mode` verb (see
+[Per-repo mode](#per-repo-mode-on--ask_on--off)).
 
 The engine (`awa-engine <verb>`, launched by `bin/awa-engine.sh`): `doctor`, lifecycle
 (`adopt`/`attest`/`apply-back`/`publish`/`retire`/`lease-read`), recovery
