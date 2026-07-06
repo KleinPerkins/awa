@@ -16,6 +16,7 @@ eases (it never becomes a new safety dependency). Its two jobs:
 
 from __future__ import annotations
 
+import calendar
 import errno
 import fcntl
 import json
@@ -119,7 +120,11 @@ def cleanup_quarantine_refs(state: state_mod.State, *, now: float | None = None,
         if not ra:
             continue
         try:
-            expiry = time.mktime(time.strptime(ra, "%Y-%m-%dT%H:%M:%SZ"))
+            # `retire_after` is always UTC (written via time.gmtime()). `calendar.timegm`
+            # interprets the parsed struct_time as UTC; `time.mktime` would wrongly treat
+            # it as LOCAL time, skewing expiry by the host's UTC offset on every non-UTC
+            # machine (bug: refs lingered/expired hours early depending on timezone sign).
+            expiry = calendar.timegm(time.strptime(ra, "%Y-%m-%dT%H:%M:%SZ"))
         except (ValueError, TypeError):
             continue
         if expiry > now:

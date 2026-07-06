@@ -31,28 +31,44 @@ _GITMUT = {"commit", "add", "reset", "rebase", "checkout", "switch", "clean",
 _GIT_TAKES_ARG = ("-C", "-c", "--git-dir", "--work-tree", "--namespace",
                   "--exec-path", "--super-prefix")
 _PREFIX_WRAPPERS = ("sudo", "command", "nice", "env", "time", "nohup", "xargs")
+_CONTROL_OPS = {";", "&&", "||", "&", "|"}
+_REDIRECT_OPS = {">", ">>", ">&", "&>", ">|"}
+_SAFE_REDIRECT_TARGETS = ("/dev/null", "/dev/stdout", "/dev/stderr")
 
 
-def classify_mutating(command: str) -> bool:
-    """Adversary-aware mutating-command detector (parity with worktree-guard.sh).
-
-    Catches `git -C <path> commit`, `git -c k=v commit`, `sed -i`, `>`/`>>`
-    redirection to a real path, in-place mutators, and package installs — not just a
-    bare `git commit`. Unparseable -> True (fail safe / ask).
+def _segments(command: str) -> list[list[str]]:
+    """Split a shell command into per-sub-command token lists at top-level control
+    operators (`;`, `&&`, `||`, `&`, `|`, subshell parens, newlines), respecting
+    quoting, so a mutating sub-command can't hide behind a leading read-only one
+    (e.g. `git status && git commit -am x`). Raises ValueError on unparseable input
+    (unbalanced quotes) so the caller fails safe.
     """
-    if not command or not command.strip():
-        return False
-    for m in re.finditer(r"\d*>>?", command):
-        tail = command[m.end():].lstrip()
-        if not tail or tail.startswith("&"):
+    segs: list[list[str]] = []
+    current: list[str] = []
+    for line in command.split("\n"):
+        if not line.strip():
             continue
-        if tail.startswith(("/dev/null", "/dev/stdout", "/dev/stderr")):
-            continue
-        return True
-    try:
-        toks = shlex.split(command)
-    except ValueError:
-        return True
+        lex = shlex.shlex(line, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        for tok in lex:
+            if tok in _CONTROL_OPS or tok in ("(", ")"):
+                if current:
+                    segs.append(current)
+                    current = []
+                continue
+            current.append(tok)
+    if current:
+        segs.append(current)
+    return segs
+
+
+def _segment_is_mutating(toks: list[str]) -> bool:
+    for idx, tok in enumerate(toks):
+        if tok in _REDIRECT_OPS:
+            target = toks[idx + 1] if idx + 1 < len(toks) else ""
+            if not target or target.isdigit() or target.startswith(_SAFE_REDIRECT_TARGETS):
+                continue
+            return True
     i = 0
     while i < len(toks) and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i])
                              or toks[i] in _PREFIX_WRAPPERS):
@@ -85,6 +101,25 @@ def classify_mutating(command: str) -> bool:
         sub = rest[j] if j < len(rest) else ""
         return sub in _GITMUT
     return False
+
+
+def classify_mutating(command: str) -> bool:
+    """Adversary-aware mutating-command detector (parity with worktree-guard.sh).
+
+    Segments the command at top-level control operators (`;`, `&&`, `||`, `&`, `|`,
+    subshell parens, newlines) and checks every segment, so `git status && git commit`
+    or `true; rm -rf x` can't hide a mutation behind a read-only leader. Per-segment,
+    catches `git -C <path> commit`, `git -c k=v commit`, `sed -i`, `>`/`>>` redirection
+    to a real path, in-place mutators, and package installs. Unparseable -> True (fail
+    safe / ask).
+    """
+    if not command or not command.strip():
+        return False
+    try:
+        segs = _segments(command)
+    except ValueError:
+        return True
+    return any(_segment_is_mutating(toks) for toks in segs)
 
 
 @dataclass
