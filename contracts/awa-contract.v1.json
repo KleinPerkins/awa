@@ -2,9 +2,22 @@
   "contract": "awa-kernel-contract",
   "version": 1,
   "frozen": "2026-07-04",
-  "rationale": "Phase-0 kernel-contract freeze (plan v2.1 §R Phase 0). These surfaces are the kernel's public interface. The engine (Phases 2-9) may only BACK them; it must NEVER change a frozen surface without a versioned bump (a v2 contract file). Additive, backward-compatible fields (new OPTIONAL keys) are allowed WITHIN v1; REMOVING or RENAMING a required verb/flag/key, or changing the schema string, is a breaking change that requires awa-contract.v2.json. _ops/checks/awa-contract-freeze.sh enforces the floor (every required surface is present) against the live shims.",
+  "reframed": "2026-07-05",
+  "location_frozen": false,
+  "rationale": "The frozen kernel contract is BEHAVIOR ONLY: the CLI verbs/flags, the awa-worktree/v1 dashboard JSON shape, the guard permission schema, and the .awa/lease.json shape. These surfaces are the kernel's public interface; the engine may only BACK them, never silently change them. Removing/renaming a required verb/flag/key, or changing a schema string, is a breaking change that requires a versioned bump (awa-contract.v2.json). Additive, backward-compatible fields (new OPTIONAL keys) are allowed WITHIN v1. FILE LOCATIONS ARE NOT FROZEN: the shim/hook/emitter paths recorded below are informational and resolved by ROLE (AWA_HOME / the installed release path / a host overlay), because location was never the interface. Re-homing the generic kernel from a host's _ops/ into KleinPerkins/awa/kernel/ therefore needs NO contract bump (D-CONTRACT). The in-repo role-resolved freeze checker (kernel/checks/awa-contract-freeze.sh) enforces the behavior floor against the live shims wherever they are installed.",
+  "informational": {
+    "note": "NOT part of the frozen interface. These record where the reference implementation ships inside KleinPerkins/awa; hosts/installs MAY relocate them. The freeze checker resolves the live shims BY ROLE (AWA_HOME or the installed path), never by these literals.",
+    "resolved_by_role": {
+      "cli": "kernel/bin/dev-worktree.sh",
+      "guard_hook": "kernel/hooks/worktree-guard.sh",
+      "session_hook": "kernel/hooks/worktree-session.sh",
+      "dashboard_emitter": "dashboard/emitter.py"
+    }
+  },
   "cli": {
-    "tool": "_ops/bin/dev-worktree.sh",
+    "tool": "kernel/bin/dev-worktree.sh",
+    "tool_frozen": false,
+    "tool_note": "INFORMATIONAL — reference-impl location, NOT frozen. Resolved by role (AWA_HOME/kernel/bin/dev-worktree.sh or the installed release). Only the verbs + flags below are frozen behavior.",
     "verbs": ["status", "ensure", "list", "clean", "doctor", "policy-check", "dashboard-data"],
     "flags": {
       "ensure": ["--base", "--branch", "--path", "--json"],
@@ -34,7 +47,9 @@
     "additive_note": "The Phase-0/8 dashboard (X4) MAY add OPTIONAL top-level/summary keys (e.g. promise-state, scope, degraded, stale) additively without a version bump; the required key sets above are the immutable floor."
   },
   "guard_permission": {
-    "hook": "_ops/cursor-hooks/worktree-guard.sh",
+    "hook": "kernel/hooks/worktree-guard.sh",
+    "hook_frozen": false,
+    "hook_note": "INFORMATIONAL — reference-impl location, NOT frozen. Resolved by role (AWA_HOME/kernel/hooks/worktree-guard.sh or the installed release). Only the permission schema below is frozen behavior.",
     "permission_values": ["allow", "ask", "deny"],
     "allow_shape": ["permission"],
     "ask_shape": ["permission", "user_message", "agent_message"],

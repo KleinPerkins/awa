@@ -1,0 +1,46 @@
+# AWA default worktree policy — GENERIC TEMPLATE (ships with KleinPerkins/awa).
+#
+# This file carries ZERO org/host literals. It is the safe, host-agnostic default the
+# standalone installer points AWA_POLICY at. A HOST OVERLAY supplies its own policy
+# (via AWA_POLICY) that MAY name org/vendor paths, because that overlay is machine-local
+# and is never vendored/published. See ARCHITECTURE.md — "the product ships a generic
+# kernel; the host supplies only a policy overlay".
+#
+# The kernel also carries conservative built-in defaults (see kernel/lib/awa_policy.py),
+# so a syntax mistake here can never make a primary checkout LESS safe.
+version: 1
+
+# Roots under which AWA is allowed to make worktree decisions. EMPTY by default: with no
+# governed root, AWA treats the CURRENT repository as its own context (never an umbrella),
+# so a freshly cloned standalone repo is eligible for a Safe Workspace. A host overlay (or
+# the AWA_GOVERNED_ROOT env var) sets the real governed root(s).
+governed_roots: []
+
+# Where agent-created fallback worktrees live when Cursor's native worktree path is not used.
+managed_location: ~/.cursor/worktrees
+
+# Default classification for an eligible repo (has an origin) when no exclude matches.
+default: include
+
+# Host-supplied include/exclude globs, relative to a governed root. Empty in the template.
+include: []
+exclude: []
+
+detectors:
+  # A repo that ships its OWN governance marker is self-governed -> excluded GENERICALLY.
+  # This is how a self-governed sibling repo is left alone WITHOUT ever naming it.
+  governed_markers:
+    - _ops/POLICY.md
+  # A repo whose core.hooksPath points at one of these foreign frameworks is excluded
+  # (AWA must not fight another repo's hook manager).
+  foreign_hook_frameworks:
+    - husky
+    - lefthook
+    - pre-commit
+  # Host-supplied read-only / reference path globs (e.g. vendored clones). Empty here.
+  read_only_paths: []
+
+# Explicit operator overrides (highest precedence), relative to a governed root.
+overrides:
+  include: []
+  exclude: []

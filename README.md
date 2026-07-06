@@ -1,65 +1,96 @@
-# AWA — Agent Worktree Automation (engine)
+# AWA — Agent Worktree Automation
 
 **AWA keeps agent work off your main checkout.** When an agent (or you) starts mutating a
-repository, AWA steers the work into an isolated `git` worktree ("Safe Workspace"), detects
-native edits to the primary checkout, refuses unsafe cleanups, and can recover uncommitted work
-— so your main branch stays clean and nothing gets silently lost.
+repository, AWA steers the work into an isolated `git` worktree ("Safe Workspace"), detects native
+edits to the primary checkout, refuses unsafe cleanups, and can recover uncommitted work — so your
+main branch stays clean and nothing gets silently lost.
 
-This repository is the **AWA engine**: the durable, testable software home for the system. It is
-the pinned artifact that the global `tools/awa` capability shelf points at, and that a host
-installs alongside its own machine-local kernel shims.
+AWA is **one self-contained product**: a generic **kernel** (the safety layer — a `git worktree`
+CLI, a `beforeShellExecution` guard, an `afterFileEdit` detector, a policy resolver, a render-only
+status dashboard) and a generic **engine** (durable state, recovery, a single-instance daemon, an
+MCP server). Both ship here and both are **zero-link** — they name no organization. Every
+host/org-specific fact lives only in a machine-local **policy overlay** (`AWA_POLICY`).
 
-> Kernel-first (frozen): the safety guarantee holds with the engine/daemon **OFF**. The engine
-> only observes, bookkeeps, and eases. See [`ARCHITECTURE.md`](ARCHITECTURE.md).
-
-## What's in here
-
-```
-engine/                 Python package (stdlib + sqlite3 only) — the kernel core + engine layers
-  paths identity gitutil policy lock state lease lifecycle recovery daemon guard mcp_server remote
-  redact                S5 secret/PII redaction pass for the audit/command log
-  cli __main__          the `awa-engine` command surface
-  tests/                the full test suite (unittest; local-only, no network)
-bin/awa-engine.sh       launcher — puts the repo root on PYTHONPATH and runs `python3 -m engine`
-contracts/              the FROZEN kernel contract (awa-contract.v1.json)
-hook-probe/             operator harness for empirically probing live editor hooks
-ARCHITECTURE.md         the kernel-first design invariant + engine module map
-SECURITY.md             the Cluster-D security ledger (S1–S6) + threat model
-```
+> Kernel-first (frozen): the safety guarantee holds with the engine/daemon **OFF**. The engine only
+> observes, bookkeeps, and eases. See [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Requirements
 
 - Python **3.9+** (standard library + `sqlite3` only — no third-party dependencies).
 - `git` on `PATH`.
 
-## Quick start
+## Clone and install
 
 ```bash
-# Run the engine CLI (JSON on stdout; human notes on stderr):
-bin/awa-engine.sh doctor
-bin/awa-engine.sh --help
-
-# Run the test suite:
-make test           # or: bash engine/tests/run-tests.sh
+git clone git@github.com:KleinPerkins/awa.git
+cd awa
+./install.sh            # idempotent, backup-before-write; installs into your XDG dirs
+./install.sh --doctor   # read-only health check of the install
+make verify             # tests + contract freeze + zero-link + install --check
 ```
 
-The engine reads its repo-classification policy from the **host**. Point it at a host policy
-file with `AWA_POLICY=/path/to/worktree-policy.yml` (or the `--policy` flag on the guard verb);
-absent a policy, the resolver degrades to a safe default. The engine ships **no** policy of its
-own and carries **zero** host/organization-specific literals (see `ARCHITECTURE.md` §zero-link).
+`install.sh` copies a self-contained runtime into `$XDG_DATA_HOME/awa/current`, writes a config env
+(`$XDG_CONFIG_HOME/awa/env`), merges the Cursor hooks (a fail-open soft backstop) into
+`~/.cursor/hooks.json`, registers an add-only `awa` MCP server in `~/.cursor/mcp.json`, and writes a
+self-describing release pointer. There is **no** sibling-repo dependency — a fresh clone installs on
+its own. `bootstrap.sh` is a one-command "clone + install" convenience.
 
-## Command surface (backs the frozen kernel)
+To put AWA on your `PATH`, source the generated env (or add it to your shell profile):
 
-`awa-engine <verb>` — grouped verbs: `doctor`, lifecycle (`adopt`/`attest`/`apply-back`/
-`publish`/`retire`/`lease-read`), recovery (`recover patch|bundle|restore-patch|list`), guard
-(`guard shell`/`guard can-clean` — the engine-off kernel guarantee), `daemon` (`status`/
-`run-once`), `events`, and `mcp-serve` (a stdio JSON-RPC MCP server exposing read-only tools).
+```bash
+source "${XDG_CONFIG_HOME:-$HOME/.config}/awa/env"
+```
+
+### Point AWA at your repos (the policy overlay)
+
+AWA ships a **generic** default policy with zero governed roots. To govern your repos, set
+`AWA_GOVERNED_ROOT` (or supply a full policy file via `AWA_POLICY`) that names your governed
+root(s), include/exclude globs, and detectors. The product stays generic; your policy is the only
+place org/host literals live, and it is never vendored or published.
+
+## Install verbs
+
+| Command | Effect |
+|---|---|
+| `./install.sh` | Install / reconcile (idempotent) |
+| `./install.sh --repair` | Force re-copy the runtime + re-wire hooks/mcp |
+| `./install.sh --doctor` | Read-only health check of the install |
+| `./install.sh --check` | CI-safe static preflight (writes nothing to `$HOME`) |
+| `./install.sh --uninstall [--keep-state]` | Remove the install (`--keep-state` preserves recovery state) |
+
+Equivalent `make` targets exist (`make install|repair|doctor|check|uninstall`); `make help` lists
+them. `make verify-install` exercises the whole install lifecycle in a throwaway `HOME`.
+
+## Command surface
+
+The kernel worktree CLI (`dev-worktree.sh`, frozen verbs): `status`, `ensure`, `list`, `clean`,
+`doctor`, `policy-check`, `dashboard-data`.
+
+The engine (`awa-engine <verb>`, launched by `bin/awa-engine.sh`): `doctor`, lifecycle
+(`adopt`/`attest`/`apply-back`/`publish`/`retire`/`lease-read`), recovery
+(`recover patch|bundle|restore-patch|list`), guard (`guard shell`/`guard can-clean` — the
+engine-off kernel guarantee), `daemon` (`status`/`run-once`), `events`, and `mcp-serve` (a stdio
+JSON-RPC MCP server exposing read-only tools).
+
+## Layout
+
+```
+kernel/       generic safety layer — dev-worktree CLI, guard/session/install hooks,
+              awa_policy resolver, default policy template, role-resolved freeze checker
+engine/       Python package (stdlib + sqlite3) that BACKS the kernel; tests/ is the full suite
+dashboard/    generic, data-free status dashboard (emitter.py + seed.canvas.tsx)
+contracts/    the FROZEN, behavior-only kernel contract (awa-contract.v1.json)
+bin/          awa-engine.sh launcher
+install.sh    Standalone System Package installer; bootstrap.sh = clone + install
+ARCHITECTURE.md / SECURITY.md   the design invariant + the Cluster-D security ledger
+```
 
 ## Versioning & the frozen contract
 
-`engine/__init__.py:__version__` is the engine version; releases are tagged (`vX.Y.Z`). The
-kernel contract in `contracts/awa-contract.v1.json` is frozen — the engine may only BACK those
-surfaces. A removal/rename is a breaking change requiring `awa-contract.v2.json`.
+`engine/__init__.py:__version__` is the engine version; releases are tagged (`vX.Y.Z`). The kernel
+contract in `contracts/awa-contract.v1.json` freezes **behavior** (verbs/flags, the `awa-worktree/v1`
+shape, the guard permission schema, the lease shape) — not file locations, which are informational
+and resolved by role. A removal/rename is a breaking change requiring `awa-contract.v2.json`.
 
 ## License
 

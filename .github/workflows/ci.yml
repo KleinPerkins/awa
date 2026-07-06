@@ -1,8 +1,12 @@
 name: ci
-# CI for the AWA engine: run the full test suite (kernel + engine core, includes the
-# zero-link preflight) on every push/PR and on release tags. stdlib + sqlite3 only —
-# no third-party deps to install. The suite builds scratch git repos in the system temp
-# dir (committing with an inline identity), so no global git config is required.
+# CI for the AWA product (generic kernel + engine + dashboard). Runs the full verification
+# gate on every push/PR and on release tags: engine test suite (kernel + engine core, includes
+# the zero-link preflight + kernel/engine policy parity), the role-resolved contract-freeze
+# check, and the standalone installer's static preflight + full install lifecycle.
+#
+# HEADLESS-SAFE: every step runs with HOME pointed at a throwaway dir under $RUNNER_TEMP, so CI
+# never mutates a real home. stdlib + sqlite3 only — no third-party deps to install. Scratch git
+# repos commit with an inline identity, so no global git config is required.
 
 on:
   push:
@@ -10,7 +14,7 @@ on:
     tags: ['v*']
   pull_request:
 
-# Least privilege: read-only test runner; no write scopes required.
+# Least privilege: read-only runner; no write scopes required.
 permissions:
   contents: read
 
@@ -19,7 +23,7 @@ defaults:
     shell: bash
 
 jobs:
-  test:
+  verify:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -31,5 +35,20 @@ jobs:
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Run the engine test suite
-        run: make test
+      # Point HOME/XDG at a throwaway dir so CI never mutates a real home. $RUNNER_TEMP is a
+      # runtime env var (available in run: shells); the `runner` CONTEXT is NOT permitted in a
+      # job-level `env:` block, so export via $GITHUB_ENV from a step instead.
+      - name: Point HOME/XDG at a throwaway dir
+        run: |
+          H="$RUNNER_TEMP/awa-home"
+          mkdir -p "$H/.local/share" "$H/.config" "$H/.local/state"
+          {
+            echo "HOME=$H"
+            echo "XDG_DATA_HOME=$H/.local/share"
+            echo "XDG_CONFIG_HOME=$H/.config"
+            echo "XDG_STATE_HOME=$H/.local/state"
+          } >> "$GITHUB_ENV"
+      - name: Verify (tests + contract freeze + zero-link + install --check)
+        run: make verify
+      - name: Verify full install lifecycle (throwaway HOME)
+        run: make verify-install

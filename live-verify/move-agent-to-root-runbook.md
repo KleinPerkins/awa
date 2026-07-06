@@ -9,12 +9,14 @@ origin). No push to governed remotes unless you explicitly opt into the quaranti
 
 ## Setup (local-only branch — expect move WITHOUT fetch to work or fail honestly)
 
-`dev-worktree.sh ensure` only runs on repos classified **`include`**. That requires **both**:
+`dev-worktree.sh ensure` only runs on repos classified **`include`**. Classification is
+policy-driven (see `kernel/lib/awa_policy.py` + the resolved `AWA_POLICY`); `include` requires **both**:
 
-1. Repo path under `~/dev/personal/*`, `~/dev/capabilities/*`, or `~/dev/affirm/src/*`
+1. Repo path under a governed root — a `governed_roots` entry in the policy (or `AWA_GOVERNED_ROOT`) —
+   and not excluded by a detector (governed-marker / foreign-hook framework / read-only path).
 2. A `remote.origin.url` configured (the remote does **not** need to exist on GitHub for Observation A)
 
-A bare `~/awa-move-uat` outside `~/dev` returns `{"action":"noop","reason":"no origin remote"}` or
+A bare repo outside every governed root returns `{"action":"noop","reason":"no origin remote"}` or
 `outside governed include patterns` — that is policy, not a bug.
 
 ```bash
