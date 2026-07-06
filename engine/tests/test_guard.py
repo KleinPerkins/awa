@@ -76,6 +76,48 @@ class TestMutatingClassifier(unittest.TestCase):
         for cmd in ('echo "a && b"', 'git log --oneline -m "fix: a; b"', 'echo "a | b"'):
             self.assertFalse(guard.classify_mutating(cmd), cmd)
 
+    # Wrapper forms that MUST classify mutating (regression matrix for the option-aware
+    # wrapper-skip fix). Skipping only the wrapper NAME let all of these fast-path allow.
+    WRAPPER_MUTATING = [
+        "nice -n 10 git commit -m x",
+        "env -C /r git commit",
+        "env -i git commit",
+        "env -u FOO git commit",
+        "sudo -u root git commit",
+        "sudo -g grp git commit",
+        "xargs -I{} git commit",
+        "xargs -I {} git commit",
+        "xargs -n 1 git commit",
+        "timeout 5 git commit",
+        "timeout -s KILL 5 git commit",
+        "timeout --signal=KILL 5 git commit",
+        "ionice -c 3 git commit",
+        "chrt -b 0 git commit",
+        "stdbuf -oL git commit",
+        "nice -n 10 rm -rf x",
+        "sudo -u root npm install",
+        "env -C /r sed -i s/a/b/ f",
+        "timeout 5 nice -n 10 git commit",   # nested wrappers
+        "{ git commit; }",                    # brace group (#7)
+        "{ git status; git commit -am x; }",
+    ]
+    WRAPPER_READONLY = [
+        "timeout 5 git status",
+        "nice -n 10 ls -la",
+        "env -C /r cat f",
+        "sudo -u root git status",
+        "{ git status; }",
+        "ionice -c 3 git log",
+    ]
+
+    def test_wrapper_option_forms_are_mutating(self):
+        for cmd in self.WRAPPER_MUTATING:
+            self.assertTrue(guard.classify_mutating(cmd), cmd)
+
+    def test_wrapper_readonly_forms_allowed(self):
+        for cmd in self.WRAPPER_READONLY:
+            self.assertFalse(guard.classify_mutating(cmd), cmd)
+
 
 class TestDecideShellDegraded(EngineTestCase):
     def _policy_for(self, root: str) -> str:
@@ -160,6 +202,39 @@ class TestDecideShellDegraded(EngineTestCase):
         d = guard.decide_shell(repo, "git commit -am x", pol)
         self.assertEqual(d.permission, "ask")
         self.assertEqual(d.classification, "ask_on")
+
+    def test_wrapper_forms_ask_on_primary_include(self):
+        """Each wrapper-obscured mutating form must ASK on an included primary checkout."""
+        repo = self.make_repo()
+        pol = self._policy_for(self._tmp.name)
+        for cmd in ("nice -n 10 git commit -am x", "env -C /r git commit",
+                    "sudo -u root git commit", "timeout 5 git commit",
+                    "xargs -I{} git commit", "{ git commit; }"):
+            d = guard.decide_shell(repo, cmd, pol)
+            self.assertEqual(d.permission, "ask", cmd)
+
+    def test_wrapper_forms_ask_on_primary_ask_on(self):
+        """Same, on an ASK_ON primary checkout (default_mode: ask_on)."""
+        repo = self.make_repo()
+        pol = self._mode_policy_for(self._tmp.name, "default_mode: ask_on")
+        for cmd in ("nice -n 10 git commit -am x", "timeout 5 git commit"):
+            d = guard.decide_shell(repo, cmd, pol)
+            self.assertEqual(d.permission, "ask", cmd)
+
+    def test_unreadable_modes_file_still_asks_on_primary(self):
+        """FAIL-SAFE (#1): an existing-but-unreadable modes_file (a directory) must NOT let a
+        mutating primary command through. It is treated as absent -> default include -> ask."""
+        repo = self.make_repo()
+        # Build a policy that points modes_file at a DIRECTORY (unreadable as a file). Use an
+        # absolute path so it resolves regardless of where the temp policy file lives.
+        modesdir = Path(self._tmp.name) / "modesdir"
+        modesdir.mkdir()
+        pol = tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False)
+        pol.write(_POLICY_MODE_YAML.format(root=self._tmp.name,
+                                           body=f"modes_file: {modesdir}"))
+        pol.close()
+        d = guard.decide_shell(repo, "git commit -am x", pol.name)
+        self.assertEqual(d.permission, "ask")
 
 
 class TestCanClean(EngineTestCase):

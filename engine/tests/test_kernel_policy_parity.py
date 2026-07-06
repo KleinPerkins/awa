@@ -154,6 +154,31 @@ class TestKernelPolicyParity(unittest.TestCase):
             self.assertEqual(k_cfg.modes["proj"], "ask_on")
             self.assertEqual(k_cfg.default_mode, "ask_on")
 
+    def test_missing_policy_defaults_agree(self):
+        """#9: both mirrors return safe defaults for a missing policy path (no raise)."""
+        missing = "/nonexistent/worktree-policy.yml"
+        e_cfg = engine_policy.PolicyConfig.load(missing)
+        k_cfg = awa_policy.PolicyConfig.load(missing)
+        self.assertEqual(e_cfg.default, k_cfg.default)
+        self.assertEqual(e_cfg.default_mode, k_cfg.default_mode)
+        self.assertEqual(e_cfg.modes, k_cfg.modes)
+        self.assertEqual(e_cfg.default_mode, "on")
+
+    def test_unreadable_modes_file_agrees(self):
+        """#1: both mirrors treat an unreadable (directory) modes_file as absent -> the
+        derived posture is preserved identically (fail-safe, byte-parity)."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "worktree-modes.yml").mkdir()
+            pol = Path(d) / "worktree-policy.yml"
+            pol.write_text("version: 1\ndefault: include\nmodes_file: worktree-modes.yml\n",
+                           encoding="utf-8")
+            e_cfg = engine_policy.PolicyConfig.load(str(pol))
+            k_cfg = awa_policy.PolicyConfig.load(str(pol))
+            self.assertEqual(e_cfg.modes, k_cfg.modes)
+            self.assertEqual(e_cfg.default_mode, k_cfg.default_mode)
+            self.assertEqual(e_cfg.modes, {})
+            self.assertEqual(e_cfg.default_mode, "on")
+
 
 if __name__ == "__main__":
     unittest.main()

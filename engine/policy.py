@@ -126,7 +126,16 @@ def _resolve_modes(data: dict, policy_path: str | Path) -> tuple[dict, str]:
             mf = str(base / mf)
         mfp = Path(mf)
         if mfp.exists():
-            fdata = _parse_mini_yaml(mfp.read_text(encoding="utf-8"))
+            # FAIL-SAFE: an existing-but-unreadable modes_file (a directory, a symlink->dir,
+            # or chmod-000) would raise OSError from read_text and propagate through
+            # PolicyConfig.load; the shell classifier degrades ANY classifier crash to a
+            # non-protective class, silently ALLOWING mutation on an included primary checkout.
+            # Treat an unreadable pointer as ABSENT (fdata = {}) so the derived posture
+            # (default_mode / include-default) still protects the repo.
+            try:
+                fdata = _parse_mini_yaml(mfp.read_text(encoding="utf-8"))
+            except OSError:
+                fdata = {}
             fmodes, fdefault = _modes_from_data(fdata)
             modes.update(fmodes)  # referenced file wins on key collision
             if fdefault:
@@ -156,7 +165,13 @@ class PolicyConfig:
 
     @classmethod
     def load(cls, path: str | Path) -> "PolicyConfig":
-        data = _parse_mini_yaml(Path(path).read_text(encoding="utf-8"))
+        # Missing policy -> safe defaults (mirror kernel/lib/awa_policy.py). This keeps
+        # `awa guard shell` / MCP `awa_guard_shell` from crashing on an absent policy path;
+        # the derived posture (default include + default_mode on) still protects a repo.
+        p = Path(path)
+        if not p.exists():
+            return cls()
+        data = _parse_mini_yaml(p.read_text(encoding="utf-8"))
         detectors = data.get("detectors", {}) if isinstance(data.get("detectors"), dict) else {}
         overrides = data.get("overrides", {}) if isinstance(data.get("overrides"), dict) else {}
         modes, default_mode = _resolve_modes(data, path)

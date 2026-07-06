@@ -78,12 +78,36 @@ for source in (data, tool_input):
 _CONTROL_OPS = {";", "&&", "||", "&", "|"}
 _REDIRECT_OPS = {">", ">>", ">&", "&>", ">|"}
 _SAFE_REDIRECT_TARGETS = ("/dev/null", "/dev/stdout", "/dev/stderr")
+_MUT = {"rm", "mv", "cp", "install", "truncate", "dd", "tee", "ln",
+        "chmod", "chown", "mkdir", "rmdir", "shred", "unlink"}
+_PKG = {"npm", "pnpm", "yarn", "pip", "pip3", "bundle", "poetry", "cargo", "go", "brew", "gem"}
+_INPLACE = {"sed", "perl", "gawk", "awk"}
+# Prefix wrappers whose OPTIONS (not just their name) must be skipped before resolving the
+# real program (parity with engine/guard.py). Skipping only the name lets `nice -n 10 git
+# commit`, `env -C /r git commit`, `timeout 5 git commit`, `xargs -I{} git commit`, etc.
+# classify non-mutating and fast-path ALLOW — a silent bypass under default ask_on.
+_PREFIX_WRAPPERS = ("sudo", "command", "nice", "env", "time", "nohup", "xargs",
+                    "timeout", "ionice", "chrt", "stdbuf")
+_WRAPPER_VALUE_OPTS = {
+    "env": {"-C", "--chdir", "-u", "--unset", "-S", "--split-string"},
+    "nice": {"-n", "--adjustment"},
+    "sudo": {"-u", "--user", "-g", "--group", "-C", "--close-from", "-h", "--host",
+             "-p", "--prompt", "-r", "--role", "-t", "--type", "-U", "--other-user",
+             "-D", "--chdir", "-R", "--chroot"},
+    "xargs": {"-I", "-i", "-n", "--max-args", "-P", "--max-procs", "-L", "-s",
+              "--max-chars", "-E", "-d", "--delimiter", "-a", "--arg-file"},
+    "ionice": {"-c", "--class", "-n", "--classdata", "-p", "--pid"},
+    "chrt": {"-p", "--pid"},
+    "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+}
+_WRAPPER_POSITIONAL = {"timeout", "chrt"}
 
 
 def _segments(command: str):
     """Split into per-sub-command token lists at top-level control operators (`;`,
-    `&&`, `||`, `&`, `|`, subshell parens, newlines), respecting quoting. Raises
-    ValueError on unparseable input (unbalanced quotes)."""
+    `&&`, `||`, `&`, `|`, subshell parens, brace groups `{`/`}`, newlines), respecting
+    quoting. Raises ValueError on unparseable input (unbalanced quotes)."""
     segs = []
     current = []
     for line in command.split("\n"):
@@ -92,7 +116,7 @@ def _segments(command: str):
         lex = shlex.shlex(line, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
         for tok in lex:
-            if tok in _CONTROL_OPS or tok in ("(", ")"):
+            if tok in _CONTROL_OPS or tok in ("(", ")", "{", "}"):
                 if current:
                     segs.append(current)
                     current = []
@@ -103,6 +127,44 @@ def _segments(command: str):
     return segs
 
 
+def _skip_wrappers(toks) -> int:
+    """Advance past leading `VAR=value` assignments and prefix wrappers WITH their options,
+    returning the index of the resolved program (parity with engine/guard.py._skip_wrappers)."""
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
+            i += 1
+            continue
+        base = os.path.basename(tok)
+        if base not in _PREFIX_WRAPPERS:
+            break
+        i += 1
+        valopts = _WRAPPER_VALUE_OPTS.get(base, set())
+        while i < len(toks) and toks[i].startswith("-") and toks[i] != "--":
+            opt = toks[i]
+            key = opt.split("=", 1)[0]
+            i += 1
+            if "=" not in opt and key in valopts and i < len(toks):
+                i += 1
+        if i < len(toks) and toks[i] == "--":
+            i += 1
+        if base in _WRAPPER_POSITIONAL and i < len(toks) \
+                and os.path.basename(toks[i]) not in _PREFIX_WRAPPERS \
+                and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i]):
+            i += 1
+    return i
+
+
+def _rescan_for_mutation(toks) -> bool:
+    """Conservative backstop when wrapper-stripping leaves a dangling `-`-prefixed prog."""
+    for t in toks:
+        b = os.path.basename(t)
+        if b in _MUT or b in _PKG or b in _INPLACE or b == "git":
+            return True
+    return False
+
+
 def _segment_is_mutating(toks) -> bool:
     for idx, tok in enumerate(toks):
         if tok in _REDIRECT_OPS:
@@ -110,22 +172,18 @@ def _segment_is_mutating(toks) -> bool:
             if not target or target.isdigit() or target.startswith(_SAFE_REDIRECT_TARGETS):
                 continue
             return True
-    i = 0
-    while i < len(toks) and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i])
-                             or toks[i] in ("sudo", "command", "nice", "env", "time", "nohup", "xargs")):
-        i += 1
+    i = _skip_wrappers(toks)
     if i >= len(toks):
         return False
     prog = os.path.basename(toks[i])
     rest = toks[i + 1:]
-    MUT = {"rm", "mv", "cp", "install", "truncate", "dd", "tee", "ln",
-           "chmod", "chown", "mkdir", "rmdir", "shred", "unlink"}
-    if prog in MUT:
+    if prog.startswith("-"):
+        return _rescan_for_mutation(toks[i:])
+    if prog in _MUT:
         return True
-    if prog in ("sed", "perl", "gawk", "awk") and any(a == "-i" or a.startswith("-i") for a in rest):
+    if prog in _INPLACE and any(a == "-i" or a.startswith("-i") for a in rest):
         return True
-    if prog in ("npm", "pnpm", "yarn", "pip", "pip3", "bundle", "poetry", "cargo", "go", "brew", "gem") \
-       and any(a in ("install", "add", "i") for a in rest):
+    if prog in _PKG and any(a in ("install", "add", "i") for a in rest):
         return True
     if prog == "git":
         j = 0
