@@ -42,6 +42,20 @@ class TestQuarantineCleanup(EngineTestCase):
             remaining = {r["ref"] for r in st.quarantine_refs()}
             self.assertEqual(remaining, {"refs/awa/repo/awa1-new"})
 
+    def test_expiry_is_utc_not_local(self):
+        """Regression: expiry parsing must treat `retire_after` as UTC. A `time.mktime`-based
+        parse silently reinterprets the UTC string as LOCAL time, skewing expiry by the host's
+        UTC offset (bug reproduced live in PDT: ~7h drift). A tight 1-hour margin — far smaller
+        than any real UTC offset — turns that skew into a wrong verdict on any non-UTC host,
+        unlike the ±24h margins above which happen to absorb it."""
+        just_expired = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
+        not_yet = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600))
+        with state_mod.State() as st:
+            st.record_quarantine_ref("refs/awa/repo/awa1-just-old", "/r/.git", retire_after=just_expired)
+            st.record_quarantine_ref("refs/awa/repo/awa1-not-yet", "/r/.git", retire_after=not_yet)
+            cleaned = daemon_mod.cleanup_quarantine_refs(st)
+            self.assertEqual(cleaned, ["refs/awa/repo/awa1-just-old"])
+
     def test_never_touches_non_quarantine_ref(self):
         past = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 86400))
         with state_mod.State() as st:

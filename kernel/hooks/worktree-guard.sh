@@ -75,26 +75,41 @@ for source in (data, tool_input):
         paths.extend(item for item in value if isinstance(item, str) and item)
 
 
-def classify_mutating(command: str) -> bool:
-    """Robust mutating-command detector for the shell gate. Adversary-aware: catches the
-    review-flagged bypasses `git -C <path> commit` (global options before the subcommand),
-    `sed -i` in-place edits, and `>`/`>>` file redirection — not just a bare `git commit`.
-    Conservative on purpose: the gate only fires on an INCLUDED PRIMARY checkout, so
-    over-asking there is the desired nudge-to-worktree, never a silent bypass."""
-    if not command or not command.strip():
-        return False
-    import shlex
-    for m in re.finditer(r"\d*>>?", command):
-        tail = command[m.end():].lstrip()
-        if not tail or tail.startswith("&"):
+_CONTROL_OPS = {";", "&&", "||", "&", "|"}
+_REDIRECT_OPS = {">", ">>", ">&", "&>", ">|"}
+_SAFE_REDIRECT_TARGETS = ("/dev/null", "/dev/stdout", "/dev/stderr")
+
+
+def _segments(command: str):
+    """Split into per-sub-command token lists at top-level control operators (`;`,
+    `&&`, `||`, `&`, `|`, subshell parens, newlines), respecting quoting. Raises
+    ValueError on unparseable input (unbalanced quotes)."""
+    segs = []
+    current = []
+    for line in command.split("\n"):
+        if not line.strip():
             continue
-        if tail.startswith(("/dev/null", "/dev/stdout", "/dev/stderr")):
-            continue
-        return True
-    try:
-        toks = shlex.split(command)
-    except ValueError:
-        return True  # unparseable -> fail safe (ask)
+        lex = shlex.shlex(line, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        for tok in lex:
+            if tok in _CONTROL_OPS or tok in ("(", ")"):
+                if current:
+                    segs.append(current)
+                    current = []
+                continue
+            current.append(tok)
+    if current:
+        segs.append(current)
+    return segs
+
+
+def _segment_is_mutating(toks) -> bool:
+    for idx, tok in enumerate(toks):
+        if tok in _REDIRECT_OPS:
+            target = toks[idx + 1] if idx + 1 < len(toks) else ""
+            if not target or target.isdigit() or target.startswith(_SAFE_REDIRECT_TARGETS):
+                continue
+            return True
     i = 0
     while i < len(toks) and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i])
                              or toks[i] in ("sudo", "command", "nice", "env", "time", "nohup", "xargs")):
@@ -131,6 +146,23 @@ def classify_mutating(command: str) -> bool:
                   "pull", "am", "revert", "worktree", "push", "fetch"}
         return sub in GITMUT
     return False
+
+
+def classify_mutating(command: str) -> bool:
+    """Robust mutating-command detector for the shell gate. Adversary-aware: catches the
+    review-flagged bypasses `git -C <path> commit` (global options before the subcommand),
+    `sed -i` in-place edits, `>`/`>>` file redirection, and command chaining (`;`, `&&`,
+    `||`, `|`) that would otherwise hide a mutating sub-command behind a read-only leader
+    (e.g. `git status && git commit`) — not just a bare `git commit`. Conservative on
+    purpose: the gate only fires on an INCLUDED PRIMARY checkout, so over-asking there is
+    the desired nudge-to-worktree, never a silent bypass."""
+    if not command or not command.strip():
+        return False
+    try:
+        segs = _segments(command)
+    except ValueError:
+        return True  # unparseable -> fail safe (ask)
+    return any(_segment_is_mutating(toks) for toks in segs)
 
 
 resolved = []

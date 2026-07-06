@@ -43,6 +43,20 @@ class TestMutatingClassifier(unittest.TestCase):
                     "echo hi > /dev/null", "grep x f"):
             self.assertFalse(guard.classify_mutating(cmd), cmd)
 
+    def test_chained_command_bypasses(self):
+        """Regression: a mutating sub-command must not hide behind a read-only leader
+        joined by a shell control operator (`;`, `&&`, `||`, `|`, subshell parens)."""
+        for cmd in ("git status && git commit -am x", "ls; rm -rf x",
+                    "true || rm -rf x", "cat foo | tee bar", "(rm -rf x)",
+                    "echo hi && sed -i s/a/b/ f"):
+            self.assertTrue(guard.classify_mutating(cmd), cmd)
+
+    def test_control_operators_inside_quotes_not_split(self):
+        """A literal `&&`/`;`/`|` inside a quoted argument is not a real control
+        operator and must not trigger a false positive."""
+        for cmd in ('echo "a && b"', 'git log --oneline -m "fix: a; b"', 'echo "a | b"'):
+            self.assertFalse(guard.classify_mutating(cmd), cmd)
+
 
 class TestDecideShellDegraded(EngineTestCase):
     def _policy_for(self, root: str) -> str:
