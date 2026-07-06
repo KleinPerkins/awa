@@ -30,7 +30,10 @@ class ModesTestCase(unittest.TestCase):
         self._tmp.cleanup()
 
     def _temp_files(self) -> list[str]:
-        return [n for n in os.listdir(self.dir) if n.startswith(".worktree-modes.")]
+        # Atomic-write residue only (`.worktree-modes.<rand>.tmp`). The persistent flock lock
+        # file (`.worktree-modes.yml.lock`) is expected and is NOT temp residue.
+        return [n for n in os.listdir(self.dir)
+                if n.startswith(".worktree-modes.") and n.endswith(".tmp")]
 
 
 class TestSetGetRemoveList(ModesTestCase):
@@ -146,6 +149,104 @@ class TestRelInjection(ModesTestCase):
             modes.list_modes(self.path)["modes"],
             {"capabilities/awa": "on", "personal/*": "off", "a/b_c.d-e": "ask_on"},
         )
+
+
+class TestRelNormalization(ModesTestCase):
+    """#3: operator entries like `foo/` or `./foo` must canonicalize to `foo` so they match
+    the classifier's rel (which carries no leading `./` or trailing `/`)."""
+
+    def test_trailing_slash_canonicalized(self):
+        out = modes.set_mode(self.path, "capabilities/awa/", "off")
+        self.assertEqual(out["rel"], "capabilities/awa")
+        self.assertEqual(modes.list_modes(self.path)["modes"], {"capabilities/awa": "off"})
+
+    def test_leading_dotslash_canonicalized(self):
+        out = modes.set_mode(self.path, "./capabilities/awa", "on")
+        self.assertEqual(out["rel"], "capabilities/awa")
+        self.assertEqual(modes.list_modes(self.path)["modes"], {"capabilities/awa": "on"})
+
+    def test_get_and_remove_use_canonical_form(self):
+        modes.set_mode(self.path, "foo", "off")
+        self.assertEqual(modes.get_mode(self.path, "foo/")["mode"], "off")
+        self.assertEqual(modes.get_mode(self.path, "./foo")["mode"], "off")
+        rm = modes.remove_mode(self.path, "./foo/")
+        self.assertTrue(rm["removed"])
+        self.assertEqual(modes.list_modes(self.path)["modes"], {})
+
+    def test_canonical_entry_takes_effect_via_mode_for_and_classify(self):
+        # `set off` on `foo/` and `./foo` must actually turn the guard OFF for rel `foo`.
+        modes.set_mode(self.path, "foo/", "off")
+        pol_path = self.dir / "worktree-policy.yml"
+        pol_path.write_text(
+            "version: 1\ndefault: include\nmodes_file: worktree-modes.yml\n",
+            encoding="utf-8",
+        )
+        cfg = policy.PolicyConfig.load(pol_path)
+        self.assertEqual(policy.mode_for("foo", cfg), "off")
+        c = policy.classify("foo", str(self.dir), cfg, has_origin=True)
+        self.assertEqual(c.classification, policy.EXCLUDE)
+        self.assertEqual(c.reason, "explicit mode: off")
+
+
+class TestCorruptFileRecovery(ModesTestCase):
+    """#4: a non-regular / unreadable modes file raises an ACTIONABLE ModesError, not a raw
+    traceback."""
+
+    def test_read_directory_raises_actionable(self):
+        self.path.mkdir()  # a directory where a file is expected
+        with self.assertRaises(modes.ModesError) as ctx:
+            modes.list_modes(self.path)
+        self.assertIn("not a readable regular file", str(ctx.exception))
+        self.assertIn("mode sync", str(ctx.exception))
+
+    def test_sync_on_directory_raises_actionable(self):
+        self.path.mkdir()
+        with self.assertRaises(modes.ModesError):
+            modes.sync(self.path)
+
+
+class TestSerializeChokePoint(ModesTestCase):
+    """#10: repair/sync must NOT persist an unsafe key introduced by a hand-edit."""
+
+    def test_repair_refuses_unsafe_handedited_key(self):
+        self.path.write_text(
+            "schema: awa-modes/v1\n"
+            "default_mode: on\n"
+            "modes:\n"
+            "  foo bar: on\n",   # a space-bearing key a hand-edit could introduce
+            encoding="utf-8",
+        )
+        with self.assertRaises(modes.ModesError):
+            modes.repair(self.path)
+
+
+class TestConcurrencyLock(ModesTestCase):
+    """#5: mutating verbs take an flock; concurrent writers don't lose updates. Also asserts
+    the lock file is a hidden sibling (so the host .gitignore covers it)."""
+
+    def test_lock_file_is_hidden_sibling(self):
+        modes.set_mode(self.path, "a", "on")
+        lock = self.dir / (".worktree-modes.yml.lock")
+        # lock file may or may not persist after release, but if present it must be hidden.
+        stray = [n for n in os.listdir(self.dir) if not n.startswith(".") and n != "worktree-modes.yml"]
+        self.assertEqual(stray, [])
+
+    def test_serialized_writes_all_land(self):
+        import threading
+        modes.sync(self.path, default_mode="on")
+        keys = [f"r{i}" for i in range(12)]
+
+        def worker(k):
+            modes.set_mode(self.path, k, "ask_on")
+
+        threads = [threading.Thread(target=worker, args=(k,)) for k in keys]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        got = modes.list_modes(self.path)["modes"]
+        for k in keys:
+            self.assertEqual(got.get(k), "ask_on", k)
 
 
 class TestSerializerHeader(ModesTestCase):

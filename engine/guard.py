@@ -28,9 +28,33 @@ _PKG = {"npm", "pnpm", "yarn", "pip", "pip3", "bundle", "poetry", "cargo", "go",
 _GITMUT = {"commit", "add", "reset", "rebase", "checkout", "switch", "clean",
            "merge", "cherry-pick", "apply", "restore", "stash", "rm", "mv",
            "pull", "am", "revert", "worktree", "push", "fetch"}
+_INPLACE = {"sed", "perl", "gawk", "awk"}
 _GIT_TAKES_ARG = ("-C", "-c", "--git-dir", "--work-tree", "--namespace",
                   "--exec-path", "--super-prefix")
-_PREFIX_WRAPPERS = ("sudo", "command", "nice", "env", "time", "nohup", "xargs")
+# Prefix wrappers whose OPTIONS (not just their name) must be skipped before we resolve the
+# real program. Skipping only the name lets `nice -n 10 git commit`, `env -C /r git commit`,
+# `sudo -u root git commit`, `timeout 5 git commit`, `xargs -I{} git commit`, etc. classify
+# non-mutating and fast-path ALLOW — a silent bypass now that the host runs default ask_on.
+_PREFIX_WRAPPERS = ("sudo", "command", "nice", "env", "time", "nohup", "xargs",
+                    "timeout", "ionice", "chrt", "stdbuf")
+# Per-wrapper VALUE-TAKING options (consume the following token). Leading `-` flags NOT in
+# these sets are treated as valueless flags. Long `--opt=value` forms carry their own value.
+_WRAPPER_VALUE_OPTS = {
+    "env": {"-C", "--chdir", "-u", "--unset", "-S", "--split-string"},
+    "nice": {"-n", "--adjustment"},
+    "sudo": {"-u", "--user", "-g", "--group", "-C", "--close-from", "-h", "--host",
+             "-p", "--prompt", "-r", "--role", "-t", "--type", "-U", "--other-user",
+             "-D", "--chdir", "-R", "--chroot"},
+    "xargs": {"-I", "-i", "-n", "--max-args", "-P", "--max-procs", "-L", "-s",
+              "--max-chars", "-E", "-d", "--delimiter", "-a", "--arg-file"},
+    "ionice": {"-c", "--class", "-n", "--classdata", "-p", "--pid"},
+    "chrt": {"-p", "--pid"},
+    "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+}
+# Wrappers whose grammar carries a leading POSITIONAL value after their options (timeout
+# DURATION, chrt PRIORITY) that must also be consumed before the real program.
+_WRAPPER_POSITIONAL = {"timeout", "chrt"}
 _CONTROL_OPS = {";", "&&", "||", "&", "|"}
 _REDIRECT_OPS = {">", ">>", ">&", "&>", ">|"}
 _SAFE_REDIRECT_TARGETS = ("/dev/null", "/dev/stdout", "/dev/stderr")
@@ -51,7 +75,7 @@ def _segments(command: str) -> list[list[str]]:
         lex = shlex.shlex(line, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
         for tok in lex:
-            if tok in _CONTROL_OPS or tok in ("(", ")"):
+            if tok in _CONTROL_OPS or tok in ("(", ")", "{", "}"):
                 if current:
                     segs.append(current)
                     current = []
@@ -62,6 +86,50 @@ def _segments(command: str) -> list[list[str]]:
     return segs
 
 
+def _skip_wrappers(toks: list[str]) -> int:
+    """Advance past leading `VAR=value` assignments and prefix wrappers WITH their options,
+    returning the index of the resolved program. Option-aware (see _WRAPPER_VALUE_OPTS /
+    _WRAPPER_POSITIONAL) so `nice -n 10 git commit`, `env -C /r git commit`, `timeout 5 git
+    commit`, `xargs -I {} git commit`, etc. resolve to the REAL program, not a dangling flag.
+    """
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
+            i += 1
+            continue
+        base = os.path.basename(tok)
+        if base not in _PREFIX_WRAPPERS:
+            break
+        i += 1
+        valopts = _WRAPPER_VALUE_OPTS.get(base, set())
+        while i < len(toks) and toks[i].startswith("-") and toks[i] != "--":
+            opt = toks[i]
+            key = opt.split("=", 1)[0]
+            i += 1
+            if "=" not in opt and key in valopts and i < len(toks):
+                i += 1  # consume the option's value token
+        if i < len(toks) and toks[i] == "--":
+            i += 1
+        if base in _WRAPPER_POSITIONAL and i < len(toks) \
+                and os.path.basename(toks[i]) not in _PREFIX_WRAPPERS \
+                and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i]):
+            i += 1  # consume the wrapper's positional value (timeout DURATION / chrt PRIORITY)
+    return i
+
+
+def _rescan_for_mutation(toks: list[str]) -> bool:
+    """Conservative backstop: our wrapper-option model left a dangling `-`-prefixed prog, so
+    re-scan every token for a known mutating program (git is treated as mutating-capable) and
+    flag mutating. Over-asks on an included/ask_on primary — the desired nudge, never a bypass.
+    """
+    for t in toks:
+        b = os.path.basename(t)
+        if b in _MUT or b in _PKG or b in _INPLACE or b == "git":
+            return True
+    return False
+
+
 def _segment_is_mutating(toks: list[str]) -> bool:
     for idx, tok in enumerate(toks):
         if tok in _REDIRECT_OPS:
@@ -69,17 +137,17 @@ def _segment_is_mutating(toks: list[str]) -> bool:
             if not target or target.isdigit() or target.startswith(_SAFE_REDIRECT_TARGETS):
                 continue
             return True
-    i = 0
-    while i < len(toks) and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i])
-                             or toks[i] in _PREFIX_WRAPPERS):
-        i += 1
+    i = _skip_wrappers(toks)
     if i >= len(toks):
         return False
     prog = os.path.basename(toks[i])
     rest = toks[i + 1:]
+    # Backstop: if stripping wrappers left a dangling option (unmodeled wrapper flag), re-scan.
+    if prog.startswith("-"):
+        return _rescan_for_mutation(toks[i:])
     if prog in _MUT:
         return True
-    if prog in ("sed", "perl", "gawk", "awk") and any(a == "-i" or a.startswith("-i") for a in rest):
+    if prog in _INPLACE and any(a == "-i" or a.startswith("-i") for a in rest):
         return True
     if prog in _PKG and any(a in ("install", "add", "i") for a in rest):
         return True

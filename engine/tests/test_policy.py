@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -313,6 +314,65 @@ class TestModesFile(unittest.TestCase):
             cfg = policy.PolicyConfig.load(pol)
             self.assertEqual(cfg.modes, {"proj": "off"})
             self.assertEqual(cfg.default_mode, "ask_on")
+
+
+class TestUnreadableModesFile(unittest.TestCase):
+    """FAIL-SAFE (#1): an existing-but-unreadable modes_file must be treated as ABSENT so a
+    would-be-included repo still classifies protectively (never `advisory`/allow)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.top = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _policy_with_modes_file(self, d: str, modes_name: str) -> str:
+        pol = Path(d) / "worktree-policy.yml"
+        pol.write_text(
+            "version: 1\n"
+            "default: include\n"
+            f"modes_file: {modes_name}\n",
+            encoding="utf-8",
+        )
+        return str(pol)
+
+    def test_modes_file_is_a_directory_treated_as_absent(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "worktree-modes.yml").mkdir()  # a DIRECTORY where a file is expected
+            pol = self._policy_with_modes_file(d, "worktree-modes.yml")
+            cfg = policy.PolicyConfig.load(pol)   # must NOT raise
+            self.assertEqual(cfg.modes, {})
+            self.assertEqual(cfg.default_mode, "on")  # back-compat default preserved
+            c = policy.classify("proj", self.top, cfg, has_origin=True)
+            self.assertNotEqual(c.classification, policy.ADVISORY)
+            self.assertEqual(c.classification, policy.INCLUDE)  # protective (guard asks)
+
+    def test_modes_file_chmod_000_treated_as_absent(self):
+        with tempfile.TemporaryDirectory() as d:
+            mf = Path(d) / "worktree-modes.yml"
+            mf.write_text("schema: awa-modes/v1\ndefault_mode: off\n", encoding="utf-8")
+            os.chmod(mf, 0o000)
+            try:
+                pol = self._policy_with_modes_file(d, "worktree-modes.yml")
+                cfg = policy.PolicyConfig.load(pol)   # must NOT raise
+                # unreadable -> absent: the `off` default inside is NOT honored (fail safe)
+                self.assertEqual(cfg.default_mode, "on")
+                c = policy.classify("proj", self.top, cfg, has_origin=True)
+                self.assertNotEqual(c.classification, policy.ADVISORY)
+                self.assertEqual(c.classification, policy.INCLUDE)
+            finally:
+                os.chmod(mf, 0o600)  # restore so TemporaryDirectory cleanup succeeds
+
+
+class TestMissingPolicy(unittest.TestCase):
+    """#9: a missing policy path returns safe defaults (parity with the kernel mirror)."""
+
+    def test_missing_policy_returns_defaults(self):
+        cfg = policy.PolicyConfig.load("/nonexistent/worktree-policy.yml")
+        self.assertEqual(cfg.default, policy.INCLUDE)
+        self.assertEqual(cfg.default_mode, "on")
+        self.assertEqual(cfg.modes, {})
 
 
 if __name__ == "__main__":

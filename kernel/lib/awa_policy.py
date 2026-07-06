@@ -137,7 +137,16 @@ def _resolve_modes(data: dict, policy_path: str | Path) -> tuple[dict, str]:
             mf = str(base / mf)
         mfp = Path(mf)
         if mfp.exists():
-            fdata = parse_mini_yaml(mfp.read_text(encoding="utf-8"))
+            # FAIL-SAFE: an existing-but-unreadable modes_file (a directory, a symlink->dir,
+            # or chmod-000) would raise OSError from read_text and propagate through
+            # PolicyConfig.load; the shell classifier degrades ANY classifier crash to a
+            # non-protective class, silently ALLOWING mutation on an included primary checkout.
+            # Treat an unreadable pointer as ABSENT (fdata = {}) so the derived posture
+            # (default_mode / include-default) still protects the repo.
+            try:
+                fdata = parse_mini_yaml(mfp.read_text(encoding="utf-8"))
+            except OSError:
+                fdata = {}
             fmodes, fdefault = _modes_from_data(fdata)
             modes.update(fmodes)  # referenced file wins on key collision
             if fdefault:

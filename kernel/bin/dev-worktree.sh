@@ -123,10 +123,14 @@ classify_context() {
   hp="$(git config --get core.hooksPath 2>/dev/null || true)"
   origin="$(git config --get remote.origin.url 2>/dev/null || true)"
   if [ -n "$origin" ]; then has_origin=1; else has_origin=0; fi
+  # FAIL-SAFE: a classifier crash must NOT degrade to a non-protective class. `advisory`
+  # makes the guard ALLOW a mutating command on an included primary checkout (silent
+  # host-wide fail-open, since ~/dev wires modes_file by default). Fall back to `include`
+  # so the guard ASKS (fail safe = ask, never silently allow).
   python3 "$AWA_POLICY_LIB" classify --policy "$POLICY" \
     --governed-root "${AWA_GOVERNED_ROOT:-}" \
     --toplevel "$top" --hooks-path "$hp" --has-origin "$has_origin" 2>/dev/null \
-    || printf 'advisory\tclassifier unavailable\t%s\t\n' "$(basename "$top")"
+    || printf 'include\tclassifier unavailable (fail-safe: ask)\t%s\t\n' "$(basename "$top")"
 }
 
 # Back-compat 2-field verdict (class<TAB>reason) for callers that only need the decision.
@@ -613,10 +617,11 @@ print(f"policy: {p}")
 # EVERYTHING here WARNs only; it NEVER hard-fails (back-compat: only missing required keys
 # fail policy-check). policy-check ALWAYS prints `policy-check: OK` and exits 0.
 warnings = []
-# A match-everything key set to `off` blanket-disables the guard: explicit OFF beats the
-# safety-excludes, so a broad off glob is the ONLY thing that can silence AWA for repos the
+# A glob/broad key set to `off` disables the guard for EVERY matched repo: explicit OFF beats
+# the safety-excludes, so a glob off key is the ONLY thing that can silence AWA for repos the
 # safety detectors would otherwise protect. WARN so it is a deliberate, visible choice.
-BROAD_KEYS = {"*", "**", "."}
+# `.` (the umbrella) is a literal but equally broad, so it is warned too.
+BROAD_LITERAL_KEYS = {".", "*", "**"}
 try:
     import awa_policy
     data = awa_policy.parse_mini_yaml(text)
@@ -625,17 +630,25 @@ try:
         allowed = "|".join(awa_policy.MODE_VALUES)
         if default_mode not in awa_policy.MODE_VALUES:
             warnings.append(f"default_mode '{default_mode}' is not one of {allowed}")
+        # (d) default_mode: off silences AWA for ALL eligible repos with no explicit entry.
+        if str(default_mode).strip().lower() == "off":
+            warnings.append(
+                "default_mode 'off' disables AWA for ALL eligible repos with no explicit "
+                "entry — confirm this is intended"
+            )
         for key, val in modes.items():
             k = str(key).strip()
             if not k:
                 warnings.append("empty modes key")
             if val not in awa_policy.MODE_VALUES:
                 warnings.append(f"mode for '{key}': '{val}' is not one of {allowed}")
-            # (a) broad `off` glob — blanket-matches and beats safety excludes. Quote-strip
-            # the key so a `"*": off` (quoted in the file) is caught too.
-            if str(val).strip().lower() == "off" and k.strip("'\"") in BROAD_KEYS:
+            # (a) glob/broad `off` key — matches multiple repos and beats safety excludes.
+            # Quote-strip so a quoted `"*": off` is caught too. WARN on ANY glob metachar
+            # (`*`, `?`, `[`) — not just the literals `*`/`**`/`.`.
+            kk = k.strip("'\"")
+            if str(val).strip().lower() == "off" and (awa_policy._is_glob(kk) or kk in BROAD_LITERAL_KEYS):
                 warnings.append(
-                    f"broad off glob '{key}': disables the guard for ALL matched repos "
+                    f"broad/glob off key '{key}': disables the guard for matched repos "
                     "(explicit OFF beats safety excludes) — confirm this is intended"
                 )
 

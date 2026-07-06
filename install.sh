@@ -47,8 +47,16 @@ ensure_modes_file() {
   local engine_sh="$RUNTIME/bin/awa-engine.sh"
   [ -x "$engine_sh" ] || return 0
   # Read-only probe: does the host policy declare a modes_file pointer? `mode list` resolves the
-  # pointer without writing and exits non-zero when none is configured -> the host hasn't opted in.
-  "$engine_sh" mode list --policy "$policy" >/dev/null 2>&1 || return 0
+  # pointer without writing. Distinguish the two non-zero outcomes rather than silently skipping
+  # BOTH: exit 2 = "no modes_file pointer configured" (host opted out -> skip); any other non-zero
+  # = "engine crashed/misbehaved" (warn, then still attempt sync/repair rather than swallow it).
+  local rc=0
+  "$engine_sh" mode list --policy "$policy" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    return 0  # host declares no modes_file pointer -> nothing to ensure
+  elif [ "$rc" -ne 0 ]; then
+    awa_warn "modes-file probe failed (engine rc=$rc) — attempting sync/repair"
+  fi
   if "$engine_sh" mode sync --policy "$policy" >/dev/null 2>&1; then
     awa_log "ensured host-configured modes file (schema awa-modes/v1) via policy modes_file pointer"
   else
