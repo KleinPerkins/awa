@@ -44,13 +44,17 @@ verbs:
   mode           manage the tool-owned per-repo modes file (list|get|set|remove|repair|sync)
 
 mode subcommands (delegated to the engine modes manager; edits ONLY the host modes file):
-  mode list                      list all explicit modes + default_mode
-  mode get <rel>                 show the effective mode for a repo path/glob
+  mode list                      list all explicit entries + default_mode
+  mode get <rel>                 show the explicit entry (exact key) for a repo path/glob
   mode set <rel> <on|ask_on|off> set an explicit mode
-  mode remove <rel>              remove an explicit mode entry
-  mode repair                    re-materialize/reconcile eligible repos (idempotent)
-  mode sync [--default-mode M]   reconcile new/removed repos (creates the file if absent)
+  mode remove <rel>              remove an explicit mode entry (idempotent)
+  mode repair                    normalize the file's own contents: drop invalid values/empty
+                                 keys, normalize default_mode (idempotent; no filesystem scan)
+  mode sync [--default-mode M]   ensure-exists + normalize the file (creates it if absent;
+                                 preserves entries + a valid default_mode; no filesystem scan)
   (accepts --policy P / --modes-file F; defaults to the resolved host policy)
+  Note: sync/repair do NOT scan the filesystem, materialize per-repo entries, or prune stale
+  repos — the runtime default_mode is what protects new eligible repos.
 
 dashboard-data options:
   --root DIR       governed root to scan (default: resolved governed root / AWA_GOVERNED_ROOT)
@@ -156,7 +160,12 @@ current_state() {
   printf 'git-common-dir: %s\n' "$(git_common_abs 2>/dev/null || true)"
   # Additive line ONLY (existing fields above are unchanged/unreordered — bash readers
   # depend on them). Surfaces the explicitly-set mode, distinct from the derived class.
-  printf 'explicit-mode: %s\n' "$(explicit_mode_for "$top")"
+  # HOT-PATH: computing it spawns a SECOND python3 (`mode-for`). The beforeShellExecution
+  # guard never reads this line, so it exports AWA_STATUS_NO_MODE=1 to keep the pre-mutation
+  # gate single-spawn. Interactive `status` (env unset/0) still prints the line.
+  if [ "${AWA_STATUS_NO_MODE:-0}" != "1" ]; then
+    printf 'explicit-mode: %s\n' "$(explicit_mode_for "$top")"
+  fi
 }
 
 slugify() {
@@ -601,9 +610,13 @@ print(f"policy: {p}")
 # Additive per-repo MODE validation (schema awa-modes/v1). Validate `modes:` /
 # `default_mode:` when present — inline OR via a `modes_file:` pointer — parsed with the
 # SAME kernel loader the classifier uses. Absence is valid (these are NOT required keys).
-# Invalid entries WARN only; they NEVER hard-fail (back-compat: only missing required
-# keys fail policy-check).
+# EVERYTHING here WARNs only; it NEVER hard-fails (back-compat: only missing required keys
+# fail policy-check). policy-check ALWAYS prints `policy-check: OK` and exits 0.
 warnings = []
+# A match-everything key set to `off` blanket-disables the guard: explicit OFF beats the
+# safety-excludes, so a broad off glob is the ONLY thing that can silence AWA for repos the
+# safety detectors would otherwise protect. WARN so it is a deliberate, visible choice.
+BROAD_KEYS = {"*", "**", "."}
 try:
     import awa_policy
     data = awa_policy.parse_mini_yaml(text)
@@ -613,10 +626,46 @@ try:
         if default_mode not in awa_policy.MODE_VALUES:
             warnings.append(f"default_mode '{default_mode}' is not one of {allowed}")
         for key, val in modes.items():
-            if not str(key).strip():
+            k = str(key).strip()
+            if not k:
                 warnings.append("empty modes key")
             if val not in awa_policy.MODE_VALUES:
                 warnings.append(f"mode for '{key}': '{val}' is not one of {allowed}")
+            # (a) broad `off` glob — blanket-matches and beats safety excludes. Quote-strip
+            # the key so a `"*": off` (quoted in the file) is caught too.
+            if str(val).strip().lower() == "off" and k.strip("'\"") in BROAD_KEYS:
+                warnings.append(
+                    f"broad off glob '{key}': disables the guard for ALL matched repos "
+                    "(explicit OFF beats safety excludes) — confirm this is intended"
+                )
+
+    # (c) dangling `modes_file:` pointer — resolves to a missing/unparseable file, which the
+    # loader silently skips (posture reverts to defaults with no visible signal).
+    mf = data.get("modes_file")
+    if mf:
+        import os as _os
+        mfp = _os.path.expanduser(str(mf))
+        if not _os.path.isabs(mfp):
+            mfp = str(pathlib.Path(str(p)).resolve().parent / mfp)
+        if not pathlib.Path(mfp).exists():
+            warnings.append(
+                f"modes_file '{mf}' does not resolve to an existing file ({mfp}) — "
+                "posture silently reverts to defaults"
+            )
+        else:
+            try:
+                awa_policy.parse_mini_yaml(pathlib.Path(mfp).read_text(encoding="utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"modes_file '{mf}' is unparseable: {exc}")
+
+    # (b) non-empty legacy `overrides.include` — legacy unsafe precedence (beats safety).
+    overrides = data.get("overrides") if isinstance(data.get("overrides"), dict) else {}
+    ovinc = overrides.get("include") or []
+    if ovinc:
+        warnings.append(
+            f"legacy overrides.include is non-empty ({ovinc}) — legacy unsafe precedence "
+            "(beats safety excludes); migrate via `mode set`"
+        )
 except Exception as exc:  # noqa: BLE001 — additive check never hard-fails
     warnings.append(f"mode-config check skipped: {exc}")
 

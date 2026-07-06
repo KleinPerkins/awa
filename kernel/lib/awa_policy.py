@@ -198,15 +198,24 @@ def _match_any(rel: str, patterns: list[str]) -> bool:
     return False
 
 
-def mode_for(rel: str, cfg: PolicyConfig) -> str:
-    """Return the explicit mode set for `rel` via first-match glob over cfg.modes.
+def _is_glob(pat: str) -> bool:
+    """A key is a glob if it carries an fnmatch metacharacter (`*`, `?`, `[`)."""
+    return any(c in pat for c in "*?[")
 
-    Uses the same match semantics as `_match_any` (exact-or-glob), iterating in insertion
-    order (first match wins). The returned value is case-normalized and MAY be invalid
-    (present-but-not-in MODE_VALUES); callers validate. Returns "" when no entry matches.
+
+def mode_for(rel: str, cfg: PolicyConfig) -> str:
+    """Return the explicit mode set for `rel`, preferring EXACT keys over globs.
+
+    Exact (non-glob) keys are matched first (by equality), then glob keys in insertion
+    order — so an exact key wins even when a matching glob precedes it in the file. The
+    returned value is case-normalized and MAY be invalid (present-but-not-in MODE_VALUES);
+    callers validate. Returns "" when no entry matches.
     """
     for pat, val in cfg.modes.items():
-        if rel == pat or fnmatch.fnmatch(rel, pat):
+        if not _is_glob(pat) and rel == pat:
+            return str(val).strip().lower()
+    for pat, val in cfg.modes.items():
+        if _is_glob(pat) and fnmatch.fnmatch(rel, pat):
             return str(val).strip().lower()
     return ""
 
@@ -225,8 +234,10 @@ def _eligible(reason_on: str, cfg: PolicyConfig) -> tuple[str, str]:
         return (INCLUDE, reason_on)
     if dm == "off":
         return (EXCLUDE, "policy default_mode: off")
-    # ask_on, plus any invalid default_mode -> safe ask_on
-    return (ASK_ON, "policy default_mode: ask_on")
+    if dm == "ask_on":
+        return (ASK_ON, "policy default_mode: ask_on")
+    # invalid default_mode -> safe ask_on, honestly labeled (not mislabeled as ask_on)
+    return (ASK_ON, "invalid default_mode; safe fallback ask_on")
 
 
 def classify(

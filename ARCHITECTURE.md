@@ -112,7 +112,7 @@ only.
    (these sit **above** the explicit ON/ASK_ON step, so an explicit ON/ASK_ON/invalid may not
    override a safety-exclude)
 5. explicit **ON** → `include`; explicit **ASK_ON** → `ask_on`; **invalid** value → `ask_on`
-   (safe fallback, and `policy-check` fails)
+   (safe fallback; `policy-check` **WARNs**, never hard-fails)
 6. exclude glob → `exclude`
 7. no origin → `advisory`
 8. eligibility (include glob / `default: include`) mapped through **`default_mode`**:
@@ -137,15 +137,19 @@ Modes are managed only through generalized verbs over the modes file — never b
 - Engine: `python3 -m engine mode {list,get,set,remove,repair,sync,doctor}` (via `engine/modes.py`).
 - Kernel CLI: `dev-worktree.sh mode <verb>` delegates to the engine module.
 - MCP: read tools `awa_mode_list`/`awa_mode_get` plus mutating, path-scoped config tools
-  `awa_mode_set`/`awa_mode_remove` (write) and `awa_mode_repair`/`awa_mode_sync` (materialize /
-  reconcile eligible repos to the default, idempotent and non-destructive of explicit entries).
+  `awa_mode_set`/`awa_mode_remove` (write) and `awa_mode_repair`/`awa_mode_sync` (ensure-exists +
+  normalize/repair the file's own contents, idempotent and non-destructive of explicit entries).
 
 Writes are schema-validated, atomic, and backup-before-write, and are **path-scoped to the host
 modes file** — they never touch a repo, git, or a primary checkout. The MCP server's read-only
 invariant is amended to "read-only for safety state; config mutations are path-scoped to the host
-modes file." `repair`/`sync` are how a new eligible repo is materialized to the host default and how
-stale entries are reported (pruning only under an explicit opt-in). These make modes changeable in
-plain language by a non-technical owner, with the CLI verbs as the parity mechanism.
+modes file." `sync`/`repair` do **not** scan the filesystem, materialize per-repo entries, prune, or
+report stale repos — they ensure the file exists and normalize/repair its own contents (dropping
+invalid values/empty keys, normalizing `default_mode`); the runtime **`default_mode`** is the
+mechanism that protects a new eligible repo. `sync` is additionally a no-op write when the file is
+already canonical (so an install/overlay run leaves a source-tracked file byte-stable). These make
+modes changeable in plain language by a non-technical owner, with the CLI verbs as the parity
+mechanism.
 
 ## The contract is BEHAVIOR-only (location is informational)
 

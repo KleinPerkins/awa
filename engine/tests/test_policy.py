@@ -197,6 +197,15 @@ class TestExplicitModes(unittest.TestCase):
         self.assertEqual(policy.classify("personal/foo", self.top, cfg).classification, policy.EXCLUDE)
         self.assertEqual(policy.classify("personal/bar", self.top, cfg).classification, policy.INCLUDE)
 
+    def test_exact_beats_glob_when_glob_listed_first(self):
+        # Reversed insertion order: the glob precedes the exact key, but the EXACT key must
+        # still win (docs promise "exact keys preferred", not pure first-match).
+        cfg = self._cfg(modes={"personal/*": "on", "personal/foo": "off"})
+        self.assertEqual(policy.classify("personal/foo", self.top, cfg).classification, policy.EXCLUDE)
+        self.assertEqual(policy.classify("personal/bar", self.top, cfg).classification, policy.INCLUDE)
+        self.assertEqual(policy.mode_for("personal/foo", cfg), "off")
+        self.assertEqual(policy.mode_for("personal/bar", cfg), "on")
+
     def test_mode_for_helper(self):
         cfg = self._cfg(modes={"a": "on", "b/*": "ask_on"})
         self.assertEqual(policy.mode_for("a", cfg), "on")
@@ -234,6 +243,14 @@ class TestDefaultMode(unittest.TestCase):
         c = policy.classify("proj", self.top, cfg)
         self.assertEqual(c.classification, policy.EXCLUDE)
         self.assertEqual(c.reason, "policy default_mode: off")
+
+    def test_invalid_default_mode_honest_reason(self):
+        # An invalid default_mode falls back to safe ask_on but is HONESTLY labeled — not
+        # mislabeled as the reason for a validly-configured ask_on.
+        cfg = policy.PolicyConfig(default=policy.INCLUDE, default_mode="bogus")
+        c = policy.classify("proj", self.top, cfg)
+        self.assertEqual(c.classification, policy.ASK_ON)
+        self.assertEqual(c.reason, "invalid default_mode; safe fallback ask_on")
 
     def test_include_glob_maps_through_default_mode(self):
         cfg = policy.PolicyConfig(include=["proj"], default_mode="ask_on")
