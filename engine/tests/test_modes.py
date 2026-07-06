@@ -105,6 +105,77 @@ class TestValidation(ModesTestCase):
             modes.sync(self.path, default_mode="bogus")
 
 
+class TestRelInjection(ModesTestCase):
+    """A `rel` is written as a raw YAML key; a hostile rel must not inject a second key."""
+
+    def test_injecting_rel_rejected_and_default_unchanged(self):
+        # A newline-bearing rel that would inject `default_mode: off` must be rejected AND
+        # leave the modes file (incl. its default_mode) completely untouched.
+        modes.sync(self.path, default_mode="ask_on")
+        before = self.path.read_text(encoding="utf-8")
+        evil = "proj\ndefault_mode: off"
+        with self.assertRaises(modes.ModesError):
+            modes.set_mode(self.path, evil, "on")
+        after = self.path.read_text(encoding="utf-8")
+        self.assertEqual(before, after)
+        self.assertEqual(modes.list_modes(self.path)["default_mode"], "ask_on")
+
+    def test_rel_with_colon_rejected(self):
+        with self.assertRaises(modes.ModesError):
+            modes.set_mode(self.path, "evil: off", "on")
+
+    def test_rel_with_leading_trailing_ws_rejected(self):
+        with self.assertRaises(modes.ModesError):
+            modes.set_mode(self.path, " proj ", "on")
+
+    def test_rel_control_char_rejected(self):
+        with self.assertRaises(modes.ModesError):
+            modes.set_mode(self.path, "proj\tx", "on")
+
+    def test_get_and_remove_reject_injection(self):
+        with self.assertRaises(modes.ModesError):
+            modes.get_mode(self.path, "x\ny")
+        with self.assertRaises(modes.ModesError):
+            modes.remove_mode(self.path, "x:y")
+
+    def test_valid_path_and_glob_rels_allowed(self):
+        modes.set_mode(self.path, "capabilities/awa", "on")
+        modes.set_mode(self.path, "personal/*", "off")
+        modes.set_mode(self.path, "a/b_c.d-e", "ask_on")
+        self.assertEqual(
+            modes.list_modes(self.path)["modes"],
+            {"capabilities/awa": "on", "personal/*": "off", "a/b_c.d-e": "ask_on"},
+        )
+
+
+class TestSerializerHeader(ModesTestCase):
+    """`_serialize` emits a fixed canonical header so tool round-trips are byte-stable."""
+
+    def test_header_present_after_sync(self):
+        modes.sync(self.path, default_mode="ask_on")
+        text = self.path.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("# AWA per-repo MODE file"))
+        self.assertIn("DO NOT HAND-EDIT", text)
+        self.assertIn("schema: awa-modes/v1", text)
+        self.assertIn("default_mode: ask_on", text)
+
+    def test_resync_byte_identical(self):
+        modes.sync(self.path, default_mode="ask_on")
+        modes.set_mode(self.path, "proj", "on")
+        text1 = self.path.read_text(encoding="utf-8")
+        modes.sync(self.path)
+        text2 = self.path.read_text(encoding="utf-8")
+        self.assertEqual(text1, text2)
+
+    def test_sync_on_canonical_file_does_not_rewrite(self):
+        modes.sync(self.path, default_mode="ask_on")
+        mtime_before = self.path.stat().st_mtime_ns
+        out = modes.sync(self.path)
+        self.assertFalse(out["rewritten"])
+        self.assertEqual(self.path.stat().st_mtime_ns, mtime_before)
+        self.assertEqual(self._temp_files(), [])
+
+
 class TestAtomicWrite(ModesTestCase):
     def test_no_temp_residue(self):
         modes.set_mode(self.path, "a", "on")
@@ -228,6 +299,32 @@ class TestResolveModesFile(ModesTestCase):
 
     def test_resolve_none_when_policy_missing(self):
         self.assertIsNone(modes.resolve_modes_file(self.dir / "nope.yml"))
+
+
+class TestCliRemoveIdempotent(ModesTestCase):
+    """`mode remove` on an absent entry is idempotent: exit 0 with removed=False."""
+
+    def test_cli_remove_absent_exit_zero(self):
+        import contextlib
+        from engine import cli
+
+        modes.sync(self.path, default_mode="on")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.main(["mode", "remove", "nope", "--modes-file", str(self.path)])
+        self.assertEqual(rc, 0)
+        self.assertFalse(json.loads(buf.getvalue())["removed"])
+
+    def test_cli_remove_present_exit_zero(self):
+        import contextlib
+        from engine import cli
+
+        modes.set_mode(self.path, "proj", "on")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.main(["mode", "remove", "proj", "--modes-file", str(self.path)])
+        self.assertEqual(rc, 0)
+        self.assertTrue(json.loads(buf.getvalue())["removed"])
 
 
 def _drive(lines: list[dict]) -> list[dict]:

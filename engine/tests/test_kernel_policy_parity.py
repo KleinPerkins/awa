@@ -92,10 +92,15 @@ class TestKernelPolicyParity(unittest.TestCase):
             # exact-vs-glob first-match
             ("personal/foo", self.plain, {"modes": {"personal/foo": "off", "personal/*": "on"}}, {}, "exclude"),
             ("personal/bar", self.plain, {"modes": {"personal/foo": "off", "personal/*": "on"}}, {}, "include"),
+            # exact-vs-glob when the glob is listed FIRST (exact still wins — both mirrors)
+            ("personal/foo", self.plain, {"modes": {"personal/*": "on", "personal/foo": "off"}}, {}, "exclude"),
+            ("personal/bar", self.plain, {"modes": {"personal/*": "on", "personal/foo": "off"}}, {}, "include"),
             # --- default_mode mapping (no explicit entry) ---
             ("proj", self.plain, {"default": "include", "default_mode": "on"}, {}, "include"),
             ("proj", self.plain, {"default": "include", "default_mode": "ask_on"}, {}, "ask_on"),
             ("proj", self.plain, {"default": "include", "default_mode": "off"}, {}, "exclude"),
+            # invalid default_mode -> safe ask_on with the honest reason (mirrors agree)
+            ("proj", self.plain, {"default": "include", "default_mode": "bogus"}, {}, "ask_on"),
             ("proj", self.plain, {"include": ["proj"], "default_mode": "ask_on"}, {}, "ask_on"),
             # no-origin stays advisory regardless of default_mode
             ("proj", self.plain, {"default": "include", "default_mode": "ask_on"}, {"has_origin": False}, "advisory"),

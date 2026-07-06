@@ -64,15 +64,21 @@ MCP tools:
 
 ```bash
 dev-worktree.sh mode list                 # show every configured repo + the default
-dev-worktree.sh mode get   projects/foo    # resolved mode for one repo
+dev-worktree.sh mode get   projects/foo    # show the explicit entry (exact key) for one repo
 dev-worktree.sh mode set   projects/foo on # set a repo to on | ask_on | off
 dev-worktree.sh mode remove projects/foo   # drop the explicit entry (fall back to the default)
-dev-worktree.sh mode sync                  # materialize eligible repos to the default (idempotent)
+dev-worktree.sh mode sync                  # ensure-exists + normalize the modes file (idempotent)
 ```
+
+`sync`/`repair` do **not** scan the filesystem, materialize per-repo entries, or prune stale
+repos — they ensure the file exists and normalize/repair its own contents; the runtime
+`default_mode` is what protects a new eligible repo. `policy-check` **WARNs** (never hard-fails) on
+an invalid/broad-off/legacy/dangling-pointer config.
 
 The same operations are exposed as MCP tools for plain-language use: `awa_mode_list` / `awa_mode_get`
 (read) and `awa_mode_set` / `awa_mode_remove` / `awa_mode_repair` / `awa_mode_sync` (write, scoped to
-the modes file only — they never touch a repo, git, or your primary checkout).
+the modes file only — they never touch a repo, git, or your primary checkout; `sync`/`repair`
+normalize the file's own contents, they do not scan the filesystem).
 
 **Default posture.** A repo with no explicit entry falls back to `default_mode`. The shipped default
 is `on` (byte-for-byte back-compatible). A host may set `default_mode: ask_on` so eligible repos are

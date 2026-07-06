@@ -26,6 +26,7 @@ Verbs (all return a JSON-serializable dict for the CLI/MCP surfaces):
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -37,6 +38,23 @@ from .policy import (
 )
 
 SCHEMA = "awa-modes/v1"
+
+# FIXED canonical header comment block emitted by ``_serialize`` so a tool round-trip is
+# byte-stable WITH guidance: ``sync`` (run unconditionally by install/overlay) can no longer
+# strip a source-tracked file's "DO NOT HAND-EDIT" header and leave a dirty tracked file.
+# ZERO-LINK: carries no org/host literals (the ask_on default lives only in the host overlay).
+_HEADER = (
+    "# AWA per-repo MODE file — TOOL-OWNED, source-tracked (schema awa-modes/v1).\n"
+    "# DO NOT HAND-EDIT: materialized/reconciled by install/bootstrap and edited only via\n"
+    "# `dev-worktree.sh mode ...` (or the AWA MCP mode tools).\n"
+    "# default_mode governs eligible repos with no explicit entry; modes is a tool-managed map.\n"
+)
+
+# Safe character set for a modes-file KEY (rel path/glob): path chars + glob metacharacters
+# ONLY. This is the rel-injection guard — a `rel` is written as a raw YAML key, so a value
+# bearing a newline/colon/control-char could otherwise inject an arbitrary key (e.g.
+# ``default_mode: off``) and disable the guard host-wide. Reject anything outside this set.
+_REL_SAFE_RE = re.compile(r"^[A-Za-z0-9/._*?\[\]-]+$")
 # Default governing mode for eligible repos with no explicit entry, used ONLY when a file
 # is (re)created without an existing/explicit default. "on" reproduces today's derived
 # classification byte-for-byte (product back-compat). The host overlay may seed "ask_on".
@@ -95,7 +113,7 @@ def _serialize(modes: dict, default_mode: str) -> str:
             lines.append(f"  {key}: {val}")
     else:
         lines.append("modes: {}")
-    return "\n".join(lines) + "\n"
+    return _HEADER + "\n".join(lines) + "\n"
 
 
 def _write_atomic(path: str | Path, modes: dict, default_mode: str) -> None:
@@ -128,6 +146,33 @@ def _validate_mode(mode) -> str:
     return m
 
 
+def _validate_rel(rel) -> str:
+    """Validate a modes-file KEY (rel path/glob) BEFORE it is written as a raw YAML key.
+
+    Rejects an injecting `rel` — newlines/CR, control chars, leading/trailing whitespace, or
+    any char outside the safe set (path chars + glob metacharacters) — so a hostile `rel`
+    supplied via the awa_mode_set MCP tool cannot inject a second YAML key (e.g.
+    ``default_mode: off``) and disable the guard host-wide. Returns the (unchanged) rel.
+    """
+    if rel is None:
+        raise ModesError("rel (repo path/glob) must be non-empty")
+    s = str(rel)
+    if not s or not s.strip():
+        raise ModesError("rel (repo path/glob) must be non-empty")
+    if s != s.strip():
+        raise ModesError(f"rel {rel!r} must not have leading/trailing whitespace")
+    if "\n" in s or "\r" in s:
+        raise ModesError(f"rel {rel!r} must not contain newlines/carriage returns")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in s):
+        raise ModesError(f"rel {rel!r} must not contain control characters")
+    if not _REL_SAFE_RE.match(s):
+        raise ModesError(
+            f"rel {rel!r} contains characters outside the safe set "
+            "(letters, digits, and /._-*?[])"
+        )
+    return s
+
+
 def _preserved_default(existing: Optional[str]) -> str:
     """Keep the file's existing default_mode when valid; else fall back safely."""
     if existing in MODE_VALUES:
@@ -151,9 +196,7 @@ def list_modes(path: str | Path) -> dict:
 
 def get_mode(path: str | Path, rel: str) -> dict:
     """Return the explicit entry for ``rel`` (exact key), or "" when unset (read-only)."""
-    if not rel or not str(rel).strip():
-        raise ModesError("rel (repo path/glob) must be non-empty")
-    rel = str(rel).strip()
+    rel = _validate_rel(rel)
     modes, dm, schema, exists = _read(path)
     return {
         "action": "get",
@@ -167,9 +210,7 @@ def get_mode(path: str | Path, rel: str) -> dict:
 
 def set_mode(path: str | Path, rel: str, mode) -> dict:
     """Set (add or update) ``rel`` -> ``mode``. Validated + atomic; default_mode preserved."""
-    if not rel or not str(rel).strip():
-        raise ModesError("rel (repo path/glob) must be non-empty")
-    rel = str(rel).strip()
+    rel = _validate_rel(rel)
     m = _validate_mode(mode)
     modes, dm, schema, exists = _read(path)
     default_mode = _preserved_default(dm)
@@ -193,9 +234,7 @@ def set_mode(path: str | Path, rel: str, mode) -> dict:
 
 def remove_mode(path: str | Path, rel: str) -> dict:
     """Remove ``rel``'s explicit entry. No-op (removed=False) when absent; atomic."""
-    if not rel or not str(rel).strip():
-        raise ModesError("rel (repo path/glob) must be non-empty")
-    rel = str(rel).strip()
+    rel = _validate_rel(rel)
     modes, dm, schema, exists = _read(path)
     default_mode = _preserved_default(dm)
     removed = rel in modes
@@ -265,11 +304,20 @@ def sync(path: str | Path, default_mode: Optional[str] = None) -> dict:
         k = str(key).strip()
         if k:
             norm_modes[k] = str(val).strip().lower()
-    _write_atomic(path, norm_modes, resolved_default)
+    # No-op write: when the parsed+reserialized content already equals the file bytes, do NOT
+    # rewrite. `sync` is run unconditionally by install/overlay, so a rewrite of an already-
+    # canonical, source-tracked file would dirty the tracked worktree on every install.
+    text = _serialize(norm_modes, resolved_default)
+    rewritten = True
+    if exists and Path(path).read_text(encoding="utf-8") == text:
+        rewritten = False
+    else:
+        _write_atomic(path, norm_modes, resolved_default)
     return {
         "action": "sync",
         "path": str(path),
         "created": not exists,
+        "rewritten": rewritten,
         "exists": True,
         "schema": SCHEMA,
         "default_mode": resolved_default,

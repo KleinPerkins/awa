@@ -177,8 +177,8 @@ def cmd_mode(args: argparse.Namespace) -> int:
         if args.what == "set":
             return _emit(modes_mod.set_mode(path, args.rel, args.mode))
         if args.what == "remove":
-            out = modes_mod.remove_mode(path, args.rel)
-            return _emit(out, code=0 if out["removed"] else 1)
+            # Idempotent: removing an absent entry is success (exit 0, removed=False).
+            return _emit(modes_mod.remove_mode(path, args.rel))
         if args.what == "repair":
             return _emit(modes_mod.repair(path))
         if args.what == "sync":
