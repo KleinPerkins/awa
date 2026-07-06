@@ -1,15 +1,18 @@
 # Live verification — AWA MCP server (Desktop)
 
 **Goal:** confirm the `awa` MCP server registered in `~/.cursor/mcp.json` resolves its `awa_*`
-tools in a live Desktop agent and that `beforeMCPExecution` fires for those calls.
+tools in a live Desktop agent and that `beforeMCPExecution` fires for those calls — including
+**write** mode tools (`awa_mode_set`, …) added in the per-repo mode feature (round-2 hardening
+fixes MCP policy resolution via `AWA_POLICY` env).
 
 Headless contract tests (`engine/tests/test_mcp.py`) prove the protocol; this runbook closes the
 **live Desktop** row.
 
 ## Prereqs
 
-- `awa` entry in `~/.cursor/mcp.json` pointing at `…/capabilities/awa/bin/awa-engine.sh` with
-  args `["mcp-serve"]`
+- `awa` entry in `~/.cursor/mcp.json` with `env.AWA_POLICY` → host overlay policy and
+  `env.AWA_GOVERNED_ROOT` → `~/dev` (re-run overlay install or local `install.sh --repair` with
+  those env vars if missing).
 - Hook-probe UAT repo (captures `beforeMCPExecution` payloads)
 
 ```bash
@@ -21,14 +24,17 @@ Open `~/awa-mcp-uat` as a **Desktop** agent (not cloud — cloud omits MCP hooks
 
 ## Drive steps
 
-Paste into the agent chat:
+Paste into the agent chat (extends 2026-07-05 probe with mode write tools):
 
 ```
-1. Confirm the awa MCP server is connected (list MCP tools if your UI shows them).
-2. Call the awa MCP tool awa_status with no arguments. Paste the JSON result.
-3. Call awa_guard_shell with cwd="/tmp" and command="git status". Paste the JSON result.
-4. Report whether any beforeMCPExecution hook fired (check hook log below).
-5. Run: cat "${XDG_STATE_HOME:-$HOME/.local/state}/awa/hook-probe/events.jsonl" 2>/dev/null | tail -20
+1. Call awa_status (no args). Paste JSON.
+2. Call awa_guard_shell cwd="/tmp" command="git status". Paste JSON.
+3. Call awa_mode_list (no args). Paste JSON — expect default_mode ask_on.
+4. Call awa_mode_set rel="." mode="off". MUST fail (broad-off). Paste JSON — expect ok:false.
+5. Call awa_mode_set rel="personal/<your-fixture>" mode="ask_on". Paste JSON.
+6. Run: cat "${HOME}/.local/state/awa/hook-probe/events.jsonl" 2>/dev/null | tail -30
+7. Paste any beforeMCPExecution line with mcp_server_name "awa" and tool_name awa_mode_set
+   (or say NO_AWA_MCP_WRITE_HOOK_RECORD).
 ```
 
 ## Analyze
@@ -41,22 +47,25 @@ python3 ~/dev/capabilities/awa/hook-probe/analyze.py
 
 | Check | Evidence |
 |-------|----------|
-| `awa_status` resolves | Agent returns JSON with `wal` / `active_leases` (or honest error if state uninitialized) |
+| `awa_status` resolves | JSON with `wal` / `active_leases` |
 | `awa_guard_shell` resolves | JSON with `permission` field |
-| `beforeMCPExecution` fired for **awa** | Log record with `tool_name` ∈ `{awa_status, awa_lease_read, awa_guard_shell}` and `mcp_server_name` = `awa` |
+| `awa_mode_list` resolves host modes file | `default_mode: ask_on` |
+| Broad-off rejected | `awa_mode_set rel="."` → `ok: false`, MCP `isError: true` |
+| `beforeMCPExecution` for **write** tool | Log: `tool_name: awa_mode_set`, `mcp_server_name: awa` |
 
-**Quick headless smoke (operator, before live run):**
+**Quick headless smoke (before live run):**
 
 ```bash
-printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' \
-  | ~/dev/capabilities/awa/bin/awa-engine.sh mcp-serve \
+export AWA_POLICY=~/dev/_ops/policy/worktree-policy.yml AWA_GOVERNED_ROOT=~/dev
+ENGINE=~/.local/share/awa/current/bin/awa-engine.sh
+printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' | "$ENGINE" mcp-serve \
   | python3 -c 'import json,sys; print([t["name"] for t in json.loads(sys.stdin.readline())["result"]["tools"]])'
-# Expect: ['awa_status', 'awa_lease_read', 'awa_guard_shell']
+# Expect 9 tools incl. awa_mode_set … awa_mode_sync
 ```
 
 ## Evidence to record
 
 - Date, Desktop, Cursor version
 - `tools/list` names from live agent or headless smoke
-- `beforeMCPExecution` JSONL line showing `mcp_server_name: awa` and an `awa_*` tool_name
-- Paste into `SECURITY.md` live-verification section
+- `beforeMCPExecution` JSONL line for an **awa_mode_*** write tool
+- Paste into `SECURITY.md` and `RESULTS-e2e-uat-*.md`

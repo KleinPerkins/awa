@@ -1,5 +1,10 @@
 # AWA closeout — operator instructions (non-technical)
 
+> **Status (2026-07-06):** Extended E2E UAT session added — see
+> **[OPERATOR-UAT-SESSION.md](OPERATOR-UAT-SESSION.md)** for the full Desktop+Cloud+mode+apply-back
+> walkthrough. The 2026-07-05 closeout checks below remain the historical record; re-run Check 2
+> with mode write tools per the updated [awa-mcp-runbook.md](awa-mcp-runbook.md).
+
 > **Status (2026-07-05):** Both live checks below are **complete**. This doc is retained as the
 > record of how they were run. For ledger evidence see `hook-probe/RESULTS-CLOUD-2026-07-05.md`
 > and `hook-probe/RESULTS-MCP-2026-07-05.md`.

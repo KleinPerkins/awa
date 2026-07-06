@@ -47,7 +47,7 @@ not retained in the captured `events.jsonl`, so L4 rests on the live observation
 the L2 doc-snapshot; optional re-drive: `live-verify/desktop-hook-redrive-runbook.md`). **Engine
 build (reconciled 2026-07-05):** recovery manager, daemon/watcher, MCP server, and degraded-mode
 guard are **built** in this repo (`engine/recovery.py`, `daemon.py`, `mcp_server.py`, `guard.py`)
-with **85** passing tests (`make verify`). Copy-honesty `recovery-manager` capability is green when
+with **187** passing tests (`make verify`). Copy-honesty `recovery-manager` capability is green when
 `engine.tests.test_recovery` passes (see host `operator-copy.json`). **Live verification ledger
 (operator-driven, 2026-07-05):**
 
@@ -56,6 +56,13 @@ with **85** passing tests (`make verify`). Copy-honesty `recovery-manager` capab
 | L9/L10 cloud project hooks | **Verified** | `hook-probe/RESULTS-CLOUD-2026-07-05.md` |
 | Live AWA-MCP (`awa_*` + `beforeMCPExecution`) | **Verified** | `hook-probe/RESULTS-MCP-2026-07-05.md` |
 | R-A `move_agent_to_root` | **Verified (A+B+C)** | `live-verify/RESULTS-R-A-2026-07-05.md` |
+| E2E UAT mode + MCP write + apply-back (2026-07-06) | **Partially closed (headless GREEN; live UX pending operator)** | `live-verify/RESULTS-e2e-uat-20260706.md` — headless: mode guard ask/off, MCP mode tools + broad-off reject, apply-back PR on disposable remote; **operator pending:** live ask prompt, `beforeMCPExecution` on `awa_mode_set`, cloud re-probe post-hardening, dashboard canvas |
+
+**E2E UAT (2026-07-06):** after per-repo mode + round-2 hardening (`a965adf`), headless verification
+confirmed `awa_mode_*` MCP tools resolve against host `modes_file`, broad-off `.` is rejected with
+MCP `isError: true`, ASK_ON/OFF guard decisions match policy, dashboard JSON surfaces `ask_on`,
+and apply-back opened PR #1 on disposable `KleinPerkins/awa-uat-eligible-20260706T110803`. Live
+Desktop/cloud UX rows require operator sign-off via `live-verify/OPERATOR-UAT-SESSION.md`.
 
 **L9/L10 (Verified, cloud probe 2026-07-05):** live Cursor **Cloud** agent on committed project
 hooks in `KleinPerkins/awa-cloud-hook-uat` recorded 6 hook events: 3× `beforeShellExecution`
