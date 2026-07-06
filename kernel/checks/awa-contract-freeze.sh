@@ -167,6 +167,101 @@ else
   bad "lease shape contract is under-specified"
 fi
 
+# 5+6) Per-repo MODE ask_on is a FIRST-CLASS behavior, ADDITIVE WITHIN v1 (no v2). One shared
+#      STANDALONE fixture: a temp governed root + a host policy pointing at a modes file that
+#      classifies the repo `proj` as ask_on. From it we assert BOTH the guard ask outcome and
+#      the dashboard surfacing. No host dependency; the modes_file is resolved relative to the
+#      temp policy's own directory.
+mouat="$(mktemp -d)"
+morepo="$mouat/proj"
+cat > "$mouat/policy.yml" <<'YML'
+version: 1
+default: include
+modes_file: modes.yml
+YML
+cat > "$mouat/modes.yml" <<'YML'
+schema: awa-modes/v1
+default_mode: on
+modes:
+  proj: ask_on
+YML
+askon_guard_json=""; askon_emit=""
+if mkdir -p "$morepo"; then
+  ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES 2>/dev/null || true
+    git init -q "$morepo" && printf '#\n' > "$morepo/f" && git -C "$morepo" add f &&
+    git -C "$morepo" -c user.email="49759187+KleinPerkins@users.noreply.github.com" -c user.name="KleinPerkins" commit -qm init &&
+    git -C "$morepo" branch -M main &&
+    git -C "$morepo" remote add origin "git@github.com:KleinPerkins/awa-contract-temp.git" ) >/dev/null 2>&1
+  # (a) GUARD: a mutating command on an ask_on primary checkout -> frozen `ask` shape.
+  askon_guard_json="$(printf '{"cwd":"%s","command":"git add f"}' "$morepo" | \
+    AWA_GOVERNED_ROOT="$mouat" AWA_POLICY="$mouat/policy.yml" "$GUARD" 2>/dev/null || true)"
+  # (b) DASHBOARD: the emitter tolerates + surfaces ask_on without a summary-map KeyError.
+  askon_emit="$(AWA_GOVERNED_ROOT="$mouat" AWA_POLICY="$mouat/policy.yml" \
+    "$DEV_WORKTREE" dashboard-data --root "$mouat" 2>/dev/null || true)"
+fi
+rm -rf "$mouat" 2>/dev/null || true
+
+# 5) Guard: ask_on asks on a mutating primary exactly like include/on (frozen ask shape).
+if CONTRACT="$CONTRACT" ASKON="$askon_guard_json" python3 - <<'PY'
+import json, os, sys
+c = json.load(open(os.environ["CONTRACT"]))["guard_permission"]
+errs = []
+try:
+    k = json.loads(os.environ["ASKON"])
+except Exception:
+    k = {}; errs.append("ask_on guard response not JSON")
+if k.get("permission") != "ask":
+    errs.append(f'ask_on mutating primary expected ask, got {k.get("permission")!r}')
+else:
+    for key in c["ask_shape"]:
+        if key not in k:
+            errs.append(f"ask shape missing: {key}")
+    if k.get("permission") not in c["permission_values"]:
+        errs.append(f'permission {k.get("permission")!r} not in {c["permission_values"]}')
+if errs:
+    print("ASK_ON GUARD DRIFT: " + "; ".join(errs), file=sys.stderr); sys.exit(1)
+sys.exit(0)
+PY
+then
+  pass "ask_on classification yields the frozen ask shape on a mutating primary (additive within v1)"
+else
+  bad "ask_on guard behavior missing/broken (a mutating primary must ASK for an ask_on repo)"
+fi
+
+# 6) Dashboard: the emitter tolerates ask_on (no KeyError) and surfaces the OPTIONAL summary.ask_on
+#    key + an ask_on repo row, while the frozen required floor (schema + summary_keys) stays intact.
+if CONTRACT="$CONTRACT" EMIT="$askon_emit" python3 - <<'PY'
+import json, os, sys
+c = json.load(open(os.environ["CONTRACT"]))["dashboard_data"]
+errs = []
+try:
+    d = json.loads(os.environ["EMIT"])
+except Exception as exc:
+    print(f"ask_on emit not JSON (summary-map KeyError/crash on ask_on?): {exc}", file=sys.stderr); sys.exit(1)
+# Frozen required floor must remain intact (the additive ask_on path must not drop it).
+if d.get("schema") != c["schema"]:
+    errs.append(f'schema={d.get("schema")!r} != {c["schema"]!r}')
+summ = d.get("summary", {})
+for k in c["summary_keys"]:
+    if k not in summ:
+        errs.append(f"required summary-key dropped: {k}")
+# Additive: ask_on must be surfaced (optional key present + counted) and appear as a repo row.
+if "ask_on" not in summ:
+    errs.append("optional summary.ask_on not surfaced when modes configure ask_on")
+elif not isinstance(summ.get("ask_on"), int) or summ.get("ask_on", 0) < 1:
+    errs.append(f'summary.ask_on={summ.get("ask_on")!r} did not count the ask_on repo')
+if not any(r.get("classification") == "ask_on" for r in d.get("repos", [])):
+    errs.append("no repo surfaced with classification ask_on")
+if errs:
+    print("ASK_ON DASHBOARD DRIFT: " + "; ".join(errs), file=sys.stderr); sys.exit(1)
+sys.exit(0)
+PY
+then
+  pass "dashboard emitter surfaces ask_on additively (summary.ask_on present + counted; required floor intact; no KeyError)"
+else
+  bad "dashboard emitter does not tolerate/surface ask_on (summary.ask_on / count / KeyError / floor)"
+fi
+
 if [ "$fail" -eq 0 ]; then
   echo "awa-contract-freeze: OK"
 else

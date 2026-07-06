@@ -4,6 +4,10 @@
 # Run from a checkout (it just installs), or standalone (it clones KleinPerkins/awa to a durable
 # location first, then installs). Idempotent: an existing clone is fast-forwarded, not re-cloned.
 #
+# Both paths below `exec` install.sh, so the clone+install flow carries through install.sh's
+# modes-file ensure step (schema awa-modes/v1 + default_mode from the host policy's modes_file
+# pointer) with NO duplicated logic here.
+#
 #   bash bootstrap.sh [install-args...]     # e.g. bash bootstrap.sh --repair
 set -euo pipefail
 

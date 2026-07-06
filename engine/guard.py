@@ -155,14 +155,18 @@ def decide_shell(cwd: str, command: str, policy_path: str,
     hooks_path = _hooks_path(cwd)
     cls = policy_mod.classify(rel, ctx.toplevel, cfg, hooks_path=hooks_path,
                               has_origin=has_origin, is_root=(rel == "."))
-    if cls.classification != policy_mod.INCLUDE:
+    # ASK_ON asks on primary mutation exactly like INCLUDE (a coherent nudge to a Safe
+    # Workspace); every other classification (exclude/advisory/not-git) allows.
+    if cls.classification not in (policy_mod.INCLUDE, policy_mod.ASK_ON):
         return _allow(f"{cls.classification}: {cls.reason}", cls.classification)
     if classify_mutating(command):
-        return Decision(
-            "ask",
-            "mutating shell command on an included PRIMARY checkout — use a Safe Workspace first",
-            cls.classification,
-        )
+        if cls.classification == policy_mod.ASK_ON:
+            reason = ("mutating shell command on an ask_on PRIMARY checkout — "
+                      "use a Safe Workspace first")
+        else:
+            reason = ("mutating shell command on an included PRIMARY checkout — "
+                      "use a Safe Workspace first")
+        return Decision("ask", reason, cls.classification)
     return _allow("read-only command on primary", cls.classification)
 
 

@@ -22,6 +22,7 @@ from . import (
     guard as guard_mod,
     lease as lease_mod,
     lifecycle,
+    modes as modes_mod,
     paths,
     recovery,
     state as state_mod,
@@ -151,6 +152,42 @@ def cmd_guard(args: argparse.Namespace) -> int:
     return _emit({"ok": False, "error": f"unknown guard subcommand: {args.what}"}, code=2)
 
 
+def _resolve_modes_path(args: argparse.Namespace) -> str:
+    """Resolve the modes-file path: explicit --modes-file wins, else the host policy's
+    `modes_file:` pointer (zero-link — the path is always host-supplied, never hardcoded)."""
+    explicit = getattr(args, "modes_file", None)
+    if explicit:
+        return os.path.expanduser(explicit)
+    mf = modes_mod.resolve_modes_file(args.policy)
+    if not mf:
+        raise modes_mod.ModesError(
+            f"no modes_file configured in policy: {args.policy} "
+            "(set `modes_file:` in the host policy or pass --modes-file)"
+        )
+    return mf
+
+
+def cmd_mode(args: argparse.Namespace) -> int:
+    try:
+        path = _resolve_modes_path(args)
+        if args.what == "list":
+            return _emit(modes_mod.list_modes(path))
+        if args.what == "get":
+            return _emit(modes_mod.get_mode(path, args.rel))
+        if args.what == "set":
+            return _emit(modes_mod.set_mode(path, args.rel, args.mode))
+        if args.what == "remove":
+            out = modes_mod.remove_mode(path, args.rel)
+            return _emit(out, code=0 if out["removed"] else 1)
+        if args.what == "repair":
+            return _emit(modes_mod.repair(path))
+        if args.what == "sync":
+            return _emit(modes_mod.sync(path, default_mode=args.default_mode))
+    except modes_mod.ModesError as exc:
+        return _emit({"action": f"mode {args.what}", "ok": False, "error": str(exc)}, code=2)
+    return _emit({"ok": False, "error": f"unknown mode subcommand: {args.what}"}, code=2)
+
+
 def cmd_daemon(args: argparse.Namespace) -> int:
     inst = daemon_mod.SingleInstance()
     if args.what == "status":
@@ -267,6 +304,23 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--policy", default=_DEFAULT_POLICY)
     g.set_defaults(fn=cmd_guard)
 
+    md = sub.add_parser(
+        "mode",
+        help="manage the tool-owned per-repo modes file (list/get/set/remove/repair/sync)",
+    )
+    md.add_argument("what", choices=["list", "get", "set", "remove", "repair", "sync"])
+    md.add_argument("rel", nargs="?", default=None,
+                    help="repo path/glob relative to the governed root (get/set/remove)")
+    md.add_argument("mode", nargs="?", default=None,
+                    help="mode value on|ask_on|off (set)")
+    md.add_argument("--policy", default=_DEFAULT_POLICY,
+                    help="host policy file whose modes_file pointer locates the modes file")
+    md.add_argument("--modes-file", dest="modes_file", default=None,
+                    help="explicit modes-file path (overrides the policy pointer)")
+    md.add_argument("--default-mode", dest="default_mode", default=None,
+                    help="seed default_mode when creating the file (sync)")
+    md.set_defaults(fn=cmd_mode)
+
     d = sub.add_parser("daemon", help="watcher/enforcer (single-instance)")
     d.add_argument("what", choices=["status", "run-once"])
     d.add_argument("--delete-remote", action="store_true")
@@ -290,7 +344,7 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--limit", type=int, default=50)
     ev.set_defaults(fn=cmd_events)
 
-    sub.add_parser("mcp-serve", help="run the local stdio MCP server (read-only AWA tools)").set_defaults(fn=cmd_mcp_serve)
+    sub.add_parser("mcp-serve", help="run the local stdio MCP server (read-only state + path-scoped mode config tools)").set_defaults(fn=cmd_mcp_serve)
 
     return p
 

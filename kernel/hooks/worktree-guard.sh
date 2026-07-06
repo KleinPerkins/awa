@@ -282,7 +282,8 @@ if [ "$event" = "file-edit" ]; then
       [ -n "$status" ] || continue
       classification="$(printf '%s\n' "$status" | awk -F': ' '$1=="classification"{print $2; exit}')"
       linked="$(printf '%s\n' "$status" | awk -F': ' '$1=="linked-worktree"{print $2; exit}')"
-      if [ "$classification" = "include" ] && [ "$linked" = "no" ]; then
+      # Detection receipt for BOTH on(include) and ask_on primary hits (observation-only).
+      if { [ "$classification" = "include" ] || [ "$classification" = "ask_on" ]; } && [ "$linked" = "no" ]; then
         write_detection_receipt "$target" "$probe"
       fi
     done
@@ -305,7 +306,8 @@ check_probe() {
   fi
   classification="$(printf '%s\n' "$status" | awk -F': ' '$1=="classification"{print $2; exit}')"
   linked="$(printf '%s\n' "$status" | awk -F': ' '$1=="linked-worktree"{print $2; exit}')"
-  if [ "$classification" = "include" ] && [ "$linked" = "no" ]; then
+  # ASK_ON asks on primary mutation exactly like on(include); exclude/advisory allow.
+  if { [ "$classification" = "include" ] || [ "$classification" = "ask_on" ]; } && [ "$linked" = "no" ]; then
     if [ "$payload_ok" != "yes" ] || [ "$is_mutating" -eq 1 ] || [ "$reason" = "file-edit" ]; then
       respond_ask \
         "This appears to target an included primary checkout. Use a Safe Workspace first?" \

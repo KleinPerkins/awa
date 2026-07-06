@@ -29,7 +29,10 @@ import {
 // ---------------------------------------------------------------------------
 
 type WtStatus = "even" | "ahead" | "behind" | "diverged" | "no-base" | "unknown";
-type Classification = "include" | "exclude" | "advisory";
+type Classification = "include" | "exclude" | "advisory" | "ask_on";
+// Resolved explicit per-repo mode (additive, optional). "" == no matching modes entry;
+// "invalid" == a matching entry carried an unrecognized value.
+type RepoMode = "on" | "ask_on" | "off" | "invalid" | "";
 
 type Worktree = {
   path: string;
@@ -66,6 +69,10 @@ type Repo = {
   name: string;
   classification: Classification;
   reason: string;
+  // Additive, optional (older emitter output omits these). `mode` is the resolved explicit
+  // per-repo mode; `mode_error` is set only when a matching modes entry is invalid.
+  mode?: RepoMode;
+  mode_error?: string;
   owner_repo: string;
   has_base: boolean;
   base_ref: string;
@@ -80,6 +87,9 @@ type Summary = {
   included: number;
   excluded: number;
   advisory: number;
+  // Additive, optional: present when the host runs the per-repo mode feature (ask_on repos
+  // or configured modes). Absent for older/mode-free emitter output.
+  ask_on?: number;
   worktrees: number;
   linked: number;
   dirty: number;
@@ -334,8 +344,12 @@ const GOVERNED_HEADERS = ["Repo", "Branch", "Role", "Working tree", "vs main", "
 function worktreeRows(rows: WtRow[], showRaw: boolean) {
   return rows.map(({ repo, wt }) => [
     <Stack gap={2}>
-      <Text weight="semibold">{repo.rel}</Text>
+      <Row gap={6} align="center">
+        <Text weight="semibold">{repo.rel}</Text>
+        {repoModeBadges(repo)}
+      </Row>
       <Text size="small" tone="quaternary">{repo.owner_repo || "(no origin)"}</Text>
+      {repo.mode_error ? <Text size="small" tone="quaternary">{repo.mode_error}</Text> : null}
     </Stack>,
     branchCell(repo.rel, wt),
     roleCell(wt),
@@ -351,8 +365,23 @@ function worktreeRows(rows: WtRow[], showRaw: boolean) {
 
 function classificationPill(cls: Classification) {
   if (cls === "include") return <Pill size="sm" active>include</Pill>;
+  if (cls === "ask_on") return <Pill size="sm" active>ask-on</Pill>;
   if (cls === "advisory") return <Pill size="sm">advisory</Pill>;
   return <Pill size="sm">exclude</Pill>;
+}
+
+// ask_on is rendered as its own labelled bucket (never the exclude fallthrough): a distinct
+// "ask-on" pill plus, when a modes entry is invalid, a visible "invalid mode" flag. Resilient
+// to older emitter payloads that omit repo.mode / repo.mode_error.
+function repoModeBadges(repo: Repo) {
+  const badges: any[] = [];
+  if (repo.classification === "ask_on") {
+    badges.push(<Pill key="ask-on" size="sm" active>ask-on</Pill>);
+  }
+  if (repo.mode === "invalid" || repo.mode_error) {
+    badges.push(<Pill key="invalid" size="sm">invalid mode</Pill>);
+  }
+  return badges.length ? badges : null;
 }
 
 function StatusCard({
@@ -534,6 +563,9 @@ export default function AwaWorktreeDashboard() {
         <Grid columns="repeat(auto-fit, minmax(124px, 1fr))" gap={12}>
           <Stat value={raw.summary.repos} label="Governed repos" />
           <Stat value={raw.summary.included} label="Included" tone="info" />
+          {typeof raw.summary.ask_on === "number" ? (
+            <Stat value={raw.summary.ask_on} label="Ask-on" tone={raw.summary.ask_on ? "info" : "success"} />
+          ) : null}
           <Stat value={raw.summary.worktrees} label="Worktrees" />
           <Stat value={raw.summary.linked} label="Linked" tone={raw.summary.linked ? "info" : "success"} />
           <Stat value={raw.summary.dirty} label="Dirty" tone={raw.summary.dirty ? "warning" : "success"} />

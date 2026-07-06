@@ -22,6 +22,9 @@ CLI (consumed by the shell kernel):
       emit shell-eval-safe assignments (POL_DEFAULT, POL_MANAGED, POL_GOVERNED_ROOTS=(...), ...)
   awa_policy.py classify --policy P [--governed-root R] --toplevel T [--hooks-path H] [--has-origin 0|1]
       print: <class>\t<reason>\t<rel>\t<governed_root>
+  awa_policy.py mode-for --policy P --toplevel T [--governed-root R]
+      print the resolved EXPLICIT mode for the repo: on|ask_on|off|"" (no entry) |
+      "invalid" (a matching entry has a bad value). Additive; does NOT change classify.
   awa_policy.py governed-roots --policy P [--governed-root R]
       print resolved governed roots, one per line
 """
@@ -39,6 +42,11 @@ INCLUDE = "include"
 EXCLUDE = "exclude"
 ADVISORY = "advisory"
 NOT_GIT = "not-git"
+ASK_ON = "ask_on"
+
+# Explicit per-repo mode values (awa-modes/v1). Kept as a tuple so callers can
+# distinguish a present-but-invalid mode value from a valid one.
+MODE_VALUES = ("on", "ask_on", "off")
 
 
 def parse_mini_yaml(text: str) -> dict:
@@ -93,6 +101,50 @@ def parse_mini_yaml(text: str) -> dict:
     return root
 
 
+def _modes_from_data(data: dict) -> tuple[dict, str | None]:
+    """Extract (modes, default_mode) from one parsed policy/modes document.
+
+    `modes` values are case-normalized; `default_mode` is None when absent so callers
+    can distinguish "not specified" from an explicit value during merge.
+    """
+    modes: dict = {}
+    raw = data.get("modes")
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            modes[str(k)] = str(v).strip().lower()
+    dm = data.get("default_mode")
+    default_mode = str(dm).strip().lower() if dm is not None else None
+    return modes, default_mode
+
+
+def _resolve_modes(data: dict, policy_path: str | Path) -> tuple[dict, str]:
+    """Resolve the explicit modes map + default_mode from inline policy values and an
+    optional `modes_file:` pointer.
+
+    The pointer is resolved relative to the policy file's directory (~ and absolute paths
+    honored). The referenced file (schema awa-modes/v1) is MERGED over the inline values,
+    the referenced file winning on key collision. Missing default_mode defaults to "on"
+    (byte-for-byte back-compat when nothing is configured).
+    """
+    modes, inline_default = _modes_from_data(data)
+    default_mode = inline_default or "on"
+
+    modes_file = data.get("modes_file")
+    if modes_file:
+        mf = os.path.expanduser(str(modes_file))
+        if not os.path.isabs(mf):
+            base = Path(policy_path).resolve().parent
+            mf = str(base / mf)
+        mfp = Path(mf)
+        if mfp.exists():
+            fdata = parse_mini_yaml(mfp.read_text(encoding="utf-8"))
+            fmodes, fdefault = _modes_from_data(fdata)
+            modes.update(fmodes)  # referenced file wins on key collision
+            if fdefault:
+                default_mode = fdefault
+    return modes, default_mode
+
+
 @dataclass
 class PolicyConfig:
     version: int = 1
@@ -106,6 +158,12 @@ class PolicyConfig:
     read_only_paths: list[str] = field(default_factory=list)
     overrides_include: list[str] = field(default_factory=list)
     overrides_exclude: list[str] = field(default_factory=list)
+    # Explicit per-repo modes (rel-glob -> on|ask_on|off). Empty by default so a host
+    # that configures nothing behaves byte-for-byte as before.
+    modes: dict = field(default_factory=dict)
+    # Governs eligible repos with no explicit mode. Default "on" reproduces today's
+    # derived classification byte-for-byte.
+    default_mode: str = "on"
 
     @classmethod
     def load(cls, path: str | Path) -> "PolicyConfig":
@@ -115,6 +173,7 @@ class PolicyConfig:
         data = parse_mini_yaml(p.read_text(encoding="utf-8"))
         detectors = data.get("detectors", {}) if isinstance(data.get("detectors"), dict) else {}
         overrides = data.get("overrides", {}) if isinstance(data.get("overrides"), dict) else {}
+        modes, default_mode = _resolve_modes(data, path)
         return cls(
             version=int(str(data.get("version", 1)) or 1),
             governed_roots=list(data.get("governed_roots", []) or []),
@@ -127,6 +186,8 @@ class PolicyConfig:
             read_only_paths=list(detectors.get("read_only_paths", []) or []),
             overrides_include=list(overrides.get("include", []) or []),
             overrides_exclude=list(overrides.get("exclude", []) or []),
+            modes=modes,
+            default_mode=default_mode,
         )
 
 
@@ -137,11 +198,35 @@ def _match_any(rel: str, patterns: list[str]) -> bool:
     return False
 
 
+def mode_for(rel: str, cfg: PolicyConfig) -> str:
+    """Return the explicit mode set for `rel` via first-match glob over cfg.modes.
+
+    Uses the same match semantics as `_match_any` (exact-or-glob), iterating in insertion
+    order (first match wins). The returned value is case-normalized and MAY be invalid
+    (present-but-not-in MODE_VALUES); callers validate. Returns "" when no entry matches.
+    """
+    for pat, val in cfg.modes.items():
+        if rel == pat or fnmatch.fnmatch(rel, pat):
+            return str(val).strip().lower()
+    return ""
+
+
 def has_governed_marker(toplevel: str, markers: list[str]) -> bool:
     for marker in markers:
         if (Path(toplevel) / marker).exists():
             return True
     return False
+
+
+def _eligible(reason_on: str, cfg: PolicyConfig) -> tuple[str, str]:
+    """Map an eligible (would-be-include) repo through default_mode."""
+    dm = cfg.default_mode
+    if dm == "on":
+        return (INCLUDE, reason_on)
+    if dm == "off":
+        return (EXCLUDE, "policy default_mode: off")
+    # ask_on, plus any invalid default_mode -> safe ask_on
+    return (ASK_ON, "policy default_mode: ask_on")
 
 
 def classify(
@@ -153,9 +238,20 @@ def classify(
     has_origin: bool = True,
     is_root: bool = False,
 ) -> tuple[str, str]:
-    """Generic classification. Order (first match wins) mirrors engine/policy.py."""
+    """Generic classification. Order (first match wins) mirrors engine/policy.py.
+
+    not-git -> explicit OFF -> legacy overrides -> SAFETY excludes (umbrella /
+    governed-marker / foreign-hook / read-only) -> explicit ON/ASK_ON/invalid -> exclude
+    globs -> no-origin advisory -> eligibility (include glob or policy default) mapped
+    through default_mode. Safety-excludes beat explicit ON/ASK_ON; explicit OFF beats all.
+    """
     if toplevel is None:
         return (NOT_GIT, "not a git repository")
+
+    m = mode_for(rel, cfg)
+
+    if m == "off":
+        return (EXCLUDE, "explicit mode: off")
 
     if _match_any(rel, cfg.overrides_exclude):
         return (EXCLUDE, "operator override: exclude")
@@ -176,6 +272,13 @@ def classify(
     if _match_any(rel, cfg.read_only_paths):
         return (EXCLUDE, "read-only/reference path")
 
+    if m == "on":
+        return (INCLUDE, "explicit mode: on")
+    if m == "ask_on":
+        return (ASK_ON, "explicit mode: ask_on")
+    if m:  # present but invalid
+        return (ASK_ON, "invalid explicit mode; safe fallback")
+
     if _match_any(rel, cfg.exclude):
         return (EXCLUDE, "excluded by workspace policy")
 
@@ -183,10 +286,10 @@ def classify(
         return (ADVISORY, "no origin remote")
 
     if _match_any(rel, cfg.include):
-        return (INCLUDE, "included by workspace policy")
+        return _eligible("included by workspace policy", cfg)
 
     if cfg.default == INCLUDE:
-        return (INCLUDE, "policy default: include")
+        return _eligible("policy default: include", cfg)
     return (ADVISORY, "outside governed include patterns")
 
 
@@ -267,7 +370,7 @@ def _opt(argv: list[str], name: str, default: str = "") -> str:
 
 def main(argv: list[str]) -> int:
     if not argv:
-        print("usage: awa_policy.py {dump|classify|governed-roots} --policy P [...]", file=sys.stderr)
+        print("usage: awa_policy.py {dump|classify|mode-for|governed-roots} --policy P [...]", file=sys.stderr)
         return 2
     cmd = argv[0]
     rest = argv[1:]
@@ -301,6 +404,22 @@ def main(argv: list[str]) -> int:
             hooks_path=hooks_path, has_origin=has_origin, is_root=(rel == "."),
         )
         print("\t".join([cls, reason, rel, gr]))
+        return 0
+
+    if cmd == "mode-for":
+        toplevel = _opt(rest, "--toplevel")
+        if not toplevel:
+            print("mode-for requires --toplevel", file=sys.stderr)
+            return 2
+        gr = resolve_governed_root(toplevel, env_root, cfg)
+        rel = rel_to_root(toplevel, gr)
+        m = mode_for(rel, cfg)
+        if m == "":
+            print("")
+        elif m in MODE_VALUES:
+            print(m)
+        else:
+            print("invalid")
         return 0
 
     print(f"awa_policy.py: unknown command: {cmd}", file=sys.stderr)

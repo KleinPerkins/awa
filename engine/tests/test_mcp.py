@@ -27,10 +27,13 @@ class TestMcpContract(EngineTestCase):
         self.assertEqual(r["serverInfo"]["name"], "awa")
         self.assertIn("tools", r["capabilities"])
 
-    def test_tools_list_exposes_readonly_tools(self):
+    def test_tools_list_exposes_readonly_and_mode_tools(self):
         resp = _drive([{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}])
         names = {t["name"] for t in resp[0]["result"]["tools"]}
-        self.assertEqual(names, {"awa_status", "awa_lease_read", "awa_guard_shell"})
+        self.assertTrue({"awa_status", "awa_lease_read", "awa_guard_shell"} <= names)
+        self.assertTrue(
+            {"awa_mode_list", "awa_mode_get", "awa_mode_set", "awa_mode_remove",
+             "awa_mode_repair", "awa_mode_sync"} <= names)
 
     def test_notification_produces_no_response(self):
         resp = _drive([{"jsonrpc": "2.0", "method": "notifications/initialized"}])

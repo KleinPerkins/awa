@@ -41,6 +41,16 @@ verbs:
   doctor         run policy and worktree-health checks
   policy-check   validate the policy file and print a summary
   dashboard-data emit READ-ONLY awa-worktree/v1 JSON for the status dashboard
+  mode           manage the tool-owned per-repo modes file (list|get|set|remove|repair|sync)
+
+mode subcommands (delegated to the engine modes manager; edits ONLY the host modes file):
+  mode list                      list all explicit modes + default_mode
+  mode get <rel>                 show the effective mode for a repo path/glob
+  mode set <rel> <on|ask_on|off> set an explicit mode
+  mode remove <rel>              remove an explicit mode entry
+  mode repair                    re-materialize/reconcile eligible repos (idempotent)
+  mode sync [--default-mode M]   reconcile new/removed repos (creates the file if absent)
+  (accepts --policy P / --modes-file F; defaults to the resolved host policy)
 
 dashboard-data options:
   --root DIR       governed root to scan (default: resolved governed root / AWA_GOVERNED_ROOT)
@@ -120,6 +130,17 @@ classify_repo() {
   classify_context | cut -f1,2
 }
 
+# Resolve the EXPLICIT per-repo mode (on|ask_on|off|invalid|(none)) via the generic
+# `mode-for` CLI — the SAME kernel resolver + host policy the classifier uses (zero-link;
+# the modes map / default_mode / modes_file all live in the host policy). Empty output
+# (no explicit entry) is surfaced as `(none)`. This is a READ; it never mutates anything.
+explicit_mode_for() {
+  local top="$1" m
+  m="$(python3 "$AWA_POLICY_LIB" mode-for --policy "$POLICY" \
+        --governed-root "${AWA_GOVERNED_ROOT:-}" --toplevel "$top" 2>/dev/null || true)"
+  if [ -z "$m" ]; then printf '(none)'; else printf '%s' "$m"; fi
+}
+
 current_state() {
   local top class reason rel gr linked
   top="$(top_level)" || { printf 'repo: <none>\nclassification: not-git\nreason: Not a git repository\n'; return; }
@@ -133,6 +154,9 @@ current_state() {
   printf 'linked-worktree: %s\n' "$linked"
   printf 'git-dir: %s\n' "$(git_dir_abs 2>/dev/null || true)"
   printf 'git-common-dir: %s\n' "$(git_common_abs 2>/dev/null || true)"
+  # Additive line ONLY (existing fields above are unchanged/unreordered — bash readers
+  # depend on them). Surfaces the explicitly-set mode, distinct from the derived class.
+  printf 'explicit-mode: %s\n' "$(explicit_mode_for "$top")"
 }
 
 slugify() {
@@ -168,7 +192,10 @@ ensure_worktree() {
   local top class reason repo slug ts status_out
   top="$(top_level)" || die "not a git repository"
   IFS=$'\t' read -r class reason < <(classify_repo)
-  if [ "$class" != "include" ]; then
+  # Eligible to create/adopt a Safe Workspace: `include` (ON) OR `ask_on` (ASK_ON). The
+  # nudge is coherent for ASK_ON too (guard asks -> ensure gives a place to work); ASK_ON
+  # is NOT setup-exec eligible (run_worktree_setup keeps its `include`-only gate).
+  if [ "$class" != "include" ] && [ "$class" != "ask_on" ]; then
     if [ "$json" -eq 1 ]; then
       printf '{"action":"noop","classification":"%s","reason":"%s"}\n' "$class" "$(printf '%s' "$reason" | json_escape)"
     else
@@ -178,7 +205,7 @@ ensure_worktree() {
   fi
   if is_linked_worktree; then
     if [ "$json" -eq 1 ]; then
-      printf '{"action":"noop","classification":"include","reason":"already in linked worktree","root":"%s"}\n' "$(printf '%s' "$top" | json_escape)"
+      printf '{"action":"noop","classification":"%s","reason":"already in linked worktree","root":"%s"}\n' "$(printf '%s' "$class" | json_escape)" "$(printf '%s' "$top" | json_escape)"
     else
       note "already in linked worktree: $top"
     fi
@@ -560,17 +587,62 @@ dashboard_data() {
 
 policy_check() {
   [ -f "$POLICY" ] || die "missing policy: $POLICY"
-  python3 - "$POLICY" <<'PY'
+  python3 - "$POLICY" "$KERNEL_DIR/lib" <<'PY'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1])
+sys.path.insert(0, sys.argv[2])
 text = p.read_text()
 required = ["version:", "governed_roots:", "managed_location:", "default:", "include:", "exclude:", "detectors:", "overrides:"]
 missing = [k for k in required if k not in text]
 if missing:
     raise SystemExit(f"policy missing keys: {', '.join(missing)}")
 print(f"policy: {p}")
+
+# Additive per-repo MODE validation (schema awa-modes/v1). Validate `modes:` /
+# `default_mode:` when present — inline OR via a `modes_file:` pointer — parsed with the
+# SAME kernel loader the classifier uses. Absence is valid (these are NOT required keys).
+# Invalid entries WARN only; they NEVER hard-fail (back-compat: only missing required
+# keys fail policy-check).
+warnings = []
+try:
+    import awa_policy
+    data = awa_policy.parse_mini_yaml(text)
+    if any(k in data for k in ("modes", "default_mode", "modes_file")):
+        modes, default_mode = awa_policy._resolve_modes(data, str(p))
+        allowed = "|".join(awa_policy.MODE_VALUES)
+        if default_mode not in awa_policy.MODE_VALUES:
+            warnings.append(f"default_mode '{default_mode}' is not one of {allowed}")
+        for key, val in modes.items():
+            if not str(key).strip():
+                warnings.append("empty modes key")
+            if val not in awa_policy.MODE_VALUES:
+                warnings.append(f"mode for '{key}': '{val}' is not one of {allowed}")
+except Exception as exc:  # noqa: BLE001 — additive check never hard-fails
+    warnings.append(f"mode-config check skipped: {exc}")
+
+for w in warnings:
+    print(f"policy-check: WARN {w}", file=sys.stderr)
 print("policy-check: OK")
 PY
+}
+
+# Additive `mode` verb: pass-through to the engine's tool-owned modes-file manager
+# (engine/modes.py via `python3 -m engine mode ...`). ZERO-LINK: the modes-file PATH is
+# resolved by the engine from the SAME host policy this script already uses ($POLICY);
+# this script carries no org/host literals. Verbs: list|get|set|remove|repair|sync.
+run_engine() {
+  local launcher="$AWA_HOME/bin/awa-engine.sh"
+  if [ -x "$launcher" ]; then
+    "$launcher" "$@"
+  else
+    PYTHONPATH="$AWA_HOME${PYTHONPATH:+:$PYTHONPATH}" python3 -m engine "$@"
+  fi
+}
+
+mode_verb() {
+  # Default --policy to the resolved host policy; a caller-supplied --policy/--modes-file
+  # later on the line still wins (argparse: last value for a repeated option).
+  run_engine mode --policy "$POLICY" "$@"
 }
 
 verb="${1:-}"
@@ -582,6 +654,7 @@ case "$verb" in
   doctor) shift; doctor "$@" ;;
   policy-check) shift; policy_check "$@" ;;
   dashboard-data) shift; dashboard_data "$@" ;;
+  mode) shift; mode_verb "$@" ;;
   -h|--help|help|"") usage ;;
   *) die "unknown verb: $verb" ;;
 esac

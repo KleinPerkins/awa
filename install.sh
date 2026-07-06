@@ -36,6 +36,26 @@ MCP_JSON="${AWA_MCP_JSON:-$HOME/.cursor/mcp.json}"
 COPY_TREES=(kernel engine dashboard contracts bin)
 COPY_FILES=(pyproject.toml Makefile install.sh bootstrap.sh ARCHITECTURE.md README.md SECURITY.md LICENSE)
 
+# Ensure the host-configured per-repo modes file exists (schema awa-modes/v1 + a default_mode),
+# delegating to engine/modes.py `sync` (idempotent create; preserves an existing valid default_mode
+# and entries — never clobbers operator intent). ZERO-LINK: the modes-file PATH and default come
+# from the host policy's `modes_file:` pointer (resolved by engine/modes.py), never a literal here.
+# A policy WITHOUT a `modes_file` pointer (e.g. the generic product template) opts out -> no-op.
+ensure_modes_file() {
+  local policy="$1"
+  [ -f "$policy" ] || return 0
+  local engine_sh="$RUNTIME/bin/awa-engine.sh"
+  [ -x "$engine_sh" ] || return 0
+  # Read-only probe: does the host policy declare a modes_file pointer? `mode list` resolves the
+  # pointer without writing and exits non-zero when none is configured -> the host hasn't opted in.
+  "$engine_sh" mode list --policy "$policy" >/dev/null 2>&1 || return 0
+  if "$engine_sh" mode sync --policy "$policy" >/dev/null 2>&1; then
+    awa_log "ensured host-configured modes file (schema awa-modes/v1) via policy modes_file pointer"
+  else
+    awa_warn "modes-file sync reported an issue (non-fatal; kernel guarantee holds engine-off)"
+  fi
+}
+
 do_install() {
   local force="${1:-0}"
   awa_log "installing AWA runtime -> $RUNTIME"
@@ -65,6 +85,10 @@ export AWA_POLICY="\${AWA_POLICY:-$default_policy}"
 export PATH="$RUNTIME/kernel/bin:$RUNTIME/bin:\$PATH"
 EOF
   awa_log "wrote config env -> $ENV_FILE"
+
+  # Ensure the host-configured per-repo modes file exists + is normalized (runs on install AND
+  # --repair). ZERO-LINK: path/default resolved from the host policy's modes_file pointer, not here.
+  ensure_modes_file "${AWA_POLICY:-$default_policy}"
 
   # Cursor hooks (merged, soft backstop) — the installed hooks reference the installed kernel.
   AWA_HOOKS_JSON="$HOOKS_JSON" "$RUNTIME/kernel/hooks/install-hooks.sh"
