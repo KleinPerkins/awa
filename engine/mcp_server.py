@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any, Callable
 
 from . import guard as guard_mod, lease as lease_mod, modes as modes_mod, state as state_mod
@@ -31,10 +32,18 @@ from . import guard as guard_mod, lease as lease_mod, modes as modes_mod, state 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "awa", "version": "1.0.0"}
 
-_DEFAULT_POLICY = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "policy", "worktree-policy.yml",
+# Policy resolution parity with engine/cli.py + kernel/hooks/worktree-guard.sh: honor
+# AWA_POLICY from the MCP server's env (set in mcp.json at install time), else the installed
+# kernel's generic default template — never a nonexistent repo-relative guess.
+_AWA_HOME = os.environ.get("AWA_HOME") or str(Path(__file__).resolve().parent.parent)
+_DEFAULT_POLICY = os.environ.get("AWA_POLICY") or str(
+    Path(_AWA_HOME) / "kernel" / "policy" / "default-worktree-policy.yml"
 )
+
+
+def _policy_path() -> str:
+    """Resolved host policy path (honors AWA_POLICY even if set after import)."""
+    return os.environ.get("AWA_POLICY") or _DEFAULT_POLICY
 
 
 # ---- tool implementations (all read-only) -----------------------------------
@@ -57,7 +66,7 @@ def _tool_lease_read(args: dict) -> dict:
 
 def _tool_guard_shell(args: dict) -> dict:
     d = guard_mod.decide_shell(args.get("cwd", "."), args.get("command", ""),
-                               args.get("policy", _DEFAULT_POLICY))
+                               args.get("policy", _policy_path()))
     return {"permission": d.permission, "reason": d.reason, "classification": d.classification}
 
 
@@ -68,7 +77,7 @@ def _resolve_modes_path() -> str:
     Path-scoping the write tools: the modes file is derived server-side from the host
     policy's ``modes_file:`` pointer, so an agent can only ever mutate that one file.
     """
-    mf = modes_mod.resolve_modes_file(_DEFAULT_POLICY)
+    mf = modes_mod.resolve_modes_file(_policy_path())
     if not mf:
         raise modes_mod.ModesError(
             "no modes_file configured in the host policy; cannot manage modes"
@@ -226,8 +235,9 @@ def handle(msg: dict) -> dict | None:
             out = fn(params.get("arguments", {}) or {})
         except Exception as exc:  # noqa: BLE001
             return _error(rid, -32603, f"tool error: {exc}")
+        is_error = isinstance(out, dict) and out.get("ok") is False
         return _result(rid, {"content": [{"type": "text", "text": json.dumps(out)}],
-                             "isError": False})
+                             "isError": is_error})
     if method == "ping":
         return _result(rid, {})
     if rid is not None:

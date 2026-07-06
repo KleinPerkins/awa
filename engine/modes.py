@@ -61,6 +61,8 @@ _HEADER = (
 # bearing a newline/colon/control-char could otherwise inject an arbitrary key (e.g.
 # ``default_mode: off``) and disable the guard host-wide. Reject anything outside this set.
 _REL_SAFE_RE = re.compile(r"^[A-Za-z0-9/._*?\[\]-]+\Z")
+# Broad rel keys that MUST NOT be set to `off` — they disable the guard for every matched repo.
+_BROAD_OFF_RELS = frozenset({".", "*", "**"})
 # Default governing mode for eligible repos with no explicit entry, used ONLY when a file
 # is (re)created without an existing/explicit default. "on" reproduces today's derived
 # classification byte-for-byte (product back-compat). The host overlay may seed "ask_on".
@@ -124,6 +126,21 @@ def _canon_rel(rel) -> str:
     if s not in (".", ""):
         s = s.rstrip("/")
     return s
+
+
+def _is_pure_glob(rel: str) -> bool:
+    """True when rel contains ONLY glob metacharacters (*?[]) — matches many repos."""
+    return bool(rel) and all(c in "*?[]" for c in rel)
+
+
+def _reject_broad_off(rel: str, mode: str) -> None:
+    """Reject setting `off` on a broad/glob rel that would silence AWA for many repos."""
+    if mode != "off":
+        return
+    if rel in _BROAD_OFF_RELS or _is_pure_glob(rel):
+        raise ModesError(
+            f"refusing to set mode 'off' on broad/glob rel {rel!r} — use an explicit repo path"
+        )
 
 
 # ---- path resolution (host-supplied; zero-link) -----------------------------
@@ -244,6 +261,10 @@ def _validate_rel(rel) -> str:
             f"rel {rel!r} contains characters outside the safe set "
             "(letters, digits, and /._-*?[])"
         )
+    if s.startswith("/"):
+        raise ModesError(f"rel {rel!r} must be relative (must not start with /)")
+    if ".." in s.split("/"):
+        raise ModesError(f"rel {rel!r} must not contain '..' path segments")
     return s
 
 
@@ -286,6 +307,7 @@ def set_mode(path: str | Path, rel: str, mode) -> dict:
     """Set (add or update) ``rel`` -> ``mode``. Validated + atomic; default_mode preserved."""
     rel = _validate_rel(_canon_rel(rel))
     m = _validate_mode(mode)
+    _reject_broad_off(rel, m)
     with _modes_lock(path):
         modes, dm, schema, exists = _read(path)
         default_mode = _preserved_default(dm)
@@ -344,6 +366,11 @@ def repair(path: str | Path) -> dict:
             if not k:
                 dropped[str(key)] = val
                 continue
+            try:
+                _validate_rel(k)
+            except ModesError:
+                dropped[k or str(key)] = val
+                continue
             if v in MODE_VALUES:
                 cleaned[k] = v
             else:
@@ -388,8 +415,15 @@ def sync(path: str | Path, default_mode: Optional[str] = None) -> dict:
         norm_modes: dict = {}
         for key, val in modes.items():
             k = str(key).strip()
-            if k:
-                norm_modes[k] = str(val).strip().lower()
+            if not k:
+                continue
+            try:
+                _validate_rel(k)
+            except ModesError:
+                continue
+            v = str(val).strip().lower()
+            if v in MODE_VALUES:
+                norm_modes[k] = v
         # No-op write: when the parsed+reserialized content already equals the file bytes, do
         # NOT rewrite. `sync` is run unconditionally by install/overlay, so a rewrite of an
         # already-canonical, source-tracked file would dirty the tracked worktree on install.

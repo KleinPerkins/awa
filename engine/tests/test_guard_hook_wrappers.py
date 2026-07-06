@@ -83,7 +83,11 @@ class TestBashGuardWrapperParity(unittest.TestCase):
                     "timeout 5 git commit", "timeout -s KILL 5 git commit",
                     "ionice -c 3 git commit", "chrt -b 0 git commit",
                     "stdbuf -oL git commit", "{ git commit; }",
-                    "nice -n 10 rm -rf x"):
+                    "nice -n 10 rm -rf x",
+                    'bash -c "git commit -am x"',
+                    "builtin git commit",
+                    "doas git commit",
+                    'script -c "git commit" /dev/null'):
             resp = self._guard(cmd)
             self.assertEqual(resp.get("permission"), "ask", cmd)
             # frozen ask shape
@@ -92,7 +96,8 @@ class TestBashGuardWrapperParity(unittest.TestCase):
 
     def test_wrapper_readonly_forms_allow(self):
         for cmd in ("timeout 5 git status", "nice -n 10 ls -la",
-                    "sudo -u root git status", "{ git status; }"):
+                    "sudo -u root git status", "{ git status; }",
+                    'bash -c "git status"'):
             resp = self._guard(cmd)
             self.assertEqual(resp.get("permission"), "allow", cmd)
 

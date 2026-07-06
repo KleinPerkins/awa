@@ -100,6 +100,14 @@ class TestMutatingClassifier(unittest.TestCase):
         "timeout 5 nice -n 10 git commit",   # nested wrappers
         "{ git commit; }",                    # brace group (#7)
         "{ git status; git commit -am x; }",
+        'bash -c "git commit -am x"',
+        'sh -c "git commit"',
+        "builtin git commit",
+        "exec git commit",
+        "doas git commit",
+        "run0 git commit",
+        "setsid git commit",
+        'script -c "git commit" /dev/null',
     ]
     WRAPPER_READONLY = [
         "timeout 5 git status",
@@ -108,6 +116,8 @@ class TestMutatingClassifier(unittest.TestCase):
         "sudo -u root git status",
         "{ git status; }",
         "ionice -c 3 git log",
+        'bash -c "git status"',
+        "python3 -c 'print(1)'",
     ]
 
     def test_wrapper_option_forms_are_mutating(self):
@@ -209,7 +219,8 @@ class TestDecideShellDegraded(EngineTestCase):
         pol = self._policy_for(self._tmp.name)
         for cmd in ("nice -n 10 git commit -am x", "env -C /r git commit",
                     "sudo -u root git commit", "timeout 5 git commit",
-                    "xargs -I{} git commit", "{ git commit; }"):
+                    "xargs -I{} git commit", "{ git commit; }",
+                    'bash -c "git commit -am x"', "builtin git commit"):
             d = guard.decide_shell(repo, cmd, pol)
             self.assertEqual(d.permission, "ask", cmd)
 

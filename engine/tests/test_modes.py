@@ -135,6 +135,23 @@ class TestRelInjection(ModesTestCase):
         with self.assertRaises(modes.ModesError):
             modes.set_mode(self.path, "proj\tx", "on")
 
+    def test_rel_absolute_path_rejected(self):
+        with self.assertRaises(modes.ModesError):
+            modes.set_mode(self.path, "/absolute/path", "on")
+
+    def test_rel_dotdot_segment_rejected(self):
+        with self.assertRaises(modes.ModesError):
+            modes.set_mode(self.path, "foo/../bar", "on")
+
+    def test_broad_off_rel_rejected(self):
+        for rel in (".", "*", "**", "?"):
+            with self.assertRaises(modes.ModesError, msg=rel):
+                modes.set_mode(self.path, rel, "off")
+
+    def test_glob_off_with_path_chars_allowed(self):
+        modes.set_mode(self.path, "personal/*", "off")
+        self.assertEqual(modes.list_modes(self.path)["modes"], {"personal/*": "off"})
+
     def test_get_and_remove_reject_injection(self):
         with self.assertRaises(modes.ModesError):
             modes.get_mode(self.path, "x\ny")
@@ -208,16 +225,18 @@ class TestCorruptFileRecovery(ModesTestCase):
 class TestSerializeChokePoint(ModesTestCase):
     """#10: repair/sync must NOT persist an unsafe key introduced by a hand-edit."""
 
-    def test_repair_refuses_unsafe_handedited_key(self):
+    def test_repair_drops_unsafe_handedited_key(self):
         self.path.write_text(
             "schema: awa-modes/v1\n"
             "default_mode: on\n"
             "modes:\n"
-            "  foo bar: on\n",   # a space-bearing key a hand-edit could introduce
+            "  foo bar: on\n"   # a space-bearing key a hand-edit could introduce
+            "  good: on\n",
             encoding="utf-8",
         )
-        with self.assertRaises(modes.ModesError):
-            modes.repair(self.path)
+        out = modes.repair(self.path)
+        self.assertEqual(out["modes"], {"good": "on"})
+        self.assertIn("foo bar", out["dropped"])
 
 
 class TestConcurrencyLock(ModesTestCase):
@@ -443,20 +462,44 @@ class TestMcpModeTools(ModesTestCase):
         # Point the server's host policy at a temp policy whose modes_file is our scratch
         # file, so the write tools are scoped to it (zero-link: server-resolved, not caller).
         self._saved_policy = mcp_server._DEFAULT_POLICY
+        self._saved_awa_policy = os.environ.get("AWA_POLICY")
         policy_path = self.dir / "worktree-policy.yml"
         policy_path.write_text("modes_file: worktree-modes.yml\n", encoding="utf-8")
-        mcp_server._DEFAULT_POLICY = str(policy_path)
+        os.environ["AWA_POLICY"] = str(policy_path)
+        mcp_server._DEFAULT_POLICY = os.environ["AWA_POLICY"]
 
     def tearDown(self):
         mcp_server._DEFAULT_POLICY = self._saved_policy
+        if self._saved_awa_policy is None:
+            os.environ.pop("AWA_POLICY", None)
+        else:
+            os.environ["AWA_POLICY"] = self._saved_awa_policy
         super().tearDown()
 
-    def _call(self, name: str, arguments: dict | None = None) -> dict:
+    def _call(self, name: str, arguments: dict | None = None) -> tuple[dict, dict]:
         resp = _drive([{
             "jsonrpc": "2.0", "id": 9, "method": "tools/call",
             "params": {"name": name, "arguments": arguments or {}},
         }])
-        return json.loads(resp[0]["result"]["content"][0]["text"])
+        result = resp[0]["result"]
+        return result, json.loads(result["content"][0]["text"])
+
+    def test_resolve_modes_path_via_awa_policy_env(self):
+        """_resolve_modes_path() works when AWA_POLICY is set (no _DEFAULT_POLICY patch)."""
+        policy_path = self.dir / "host-policy.yml"
+        policy_path.write_text("modes_file: worktree-modes.yml\n", encoding="utf-8")
+        saved = os.environ.get("AWA_POLICY")
+        try:
+            os.environ["AWA_POLICY"] = str(policy_path)
+            self.assertEqual(
+                Path(mcp_server._resolve_modes_path()).resolve(),
+                self.path.resolve(),
+            )
+        finally:
+            if saved is None:
+                os.environ.pop("AWA_POLICY", None)
+            else:
+                os.environ["AWA_POLICY"] = saved
 
     def test_mode_tools_registered(self):
         resp = _drive([{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}])
@@ -467,21 +510,29 @@ class TestMcpModeTools(ModesTestCase):
 
     def test_set_get_remove_via_mcp_mutates_only_modes_file(self):
         self._call("awa_mode_sync", {"default_mode": "ask_on"})
-        out = self._call("awa_mode_set", {"rel": "proj", "mode": "on"})
+        _, out = self._call("awa_mode_set", {"rel": "proj", "mode": "on"})
         self.assertEqual(out["mode"], "on")
         # written to exactly the configured modes file
         self.assertTrue(self.path.exists())
         self.assertEqual(modes.list_modes(self.path)["modes"], {"proj": "on"})
-        self.assertEqual(self._call("awa_mode_get", {"rel": "proj"})["mode"], "on")
-        rm = self._call("awa_mode_remove", {"rel": "proj"})
+        _, got = self._call("awa_mode_get", {"rel": "proj"})
+        self.assertEqual(got["mode"], "on")
+        _, rm = self._call("awa_mode_remove", {"rel": "proj"})
         self.assertTrue(rm["removed"])
         self.assertEqual(modes.list_modes(self.path)["modes"], {})
 
     def test_set_invalid_returns_error_no_write(self):
-        out = self._call("awa_mode_set", {"rel": "proj", "mode": "bogus"})
+        result, out = self._call("awa_mode_set", {"rel": "proj", "mode": "bogus"})
+        self.assertTrue(result.get("isError"))
         self.assertFalse(out.get("ok", True))
         self.assertIn("invalid mode", out["error"])
         self.assertFalse(self.path.exists())
+
+    def test_broad_off_via_mcp_returns_is_error(self):
+        result, out = self._call("awa_mode_set", {"rel": "*", "mode": "off"})
+        self.assertTrue(result.get("isError"))
+        self.assertFalse(out.get("ok", True))
+        self.assertIn("broad/glob", out["error"])
 
 
 if __name__ == "__main__":

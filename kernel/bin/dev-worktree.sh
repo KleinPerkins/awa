@@ -665,9 +665,18 @@ try:
                 f"modes_file '{mf}' does not resolve to an existing file ({mfp}) — "
                 "posture silently reverts to defaults"
             )
+        elif not pathlib.Path(mfp).is_file():
+            warnings.append(
+                f"modes_file '{mf}' exists but is not a readable regular file ({mfp}) — "
+                "posture silently reverts to defaults"
+            )
         else:
             try:
                 awa_policy.parse_mini_yaml(pathlib.Path(mfp).read_text(encoding="utf-8"))
+            except OSError as exc:
+                warnings.append(
+                    f"modes_file '{mf}' exists but is unreadable ({mfp}): {exc}"
+                )
             except Exception as exc:  # noqa: BLE001
                 warnings.append(f"modes_file '{mf}' is unparseable: {exc}")
 
