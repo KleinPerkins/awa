@@ -2,8 +2,8 @@
 
 **Session:** interactive end-to-end UAT after the ASK_ON removal — modes collapse to **ON/OFF**, and
 an included-primary mutation returns an **enforced `deny`** (not `ask`).
-**Product pin:** `<fill: HEAD of refactor/remove-ask-on>`
-**Host overlay pin:** `<fill: HEAD of refactor/remove-ask-on-overlay>`
+**Product pin:** `awa#17` squash-merged to `main` as `5522474` (branch `refactor/remove-ask-on`, deleted on merge).
+**Host overlay pin:** `dev#26` squash-merged to `main` as `5374d45` (branch `refactor/remove-ask-on-overlay`, deleted on merge).
 **Fixtures:** bootstrapped fresh at session start via `bootstrap-eligible-uat.sh` /
 `bootstrap-hook-probe-uat.sh` (this session does NOT reuse the 2026-07-06 dated fixtures).
 
@@ -108,18 +108,41 @@ primary checkout, and record for each whether the command actually ran. Expected
 
 ## Cleanup ledger
 
-Track every disposable artifact this session creates so the operator-gated cleanup phase can reverse
-it. **Nothing here is deleted by the implementation worker** — cleanup is a separate operator-gated
-step.
+Operator-gated cleanup executed **2026-07-07** after both PRs merged and all gates passed. Evidence is
+recorded here BEFORE any irreversible delete (especially the apply-back proof repo).
+
+### Apply-back / S3 proof — recorded before deletion
+
+- **Repo:** `KleinPerkins/awa-uat-eligible-20260706T110803` (private, created 2026-07-06, init commit `6a969c7`).
+- **PR #1:** "uat: apply-back test change" — state **OPEN** at time of record —
+  <https://github.com/KleinPerkins/awa-uat-eligible-20260706T110803/pull/1>
+  (head `cursor/worktree/awa-uat-20260706T110803` → base `main`). This PR is the apply-back / S3 proof:
+  the apply-back flow opened a PR from the linked worktree to the disposable remote.
+
+### Artifacts
 
 | Artifact | Kind | Location | Cleanup verb | Status |
 |----------|------|----------|--------------|--------|
-| `<fixture eligible repo>` | local git repo | `<path>` | operator `rm -rf` after sign-off | OPEN |
-| `<fixture eligible remote>` | GitHub repo | `KleinPerkins/<name>` | operator `gh repo delete` | OPEN |
-| `<hook-probe repo>` | local git repo | `<path>` | operator `rm -rf` after sign-off | OPEN |
-| `<apply-back disposable remote>` | GitHub repo | `KleinPerkins/<name>` | operator `gh repo delete` | OPEN |
-| `<linked worktrees created>` | git worktrees | `<paths>` | operator `dev-worktree.sh clean` (bundle-or-refuse) | OPEN |
+| `awa-uat-eligible-20260706T110803` | GitHub repo (apply-back proof) | `KleinPerkins/awa-uat-eligible-20260706T110803` | `gh repo delete` (evidence recorded above) | DELETED 2026-07-07 |
+| `awa-uat-20260706T110803` | local git repo (clone of ^) | `~/dev/personal/awa-uat-20260706T110803` | `rm -rf` | REMOVED 2026-07-07 |
+| `refactor/remove-ask-on` | local branch (merged `awa#17`→`5522474`) | AWA linked worktree | `git worktree remove` + branch delete | REMOVED 2026-07-07 |
+| `refactor/remove-ask-on-overlay` | local branch (merged `dev#26`→`5374d45`) | `~/dev` | `git branch -D` | REMOVED 2026-07-07 |
+| `awa-20260707094822` | AWA linked worktree | `~/.local/share/awa/worktrees/awa/awa-20260707094822` | `dev-worktree.sh clean` (bundle-or-refuse) | BUNDLED+REMOVED 2026-07-07 |
 
-> The implementation worker records rows here as fixtures are created; it does NOT run any cleanup
-> verb (`gh repo delete`, `rm -rf`, `mode remove`, branch/worktree deletion). Those are reserved for
-> the operator-gated cleanup phase.
+### Already absent / no-op (verified read-only)
+
+- Remote throwaways `awa-cloud-hook-uat-e2e`, `awa-cloud-hook-uat`, `awa-applyback-uat`, `awa-move-uat`
+  — already deleted (404 on `gh repo view`).
+- Host mode entry — already clean (`worktree-modes.yml`: `default_mode: on`, `modes: {}`); no `mode remove` needed.
+- Stale `~/dev` branch `cursor/worktree/awa-uat-20260706T110803` — already absent.
+
+### Preserved (evidence / reusable harness — NOT deleted)
+
+- `RESULTS-e2e-uat-20260706.md` (historical, SUPERSEDED banner), all hook-probe / R-A / `workspace_roots`
+  regression RESULTS, the `SECURITY.md` ask-not-enforced note, and the bootstrap scripts
+  (`bootstrap-eligible-uat.sh` / `bootstrap-hook-probe-uat.sh`).
+- Hard-excluded (never touched): `KleinPerkins/{awa,dev,skills,ecosystem-orchestrator}`.
+
+> Residual (operator UI, tracked in the verdict table): the live ask-then-deny probe on Desktop AND
+> cloud. The apply-back proof above is retired by record; re-prove apply-back on a fresh disposable
+> remote in the next live UAT if a live artifact is desired.
