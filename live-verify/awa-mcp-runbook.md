@@ -29,9 +29,10 @@ Paste into the agent chat (extends 2026-07-05 probe with mode write tools):
 ```
 1. Call awa_status (no args). Paste JSON.
 2. Call awa_guard_shell cwd="/tmp" command="git status". Paste JSON.
-3. Call awa_mode_list (no args). Paste JSON — expect default_mode ask_on.
+3. Call awa_mode_list (no args). Paste JSON — expect default_mode on.
 4. Call awa_mode_set rel="." mode="off". MUST fail (broad-off). Paste JSON — expect ok:false.
-5. Call awa_mode_set rel="personal/<your-fixture>" mode="ask_on". Paste JSON.
+5. Call awa_mode_set rel="personal/<your-fixture>" mode="on". Paste JSON.
+   (Also try mode="ask_on" once — MUST fail: only on|off accepted.)
 6. Run: cat "${HOME}/.local/state/awa/hook-probe/events.jsonl" 2>/dev/null | tail -30
 7. Paste any beforeMCPExecution line with mcp_server_name "awa" and tool_name awa_mode_set
    (or say NO_AWA_MCP_WRITE_HOOK_RECORD).
@@ -49,7 +50,7 @@ python3 ~/dev/capabilities/awa/hook-probe/analyze.py
 |-------|----------|
 | `awa_status` resolves | JSON with `wal` / `active_leases` |
 | `awa_guard_shell` resolves | JSON with `permission` field |
-| `awa_mode_list` resolves host modes file | `default_mode: ask_on` |
+| `awa_mode_list` resolves host modes file | `default_mode: on` |
 | Broad-off rejected | `awa_mode_set rel="."` → `ok: false`, MCP `isError: true` |
 | `beforeMCPExecution` for **write** tool | Log: `tool_name: awa_mode_set`, `mcp_server_name: awa` |
 

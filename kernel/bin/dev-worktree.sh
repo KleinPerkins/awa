@@ -46,7 +46,7 @@ verbs:
 mode subcommands (delegated to the engine modes manager; edits ONLY the host modes file):
   mode list                      list all explicit entries + default_mode
   mode get <rel>                 show the explicit entry (exact key) for a repo path/glob
-  mode set <rel> <on|ask_on|off> set an explicit mode
+  mode set <rel> <on|off>        set an explicit mode (on = protected; off = disabled)
   mode remove <rel>              remove an explicit mode entry (idempotent)
   mode repair                    normalize the file's own contents: drop invalid values/empty
                                  keys, normalize default_mode (idempotent; no filesystem scan)
@@ -138,7 +138,7 @@ classify_repo() {
   classify_context | cut -f1,2
 }
 
-# Resolve the EXPLICIT per-repo mode (on|ask_on|off|invalid|(none)) via the generic
+# Resolve the EXPLICIT per-repo mode (on|off|invalid|(none)) via the generic
 # `mode-for` CLI — the SAME kernel resolver + host policy the classifier uses (zero-link;
 # the modes map / default_mode / modes_file all live in the host policy). Empty output
 # (no explicit entry) is surfaced as `(none)`. This is a READ; it never mutates anything.
@@ -205,10 +205,10 @@ ensure_worktree() {
   local top class reason repo slug ts status_out
   top="$(top_level)" || die "not a git repository"
   IFS=$'\t' read -r class reason < <(classify_repo)
-  # Eligible to create/adopt a Safe Workspace: `include` (ON) OR `ask_on` (ASK_ON). The
-  # nudge is coherent for ASK_ON too (guard asks -> ensure gives a place to work); ASK_ON
-  # is NOT setup-exec eligible (run_worktree_setup keeps its `include`-only gate).
-  if [ "$class" != "include" ] && [ "$class" != "ask_on" ]; then
+  # Eligible to create/adopt a Safe Workspace: `include` (ON = protected). The guard denies a
+  # mutating command on an included primary, so `ensure` gives a Safe Workspace to work in.
+  # exclude/advisory are not eligible (run_worktree_setup keeps its `include`-only gate).
+  if [ "$class" != "include" ]; then
     if [ "$json" -eq 1 ]; then
       printf '{"action":"noop","classification":"%s","reason":"%s"}\n' "$class" "$(printf '%s' "$reason" | json_escape)"
     else

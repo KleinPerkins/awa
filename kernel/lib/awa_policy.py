@@ -23,7 +23,7 @@ CLI (consumed by the shell kernel):
   awa_policy.py classify --policy P [--governed-root R] --toplevel T [--hooks-path H] [--has-origin 0|1]
       print: <class>\t<reason>\t<rel>\t<governed_root>
   awa_policy.py mode-for --policy P --toplevel T [--governed-root R]
-      print the resolved EXPLICIT mode for the repo: on|ask_on|off|"" (no entry) |
+      print the resolved EXPLICIT mode for the repo: on|off|"" (no entry) |
       "invalid" (a matching entry has a bad value). Additive; does NOT change classify.
   awa_policy.py governed-roots --policy P [--governed-root R]
       print resolved governed roots, one per line
@@ -42,11 +42,12 @@ INCLUDE = "include"
 EXCLUDE = "exclude"
 ADVISORY = "advisory"
 NOT_GIT = "not-git"
-ASK_ON = "ask_on"
 
 # Explicit per-repo mode values (awa-modes/v1). Kept as a tuple so callers can
-# distinguish a present-but-invalid mode value from a valid one.
-MODE_VALUES = ("on", "ask_on", "off")
+# distinguish a present-but-invalid mode value from a valid one. ONE fail-safe rule
+# governs every read/write path: only `off` disables protection; ANY other value
+# (a typo, a removed legacy value, an unknown) resolves to ON/include.
+MODE_VALUES = ("on", "off")
 
 
 def parse_mini_yaml(text: str) -> dict:
@@ -167,7 +168,7 @@ class PolicyConfig:
     read_only_paths: list[str] = field(default_factory=list)
     overrides_include: list[str] = field(default_factory=list)
     overrides_exclude: list[str] = field(default_factory=list)
-    # Explicit per-repo modes (rel-glob -> on|ask_on|off). Empty by default so a host
+    # Explicit per-repo modes (rel-glob -> on|off). Empty by default so a host
     # that configures nothing behaves byte-for-byte as before.
     modes: dict = field(default_factory=dict)
     # Governs eligible repos with no explicit mode. Default "on" reproduces today's
@@ -237,16 +238,15 @@ def has_governed_marker(toplevel: str, markers: list[str]) -> bool:
 
 
 def _eligible(reason_on: str, cfg: PolicyConfig) -> tuple[str, str]:
-    """Map an eligible (would-be-include) repo through default_mode."""
-    dm = cfg.default_mode
-    if dm == "on":
-        return (INCLUDE, reason_on)
-    if dm == "off":
+    """Map an eligible (would-be-include) repo through default_mode.
+
+    One fail-safe rule: only an exact `off` default excludes; ANY other default_mode
+    (`on`, a typo, a removed legacy value) protects the repo -> INCLUDE. `policy-check`
+    WARNs on a non-canonical default_mode; it never silently disables protection.
+    """
+    if cfg.default_mode == "off":
         return (EXCLUDE, "policy default_mode: off")
-    if dm == "ask_on":
-        return (ASK_ON, "policy default_mode: ask_on")
-    # invalid default_mode -> safe ask_on, honestly labeled (not mislabeled as ask_on)
-    return (ASK_ON, "invalid default_mode; safe fallback ask_on")
+    return (INCLUDE, reason_on)
 
 
 def classify(
@@ -261,9 +261,10 @@ def classify(
     """Generic classification. Order (first match wins) mirrors engine/policy.py.
 
     not-git -> explicit OFF -> legacy overrides -> SAFETY excludes (umbrella /
-    governed-marker / foreign-hook / read-only) -> explicit ON/ASK_ON/invalid -> exclude
-    globs -> no-origin advisory -> eligibility (include glob or policy default) mapped
-    through default_mode. Safety-excludes beat explicit ON/ASK_ON; explicit OFF beats all.
+    governed-marker / foreign-hook / read-only) -> any explicit non-off mode (ON / typo /
+    legacy) -> exclude globs -> no-origin advisory -> eligibility (include glob or policy
+    default) mapped through default_mode. One fail-safe rule: only `off` disables; ANY
+    other explicit value -> INCLUDE. Safety-excludes beat explicit ON; OFF beats all.
     """
     if toplevel is None:
         return (NOT_GIT, "not a git repository")
@@ -292,12 +293,10 @@ def classify(
     if _match_any(rel, cfg.read_only_paths):
         return (EXCLUDE, "read-only/reference path")
 
-    if m == "on":
+    # Fail-safe: any explicit mode value that survived the early `off` check protects the
+    # repo. `on`, a typo, and a removed legacy value all resolve to INCLUDE here.
+    if m:
         return (INCLUDE, "explicit mode: on")
-    if m == "ask_on":
-        return (ASK_ON, "explicit mode: ask_on")
-    if m:  # present but invalid
-        return (ASK_ON, "invalid explicit mode; safe fallback")
 
     if _match_any(rel, cfg.exclude):
         return (EXCLUDE, "excluded by workspace policy")

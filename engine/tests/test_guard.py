@@ -1,12 +1,14 @@
 """Phase 5: minimal local guard — kernel guarantee with the engine OFF (degraded mode).
 
 These tests deliberately NEVER start the daemon and NEVER open the SQLite state, to
-prove the guarantee holds with the engine dead/never-started: mutating primary ->
-ask, worktree/lease -> allow, unsafe cleanup refused.
+prove the guarantee holds with the engine dead/never-started: a mutating command on an
+included primary -> DENY (Cursor enforces `deny`; it treats `ask` as non-blocking — L4),
+a linked worktree/lease -> allow, a Cloud/background agent -> allow, unsafe cleanup refused.
 """
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -142,11 +144,12 @@ class TestDecideShellDegraded(EngineTestCase):
         p.close()
         return p.name
 
-    def test_primary_mutation_asks(self):
+    def test_primary_mutation_denies(self):
         repo = self.make_repo()
         pol = self._policy_for(self._tmp.name)
         d = guard.decide_shell(repo, "git commit -am x", pol)
-        self.assertEqual(d.permission, "ask")
+        self.assertEqual(d.permission, "deny")
+        self.assertEqual(d.classification, "include")
 
     def test_primary_readonly_allows(self):
         repo = self.make_repo()
@@ -176,6 +179,23 @@ class TestDecideShellDegraded(EngineTestCase):
         d = guard.decide_shell(repo, "git commit -am x", pol, allow_primary=True)
         self.assertEqual(d.permission, "allow")
 
+    def test_cloud_allows_primary_mutation(self):
+        """A Cursor Cloud / background agent degrades to ALLOW *before* the deny branch (an
+        isolated own-branch /workspace clone must never be hard-blocked)."""
+        repo = self.make_repo()
+        pol = self._policy_for(self._tmp.name)
+        prev = os.environ.get("AWA_FORCE_CLOUD")
+        os.environ["AWA_FORCE_CLOUD"] = "1"
+        try:
+            d = guard.decide_shell(repo, "git commit -am x", pol)
+        finally:
+            if prev is None:
+                os.environ.pop("AWA_FORCE_CLOUD", None)
+            else:
+                os.environ["AWA_FORCE_CLOUD"] = prev
+        self.assertEqual(d.permission, "allow")
+        self.assertEqual(d.classification, "cloud")
+
     def test_self_governed_repo_allows(self):
         repo = self.make_repo()
         Path(repo, "_ops").mkdir()
@@ -185,19 +205,21 @@ class TestDecideShellDegraded(EngineTestCase):
         self.assertEqual(d.permission, "allow")
         self.assertEqual(d.classification, "exclude")
 
-    def test_ask_on_primary_mutation_asks(self):
+    def test_legacy_default_mode_denies(self):
+        """A removed legacy default_mode (ask_on) is not `off`, so it fails safe to include/ON
+        -> a mutating primary DENIES (no legacy-specific branch)."""
         repo = self.make_repo()
         pol = self._mode_policy_for(self._tmp.name, "default_mode: ask_on")
         d = guard.decide_shell(repo, "git commit -am x", pol)
-        self.assertEqual(d.permission, "ask")
-        self.assertEqual(d.classification, "ask_on")
+        self.assertEqual(d.permission, "deny")
+        self.assertEqual(d.classification, "include")
 
-    def test_ask_on_primary_readonly_allows(self):
+    def test_legacy_default_mode_readonly_allows(self):
         repo = self.make_repo()
         pol = self._mode_policy_for(self._tmp.name, "default_mode: ask_on")
         d = guard.decide_shell(repo, "git status", pol)
         self.assertEqual(d.permission, "allow")
-        self.assertEqual(d.classification, "ask_on")
+        self.assertEqual(d.classification, "include")
 
     def test_off_primary_mutation_allows(self):
         repo = self.make_repo()
@@ -206,15 +228,16 @@ class TestDecideShellDegraded(EngineTestCase):
         self.assertEqual(d.permission, "allow")
         self.assertEqual(d.classification, "exclude")
 
-    def test_invalid_explicit_mode_asks(self):
+    def test_invalid_explicit_mode_denies(self):
+        """A per-repo legacy/unknown value is not `off`, so it fails safe to include -> deny."""
         repo = self.make_repo()
         pol = self._mode_policy_for(self._tmp.name, "modes:\n  repo: bogus")
         d = guard.decide_shell(repo, "git commit -am x", pol)
-        self.assertEqual(d.permission, "ask")
-        self.assertEqual(d.classification, "ask_on")
+        self.assertEqual(d.permission, "deny")
+        self.assertEqual(d.classification, "include")
 
-    def test_wrapper_forms_ask_on_primary_include(self):
-        """Each wrapper-obscured mutating form must ASK on an included primary checkout."""
+    def test_wrapper_forms_deny_on_primary_include(self):
+        """Each wrapper-obscured mutating form must DENY on an included primary checkout."""
         repo = self.make_repo()
         pol = self._policy_for(self._tmp.name)
         for cmd in ("nice -n 10 git commit -am x", "env -C /r git commit",
@@ -222,19 +245,19 @@ class TestDecideShellDegraded(EngineTestCase):
                     "xargs -I{} git commit", "{ git commit; }",
                     'bash -c "git commit -am x"', "builtin git commit"):
             d = guard.decide_shell(repo, cmd, pol)
-            self.assertEqual(d.permission, "ask", cmd)
+            self.assertEqual(d.permission, "deny", cmd)
 
-    def test_wrapper_forms_ask_on_primary_ask_on(self):
-        """Same, on an ASK_ON primary checkout (default_mode: ask_on)."""
+    def test_wrapper_forms_deny_on_legacy_default_mode(self):
+        """Same, on a legacy default_mode: ask_on (which fails safe to include)."""
         repo = self.make_repo()
         pol = self._mode_policy_for(self._tmp.name, "default_mode: ask_on")
         for cmd in ("nice -n 10 git commit -am x", "timeout 5 git commit"):
             d = guard.decide_shell(repo, cmd, pol)
-            self.assertEqual(d.permission, "ask", cmd)
+            self.assertEqual(d.permission, "deny", cmd)
 
-    def test_unreadable_modes_file_still_asks_on_primary(self):
+    def test_unreadable_modes_file_still_denies_on_primary(self):
         """FAIL-SAFE (#1): an existing-but-unreadable modes_file (a directory) must NOT let a
-        mutating primary command through. It is treated as absent -> default include -> ask."""
+        mutating primary command through. It is treated as absent -> default include -> deny."""
         repo = self.make_repo()
         # Build a policy that points modes_file at a DIRECTORY (unreadable as a file). Use an
         # absolute path so it resolves regardless of where the temp policy file lives.
@@ -245,7 +268,7 @@ class TestDecideShellDegraded(EngineTestCase):
                                            body=f"modes_file: {modesdir}"))
         pol.close()
         d = guard.decide_shell(repo, "git commit -am x", pol.name)
-        self.assertEqual(d.permission, "ask")
+        self.assertEqual(d.permission, "deny")
 
 
 class TestCanClean(EngineTestCase):

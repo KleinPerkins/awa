@@ -3,8 +3,11 @@
 `engine/guard.py` and `kernel/hooks/worktree-guard.sh` ship TWO mirror implementations of the
 mutating-command detector. `test_guard.py` proves the engine mirror; this drives the ACTUAL
 bash hook (the load-bearing beforeShellExecution gate) end-to-end so a wrapper-obscured
-mutation still returns the frozen `ask` on an included primary checkout — proving the kernel
-mirror got the same fix. No host dependency: a temp git repo under a temp governed root.
+mutation still returns the enforced `deny` on an included primary checkout — proving the kernel
+mirror got the same fix. Cursor enforces `deny` (it treats `ask` as non-blocking — L4), so the
+one case where prevention must happen returns deny; `ask` is retained only for genuine
+uncertainty (unparseable payload), a Cloud/background agent degrades to allow, and afterFileEdit
+allows (observation-only). No host dependency: a temp git repo under a temp governed root.
 """
 
 from __future__ import annotations
@@ -78,7 +81,7 @@ class TestBashGuardWrapperParity(unittest.TestCase):
                               text=True, env=env)
         return json.loads(proc.stdout)
 
-    def test_wrapper_mutating_forms_ask(self):
+    def test_wrapper_mutating_forms_deny(self):
         for cmd in ("nice -n 10 git commit -am x", "env -C /r git commit",
                     "env -i git commit", "sudo -u root git commit",
                     "xargs -I{} git commit", "xargs -I {} git commit",
@@ -91,8 +94,8 @@ class TestBashGuardWrapperParity(unittest.TestCase):
                     "doas git commit",
                     'script -c "git commit" /dev/null'):
             resp = self._guard(cmd)
-            self.assertEqual(resp.get("permission"), "ask", cmd)
-            # frozen ask shape
+            self.assertEqual(resp.get("permission"), "deny", cmd)
+            # frozen deny_shape
             self.assertIn("user_message", resp)
             self.assertIn("agent_message", resp)
 
@@ -111,13 +114,13 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         checked `workspaceRoot` (singular, camelCase, absent from the real payload) and fell
         through to `os.getcwd()` (the hook script's OWN directory, never the target repo),
         silently misclassifying an included primary as outside any governed root -> ALLOW.
-        This must ask, exactly like the explicit-cwd form."""
+        This must DENY, exactly like the explicit-cwd form."""
         resp = self._guard_payload({
             "command": "git commit -am x",
             "cwd": "",
             "workspace_roots": [str(self.repo)],
         })
-        self.assertEqual(resp.get("permission"), "ask")
+        self.assertEqual(resp.get("permission"), "deny")
         self.assertIn("user_message", resp)
         self.assertIn("agent_message", resp)
 
@@ -127,16 +130,72 @@ class TestBashGuardWrapperParity(unittest.TestCase):
             "command": "git commit -am x",
             "workspace_roots": [str(self.repo)],
         })
-        self.assertEqual(resp.get("permission"), "ask")
+        self.assertEqual(resp.get("permission"), "deny")
 
     def test_workspace_roots_readonly_still_allows(self):
-        """The fallback must not over-ask: a read-only command via workspace_roots allows."""
+        """The gate must not over-deny: a read-only command via workspace_roots allows."""
         resp = self._guard_payload({
             "command": "git status",
             "cwd": "",
             "workspace_roots": [str(self.repo)],
         })
         self.assertEqual(resp.get("permission"), "allow")
+
+    def test_cloud_background_agent_payload_allows(self):
+        """Cloud/background agent degrades to ALLOW *before* the deny branch: a Cursor Cloud VM
+        is an already-isolated, own-branch clone — a mutating command there must not be blocked.
+        Signalled here by the payload `is_background_agent` flag."""
+        resp = self._guard_payload({
+            "command": "git commit -am x",
+            "cwd": str(self.repo),
+            "is_background_agent": True,
+        })
+        self.assertEqual(resp.get("permission"), "allow")
+
+    def test_cloud_identity_broker_payload_allows(self):
+        """Same degrade-to-allow, signalled by a present cloud_agent_identity_broker handle."""
+        resp = self._guard_payload({
+            "command": "git commit -am x",
+            "cwd": str(self.repo),
+            "cloud_agent_identity_broker": "broker-handle-xyz",
+        })
+        self.assertEqual(resp.get("permission"), "allow")
+
+    def test_cloud_env_flag_allows(self):
+        """Same degrade-to-allow, signalled by an env flag (AWA_FORCE_CLOUD)."""
+        env = dict(os.environ)
+        env["AWA_GOVERNED_ROOT"] = str(self.root)
+        env["AWA_POLICY"] = str(self.policy)
+        env["AWA_FORCE_CLOUD"] = "1"
+        proc = subprocess.run([str(_GUARD)],
+                              input=json.dumps({"command": "git commit -am x", "cwd": str(self.repo)}),
+                              capture_output=True, text=True, env=env)
+        self.assertEqual(json.loads(proc.stdout).get("permission"), "allow")
+
+    def test_after_file_edit_allows(self):
+        """afterFileEdit is observation-only (Cursor ignores any permission there — L4): a file
+        edit on an included primary must ALLOW (the hook records a detection receipt, never a
+        no-op ask/deny). Payload carries a file path and NO command."""
+        resp = self._guard_payload({
+            "hook_event_name": "afterFileEdit",
+            "cwd": str(self.repo),
+            "file_path": str(self.repo / "f"),
+        })
+        self.assertEqual(resp.get("permission"), "allow")
+
+    def test_unparseable_payload_on_included_primary_asks(self):
+        """Genuine uncertainty is retained as `ask` (an honest no-op — Cursor ignores it, so it
+        never silently downgrades to allow, but never pretends to block): an UNPARSEABLE payload
+        whose resolved cwd is an included primary returns ask, not deny."""
+        env = dict(os.environ)
+        env["AWA_GOVERNED_ROOT"] = str(self.root)
+        env["AWA_POLICY"] = str(self.policy)
+        proc = subprocess.run([str(_GUARD)], input="{not valid json",
+                              capture_output=True, text=True, env=env, cwd=str(self.repo))
+        resp = json.loads(proc.stdout)
+        self.assertEqual(resp.get("permission"), "ask")
+        self.assertIn("user_message", resp)
+        self.assertIn("agent_message", resp)
 
 
 if __name__ == "__main__":

@@ -95,12 +95,14 @@ else
   bad "awa-worktree/v1 JSON shape drifted from frozen contract"
 fi
 
-# 3) Guard permission schema: allow => {permission}; ask => {permission,user_message,agent_message}.
+# 3) Guard permission schema: allow => {permission}; an included-primary MUTATION => an
+#    ENFORCED deny {permission,user_message,agent_message} (Cursor honors deny; ask is
+#    non-blocking — L4); afterFileEdit => allow (observation-only, X2).
 #    STANDALONE UAT (no host dependency): a temp git repo under a temp governed root, with
-#    AWA_GOVERNED_ROOT + a policy that classifies it include+primary, so the guard returns `ask`.
+#    AWA_GOVERNED_ROOT + a policy that classifies it include+primary.
 guat="$(mktemp -d)"
 repo="$guat/proj"
-allow_json=""; ask_json=""
+allow_json=""; deny_json=""; fileedit_json=""
 if mkdir -p "$repo"; then
   ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES 2>/dev/null || true
     git init -q "$repo" && printf '#\n' > "$repo/f" && git -C "$repo" add f &&
@@ -110,15 +112,22 @@ if mkdir -p "$repo"; then
   # Non-mutating command -> fast-path allow (validates allow shape).
   allow_json="$(printf '{"cwd":"%s","command":"git status"}' "$repo" | \
     AWA_GOVERNED_ROOT="$guat" "$GUARD" 2>/dev/null || true)"
-  # Mutating command on an included primary checkout -> ask (validates ask shape).
-  ask_json="$(printf '{"cwd":"%s","command":"git add f"}' "$repo" | \
+  # Mutating command on an included primary checkout -> enforced deny (validates deny shape).
+  deny_json="$(printf '{"cwd":"%s","command":"git add f"}' "$repo" | \
     AWA_GOVERNED_ROOT="$guat" "$GUARD" 2>/dev/null || true)"
+  # afterFileEdit (filePath, no command) -> observation-only allow (X2), never a no-op ask/deny.
+  fileedit_json="$(printf '{"cwd":"%s","filePath":"%s"}' "$repo" "$repo/f" | \
+    XDG_STATE_HOME="$guat/state" AWA_GOVERNED_ROOT="$guat" "$GUARD" 2>/dev/null || true)"
 fi
 rm -rf "$guat" 2>/dev/null || true
-if CONTRACT="$CONTRACT" ALLOW="$allow_json" ASK="$ask_json" python3 - <<'PY'
+if CONTRACT="$CONTRACT" ALLOW="$allow_json" DENY="$deny_json" FILEEDIT="$fileedit_json" python3 - <<'PY'
 import json, os, sys
 c = json.load(open(os.environ["CONTRACT"]))["guard_permission"]
 errs = []
+# deny_shape must be DECLARED in the contract (frozen additive shape for the enforced block).
+if "deny_shape" not in c:
+    errs.append("contract guard_permission missing deny_shape")
+# allow shape
 try:
     a = json.loads(os.environ["ALLOW"])
 except Exception:
@@ -127,22 +136,30 @@ if a.get("permission") not in c["permission_values"]:
     errs.append(f'allow.permission={a.get("permission")!r} not in {c["permission_values"]}')
 if a.get("permission") == "allow" and set(a.keys()) - set(c["allow_shape"]):
     errs.append(f"allow shape has extra keys: {set(a.keys())}")
+# deny shape (the load-bearing change): included-primary mutation must DENY with deny_shape.
 try:
-    k = json.loads(os.environ["ASK"])
+    k = json.loads(os.environ["DENY"])
 except Exception:
-    k = {}; errs.append("ask response not JSON")
-if k.get("permission") != "ask":
-    errs.append(f'expected ask, got {k.get("permission")!r}')
+    k = {}; errs.append("deny response not JSON")
+if k.get("permission") != "deny":
+    errs.append(f'expected deny on an included-primary mutation, got {k.get("permission")!r}')
 else:
-    for key in c["ask_shape"]:
+    for key in c.get("deny_shape", []):
         if key not in k:
-            errs.append(f"ask shape missing: {key}")
+            errs.append(f"deny shape missing: {key}")
+# afterFileEdit is observation-only: MUST allow (never a no-op ask/deny) — X2.
+try:
+    fe = json.loads(os.environ["FILEEDIT"])
+except Exception:
+    fe = {}; errs.append("afterFileEdit response not JSON")
+if fe.get("permission") != "allow":
+    errs.append(f'afterFileEdit expected allow (observation-only), got {fe.get("permission")!r}')
 if errs:
     print("GUARD SCHEMA DRIFT: " + "; ".join(errs), file=sys.stderr); sys.exit(1)
 sys.exit(0)
 PY
 then
-  pass "guard permission schema matches frozen contract (allow + ask shapes)"
+  pass "guard permission schema matches frozen contract (allow + enforced deny + deny_shape + afterFileEdit allow)"
 else
   bad "guard permission schema drifted from frozen contract"
 fi
@@ -167,11 +184,9 @@ else
   bad "lease shape contract is under-specified"
 fi
 
-# 5+6) Per-repo MODE ask_on is a FIRST-CLASS behavior, ADDITIVE WITHIN v1 (no v2). One shared
-#      STANDALONE fixture: a temp governed root + a host policy pointing at a modes file that
-#      classifies the repo `proj` as ask_on. From it we assert BOTH the guard ask outcome and
-#      the dashboard surfacing. No host dependency; the modes_file is resolved relative to the
-#      temp policy's own directory.
+# 5) Fail-safe classification: a legacy/typo per-repo mode VALUE and a legacy default_mode both
+#    resolve to include (protected) — only `off` disables. STANDALONE fixture: a temp governed
+#    root + a host policy pointing at a modes file with a removed legacy value.
 mouat="$(mktemp -d)"
 morepo="$mouat/proj"
 cat > "$mouat/policy.yml" <<'YML'
@@ -183,83 +198,38 @@ cat > "$mouat/modes.yml" <<'YML'
 schema: awa-modes/v1
 default_mode: on
 modes:
-  proj: ask_on
+  proj: legacy_removed_value
 YML
-askon_guard_json=""; askon_emit=""
+failsafe_json=""
 if mkdir -p "$morepo"; then
   ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES 2>/dev/null || true
     git init -q "$morepo" && printf '#\n' > "$morepo/f" && git -C "$morepo" add f &&
     git -C "$morepo" -c user.email="49759187+KleinPerkins@users.noreply.github.com" -c user.name="KleinPerkins" commit -qm init &&
     git -C "$morepo" branch -M main &&
     git -C "$morepo" remote add origin "git@github.com:KleinPerkins/awa-contract-temp.git" ) >/dev/null 2>&1
-  # (a) GUARD: a mutating command on an ask_on primary checkout -> frozen `ask` shape.
-  askon_guard_json="$(printf '{"cwd":"%s","command":"git add f"}' "$morepo" | \
+  # A mutating command on a repo whose explicit mode value is an unknown/legacy token must still
+  # DENY (fail-safe: any non-`off` value -> include/protected).
+  failsafe_json="$(printf '{"cwd":"%s","command":"git add f"}' "$morepo" | \
     AWA_GOVERNED_ROOT="$mouat" AWA_POLICY="$mouat/policy.yml" "$GUARD" 2>/dev/null || true)"
-  # (b) DASHBOARD: the emitter tolerates + surfaces ask_on without a summary-map KeyError.
-  askon_emit="$(AWA_GOVERNED_ROOT="$mouat" AWA_POLICY="$mouat/policy.yml" \
-    "$DEV_WORKTREE" dashboard-data --root "$mouat" 2>/dev/null || true)"
 fi
 rm -rf "$mouat" 2>/dev/null || true
-
-# 5) Guard: ask_on asks on a mutating primary exactly like include/on (frozen ask shape).
-if CONTRACT="$CONTRACT" ASKON="$askon_guard_json" python3 - <<'PY'
+if CONTRACT="$CONTRACT" FS="$failsafe_json" python3 - <<'PY'
 import json, os, sys
-c = json.load(open(os.environ["CONTRACT"]))["guard_permission"]
 errs = []
 try:
-    k = json.loads(os.environ["ASKON"])
+    k = json.loads(os.environ["FS"])
 except Exception:
-    k = {}; errs.append("ask_on guard response not JSON")
-if k.get("permission") != "ask":
-    errs.append(f'ask_on mutating primary expected ask, got {k.get("permission")!r}')
-else:
-    for key in c["ask_shape"]:
-        if key not in k:
-            errs.append(f"ask shape missing: {key}")
-    if k.get("permission") not in c["permission_values"]:
-        errs.append(f'permission {k.get("permission")!r} not in {c["permission_values"]}')
+    k = {}; errs.append("fail-safe guard response not JSON")
+if k.get("permission") != "deny":
+    errs.append(f'a legacy/unknown mode value must fail safe to deny, got {k.get("permission")!r}')
 if errs:
-    print("ASK_ON GUARD DRIFT: " + "; ".join(errs), file=sys.stderr); sys.exit(1)
+    print("FAIL-SAFE DRIFT: " + "; ".join(errs), file=sys.stderr); sys.exit(1)
 sys.exit(0)
 PY
 then
-  pass "ask_on classification yields the frozen ask shape on a mutating primary (additive within v1)"
+  pass "fail-safe: a legacy/unknown per-repo mode value resolves to include -> mutating primary denies"
 else
-  bad "ask_on guard behavior missing/broken (a mutating primary must ASK for an ask_on repo)"
-fi
-
-# 6) Dashboard: the emitter tolerates ask_on (no KeyError) and surfaces the OPTIONAL summary.ask_on
-#    key + an ask_on repo row, while the frozen required floor (schema + summary_keys) stays intact.
-if CONTRACT="$CONTRACT" EMIT="$askon_emit" python3 - <<'PY'
-import json, os, sys
-c = json.load(open(os.environ["CONTRACT"]))["dashboard_data"]
-errs = []
-try:
-    d = json.loads(os.environ["EMIT"])
-except Exception as exc:
-    print(f"ask_on emit not JSON (summary-map KeyError/crash on ask_on?): {exc}", file=sys.stderr); sys.exit(1)
-# Frozen required floor must remain intact (the additive ask_on path must not drop it).
-if d.get("schema") != c["schema"]:
-    errs.append(f'schema={d.get("schema")!r} != {c["schema"]!r}')
-summ = d.get("summary", {})
-for k in c["summary_keys"]:
-    if k not in summ:
-        errs.append(f"required summary-key dropped: {k}")
-# Additive: ask_on must be surfaced (optional key present + counted) and appear as a repo row.
-if "ask_on" not in summ:
-    errs.append("optional summary.ask_on not surfaced when modes configure ask_on")
-elif not isinstance(summ.get("ask_on"), int) or summ.get("ask_on", 0) < 1:
-    errs.append(f'summary.ask_on={summ.get("ask_on")!r} did not count the ask_on repo')
-if not any(r.get("classification") == "ask_on" for r in d.get("repos", [])):
-    errs.append("no repo surfaced with classification ask_on")
-if errs:
-    print("ASK_ON DASHBOARD DRIFT: " + "; ".join(errs), file=sys.stderr); sys.exit(1)
-sys.exit(0)
-PY
-then
-  pass "dashboard emitter surfaces ask_on additively (summary.ask_on present + counted; required floor intact; no KeyError)"
-else
-  bad "dashboard emitter does not tolerate/surface ask_on (summary.ask_on / count / KeyError / floor)"
+  bad "fail-safe broken: a legacy/unknown mode value did not protect the repo (must deny)"
 fi
 
 if [ "$fail" -eq 0 ]; then

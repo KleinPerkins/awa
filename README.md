@@ -48,15 +48,19 @@ AWA ships a **generic** default policy with zero governed roots. To govern your 
 root(s), include/exclude globs, and detectors. The product stays generic; your policy is the only
 place org/host literals live, and it is never vendored or published.
 
-### Per-repo mode (ON / ASK_ON / OFF)
+### Per-repo mode (ON / OFF)
 
 Each governed repo has an explicit AWA **mode** you can set and inspect:
 
-- **ON** — AWA asks before a mutating command on your main checkout and steers work into a Safe
-  Workspace. Full protection; the only mode that may run a repo's committed worktree-setup.
-- **ASK_ON** — same ask-and-steer nudge as ON, but the repo shows in its own dashboard bucket and
-  will **not** run repo-committed setup. A good "protect but don't auto-run anything" default.
-- **OFF** — AWA leaves the repo alone (no ask, no Safe Workspace).
+- **ON** — protected. A confirmed mutating command on the repo's **primary** checkout returns an
+  enforced hook **`deny`** (Cursor enforces `deny`; it treats `ask` as non-blocking — see
+  [SECURITY.md](SECURITY.md#platform-limitation--cursor-enforces-hook-deny-not-ask-l4)), steering
+  work into a Safe Workspace. A Cursor Cloud / background agent (already an isolated own-branch
+  `/workspace` clone) degrades to allow, and afterFileEdit is observation-only.
+- **OFF** — AWA leaves the repo alone (no block, no Safe Workspace).
+
+One **fail-safe rule** governs both the classifier and the modes writer: only an exact `off`
+disables protection; **any other value** — a typo, a removed legacy value — resolves to ON.
 
 Modes live in a tool-owned, source-tracked modes file (schema `awa-modes/v1`) that your policy
 points at via `modes_file:`. You never hand-edit it — set and inspect modes through the CLI or the
@@ -65,7 +69,7 @@ MCP tools:
 ```bash
 dev-worktree.sh mode list                 # show every configured repo + the default
 dev-worktree.sh mode get   projects/foo    # show the explicit entry (exact key) for one repo
-dev-worktree.sh mode set   projects/foo on # set a repo to on | ask_on | off
+dev-worktree.sh mode set   projects/foo on # set a repo to on | off
 dev-worktree.sh mode remove projects/foo   # drop the explicit entry (fall back to the default)
 dev-worktree.sh mode sync                  # ensure-exists + normalize the modes file (idempotent)
 ```
@@ -81,8 +85,9 @@ the modes file only — they never touch a repo, git, or your primary checkout; 
 normalize the file's own contents, they do not scan the filesystem).
 
 **Default posture.** A repo with no explicit entry falls back to `default_mode`. The shipped default
-is `on` (byte-for-byte back-compatible). A host may set `default_mode: ask_on` so eligible repos are
-protected-and-asked by default without opting any of them into setup execution.
+is `on` (every eligible repo protected). A host may set `default_mode: off` to leave new eligible
+repos alone by default; any non-`off` default (including a stale legacy value) fails safe to ON, and
+`mode repair` normalizes a legacy default_mode forward to `on`.
 
 ## Install verbs
 
@@ -101,7 +106,7 @@ them. `make verify-install` exercises the whole install lifecycle in a throwaway
 
 The kernel worktree CLI (`dev-worktree.sh`, frozen verbs): `status`, `ensure`, `list`, `clean`,
 `doctor`, `policy-check`, `dashboard-data`, plus the additive `mode` verb (see
-[Per-repo mode](#per-repo-mode-on--ask_on--off)).
+[Per-repo mode](#per-repo-mode-on--off)).
 
 The engine (`awa-engine <verb>`, launched by `bin/awa-engine.sh`): `doctor`, lifecycle
 (`adopt`/`attest`/`apply-back`/`publish`/`retire`/`lease-read`), recovery

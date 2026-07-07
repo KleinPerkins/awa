@@ -8,7 +8,11 @@ available it opportunistically records a detection, but the decision never depen
 
 Decision surface (mirrors the frozen guard permission schema: allow/ask/deny):
   * mutating shell command on an INCLUDED PRIMARY checkout (not a linked worktree,
-    no active lease) -> ask (nudge to a Safe Workspace). Override is explicit.
+    no active lease) -> DENY. Cursor enforces `deny`, but treats `ask` as non-blocking
+    (L4), so prevention on the one case that matters uses an enforced deny. Recovery is an
+    operator action (relaunch in a Safe Workspace, or the explicit env override).
+  * a Cursor Cloud / background agent (isolated own-branch /workspace clone) -> allow
+    (degrade-to-allow BEFORE the deny branch; never hard-block an already-isolated VM).
   * anything on an excluded/advisory repo, a linked worktree, or a read-only command
     -> allow.
 """
@@ -34,7 +38,7 @@ _GIT_TAKES_ARG = ("-C", "-c", "--git-dir", "--work-tree", "--namespace",
 # Prefix wrappers whose OPTIONS (not just their name) must be skipped before we resolve the
 # real program. Skipping only the name lets `nice -n 10 git commit`, `env -C /r git commit`,
 # `sudo -u root git commit`, `timeout 5 git commit`, `xargs -I{} git commit`, etc. classify
-# non-mutating and fast-path ALLOW — a silent bypass now that the host runs default ask_on.
+# non-mutating and fast-path ALLOW — a silent bypass of the deny on an included primary.
 _PREFIX_WRAPPERS = ("sudo", "command", "nice", "env", "time", "nohup", "xargs",
                     "timeout", "ionice", "chrt", "stdbuf", "builtin", "exec", "doas",
                     "run0", "setsid")
@@ -148,7 +152,7 @@ def _interpreter_script_body(rest: list[str]) -> str | None:
 def _rescan_for_mutation(toks: list[str]) -> bool:
     """Conservative backstop: our wrapper-option model left a dangling `-`-prefixed prog, so
     re-scan every token for a known mutating program (git is treated as mutating-capable) and
-    flag mutating. Over-asks on an included/ask_on primary — the desired nudge, never a bypass.
+    flag mutating. Over-denies on an included primary — the desired protection, never a bypass.
     """
     for t in toks:
         b = os.path.basename(t)
@@ -235,11 +239,66 @@ def _allow(reason: str, cls: str = "") -> Decision:
     return Decision("allow", reason, cls)
 
 
+# The recovery guidance surfaced on a DENY. Reworked around the observed platform facts:
+# the hook reads its OWN process env (an inline `DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 <cmd>`
+# prefix does NOT reach it), `cd <worktree> && <cmd>` is still on the primary, and
+# `move_agent_to_root` is observed-broken for AWA worktrees (finding R-A) — so it is NOT
+# offered. Recovery is an operator action; `mode set ... off` is a deliberate last resort.
+_DENY_REASON = (
+    "AWA DENIED a mutating command on an INCLUDED PRIMARY checkout (mode ON). STOP retrying: "
+    "re-running it — including `cd <worktree> && <cmd>` or an inline "
+    "`DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 <cmd>` prefix (the hook reads its own env, not the "
+    "command's inline env) — will be denied again. Recovery is an OPERATOR action: relaunch "
+    "this agent in a Safe Workspace via the Cursor Agents-Window Worktree dropdown (AWA adopts "
+    "the linked worktree, then allows), or set DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 in Cursor's "
+    "environment/settings and relaunch. Last resort, only if the operator deliberately wants "
+    "this repo unprotected: `dev-worktree.sh mode set <rel> off`."
+)
+
+# Env vars that mark a Cursor Cloud / background agent. A *_broker var counts by PRESENCE
+# (its value is a handle/path); the boolean flags count only when truthy.
+_CLOUD_ENV_FLAGS = (
+    "CURSOR_BACKGROUND_AGENT", "CURSOR_CLOUD_AGENT", "IS_BACKGROUND_AGENT",
+    "is_background_agent", "cloud_agent_identity_broker", "CURSOR_AGENT_IDENTITY_BROKER",
+    "AWA_FORCE_CLOUD",
+)
+
+
+def _is_truthy(val) -> bool:
+    return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _is_cloud(cwd: str) -> bool:
+    """Detect a Cursor Cloud / background agent so the guard degrades to ALLOW *before* any
+    deny branch. Cloud VMs are already-isolated, own-branch `/workspace` clones — hard-blocking
+    one would brick a legitimate isolated workspace, and it never mutates a shared primary.
+    Signals (any): a background-agent / identity-broker env var, or a `/workspace` root.
+    """
+    for name in _CLOUD_ENV_FLAGS:
+        val = os.environ.get(name)
+        if val is None:
+            continue
+        if "broker" in name.lower():
+            if str(val).strip():
+                return True
+        elif _is_truthy(val):
+            return True
+    top = os.path.abspath(cwd or "")
+    return top == "/workspace" or top.startswith("/workspace" + os.sep)
+
+
 def decide_shell(cwd: str, command: str, policy_path: str,
                  *, allow_primary: bool = False) -> Decision:
-    """Engine-OFF decision for a shell command. Reads only policy + lease (+ git)."""
+    """Engine-OFF decision for a shell command. Reads only policy + lease (+ git).
+
+    Order: operator override -> cloud degrade-to-allow -> not-git/linked/leased allow ->
+    non-INCLUDED allow -> mutating on an included primary => DENY -> read-only allow.
+    """
     if allow_primary:
         return _allow("operator override (DEV_WORKTREE_GUARD_ALLOW_PRIMARY)")
+    # Cloud degrade-to-allow, BEFORE any deny: never hard-block an isolated /workspace VM.
+    if _is_cloud(cwd):
+        return _allow("cloud/background agent (isolated own-branch workspace)", "cloud")
     ctx = gitutil.resolve(cwd)
     if not ctx.is_git:
         return _allow("not a git repo — fail open")
@@ -257,18 +316,14 @@ def decide_shell(cwd: str, command: str, policy_path: str,
     hooks_path = _hooks_path(cwd)
     cls = policy_mod.classify(rel, ctx.toplevel, cfg, hooks_path=hooks_path,
                               has_origin=has_origin, is_root=(rel == "."))
-    # ASK_ON asks on primary mutation exactly like INCLUDE (a coherent nudge to a Safe
-    # Workspace); every other classification (exclude/advisory/not-git) allows.
-    if cls.classification not in (policy_mod.INCLUDE, policy_mod.ASK_ON):
+    # Only an INCLUDED primary checkout (mode ON) is protected; every other classification
+    # (exclude/advisory/not-git) allows.
+    if cls.classification != policy_mod.INCLUDE:
         return _allow(f"{cls.classification}: {cls.reason}", cls.classification)
     if classify_mutating(command):
-        if cls.classification == policy_mod.ASK_ON:
-            reason = ("mutating shell command on an ask_on PRIMARY checkout — "
-                      "use a Safe Workspace first")
-        else:
-            reason = ("mutating shell command on an included PRIMARY checkout — "
-                      "use a Safe Workspace first")
-        return Decision("ask", reason, cls.classification)
+        # Enforced DENY (not ask): Cursor honors deny and ignores ask (L4). This is the one
+        # case where prevention must actually happen.
+        return Decision("deny", _DENY_REASON, cls.classification)
     return _allow("read-only command on primary", cls.classification)
 
 

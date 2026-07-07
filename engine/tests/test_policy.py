@@ -109,7 +109,8 @@ class TestClassify(unittest.TestCase):
 
 
 class TestExplicitModes(unittest.TestCase):
-    """Per-repo explicit modes (on|ask_on|off) resolved through classify()."""
+    """Per-repo explicit modes (on|off) resolved through classify(). One fail-safe rule: only
+    `off` disables; ANY other value (a removed legacy value, a typo) resolves to include."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -136,15 +137,17 @@ class TestExplicitModes(unittest.TestCase):
         self.assertEqual(c.classification, policy.EXCLUDE)
         self.assertEqual(c.reason, "explicit mode: off")
 
-    def test_explicit_ask_on(self):
+    def test_legacy_value_maps_to_include(self):
+        # A removed legacy value (e.g. the retired ask_on) is not `off`, so it fails safe to
+        # include/ON (protected) — no legacy-specific branch, the generic non-off rule.
         c = policy.classify("proj", self.top, self._cfg(modes={"proj": "ask_on"}))
-        self.assertEqual(c.classification, policy.ASK_ON)
-        self.assertEqual(c.reason, "explicit mode: ask_on")
+        self.assertEqual(c.classification, policy.INCLUDE)
+        self.assertEqual(c.reason, "explicit mode: on")
 
-    def test_invalid_mode_falls_back_to_ask_on(self):
+    def test_invalid_mode_maps_to_include(self):
         c = policy.classify("proj", self.top, self._cfg(modes={"proj": "bogus"}))
-        self.assertEqual(c.classification, policy.ASK_ON)
-        self.assertEqual(c.reason, "invalid explicit mode; safe fallback")
+        self.assertEqual(c.classification, policy.INCLUDE)
+        self.assertEqual(c.reason, "explicit mode: on")
 
     def test_safety_marker_beats_explicit_on(self):
         c = policy.classify("proj", self.gov,
@@ -152,7 +155,8 @@ class TestExplicitModes(unittest.TestCase):
         self.assertEqual(c.classification, policy.EXCLUDE)
         self.assertIn("self-governed", c.reason)
 
-    def test_safety_marker_beats_explicit_ask_on(self):
+    def test_safety_marker_beats_legacy_value(self):
+        # A safety exclude (self-governed marker) still wins over a non-off explicit value.
         c = policy.classify("proj", self.gov,
                             self._cfg(modes={"proj": "ask_on"}, governed_markers=["_ops/POLICY.md"]))
         self.assertEqual(c.classification, policy.EXCLUDE)
@@ -208,9 +212,12 @@ class TestExplicitModes(unittest.TestCase):
         self.assertEqual(policy.mode_for("personal/bar", cfg), "on")
 
     def test_mode_for_helper(self):
-        cfg = self._cfg(modes={"a": "on", "b/*": "ask_on"})
+        # mode_for returns the RAW configured value verbatim (the dashboard uses it to render an
+        # "invalid" badge); classification is what applies the fail-safe.
+        cfg = self._cfg(modes={"a": "on", "b/*": "off", "c": "bogus"})
         self.assertEqual(policy.mode_for("a", cfg), "on")
-        self.assertEqual(policy.mode_for("b/x", cfg), "ask_on")
+        self.assertEqual(policy.mode_for("b/x", cfg), "off")
+        self.assertEqual(policy.mode_for("c", cfg), "bogus")   # raw passthrough (unknown)
         self.assertEqual(policy.mode_for("nope", cfg), "")
 
 
@@ -233,11 +240,13 @@ class TestDefaultMode(unittest.TestCase):
         dfl = policy.classify("other", self.top, cfg)
         self.assertEqual((dfl.classification, dfl.reason), (policy.INCLUDE, "policy default: include"))
 
-    def test_default_mode_ask_on(self):
+    def test_legacy_default_mode_maps_to_include(self):
+        # A removed legacy default_mode (ask_on) is not `off`, so eligible repos fail safe to
+        # include/ON. The reason is the ordinary eligibility reason (no legacy-specific label).
         cfg = policy.PolicyConfig(default=policy.INCLUDE, default_mode="ask_on")
         c = policy.classify("proj", self.top, cfg)
-        self.assertEqual(c.classification, policy.ASK_ON)
-        self.assertEqual(c.reason, "policy default_mode: ask_on")
+        self.assertEqual(c.classification, policy.INCLUDE)
+        self.assertEqual(c.reason, "policy default: include")
 
     def test_default_mode_off(self):
         cfg = policy.PolicyConfig(default=policy.INCLUDE, default_mode="off")
@@ -245,27 +254,31 @@ class TestDefaultMode(unittest.TestCase):
         self.assertEqual(c.classification, policy.EXCLUDE)
         self.assertEqual(c.reason, "policy default_mode: off")
 
-    def test_invalid_default_mode_honest_reason(self):
-        # An invalid default_mode falls back to safe ask_on but is HONESTLY labeled — not
-        # mislabeled as the reason for a validly-configured ask_on.
+    def test_invalid_default_mode_maps_to_include(self):
+        # An invalid default_mode is not `off`, so it fails safe to include/ON (protected).
+        # (policy-check separately WARNs on an unknown default_mode; classification stays safe.)
         cfg = policy.PolicyConfig(default=policy.INCLUDE, default_mode="bogus")
         c = policy.classify("proj", self.top, cfg)
-        self.assertEqual(c.classification, policy.ASK_ON)
-        self.assertEqual(c.reason, "invalid default_mode; safe fallback ask_on")
+        self.assertEqual(c.classification, policy.INCLUDE)
+        self.assertEqual(c.reason, "policy default: include")
 
     def test_include_glob_maps_through_default_mode(self):
+        # An include-glob hit with a non-off default_mode is include (reason from the glob).
         cfg = policy.PolicyConfig(include=["proj"], default_mode="ask_on")
         c = policy.classify("proj", self.top, cfg)
-        self.assertEqual(c.classification, policy.ASK_ON)
+        self.assertEqual(c.classification, policy.INCLUDE)
+        self.assertEqual(c.reason, "included by workspace policy")
 
     def test_no_origin_stays_advisory_regardless_of_default_mode(self):
-        cfg = policy.PolicyConfig(default=policy.INCLUDE, default_mode="ask_on")
+        # No-origin short-circuits to advisory BEFORE eligibility, so even default_mode=off cannot
+        # make it exclude — advisory is a separate classification, never conflated with mode.
+        cfg = policy.PolicyConfig(default=policy.INCLUDE, default_mode="off")
         c = policy.classify("proj", self.top, cfg, has_origin=False)
         self.assertEqual(c.classification, policy.ADVISORY)
         self.assertEqual(c.reason, "no origin remote")
 
     def test_outside_include_stays_advisory(self):
-        cfg = policy.PolicyConfig(default=policy.ADVISORY, default_mode="ask_on")
+        cfg = policy.PolicyConfig(default=policy.ADVISORY, default_mode="on")
         c = policy.classify("proj", self.top, cfg)
         self.assertEqual(c.classification, policy.ADVISORY)
 

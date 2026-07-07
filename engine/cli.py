@@ -313,7 +313,7 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("rel", nargs="?", default=None,
                     help="repo path/glob relative to the governed root (get/set/remove)")
     md.add_argument("mode", nargs="?", default=None,
-                    help="mode value on|ask_on|off (set)")
+                    help="mode value on|off (set)")
     md.add_argument("--policy", default=_DEFAULT_POLICY,
                     help="host policy file whose modes_file pointer locates the modes file")
     md.add_argument("--modes-file", dest="modes_file", default=None,

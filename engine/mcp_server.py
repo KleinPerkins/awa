@@ -162,13 +162,14 @@ _TOOLS: dict[str, dict[str, Any]] = {
         "fn": _tool_mode_get,
     },
     "awa_mode_set": {
-        "description": ("Set a repo's mode to on|ask_on|off in the host modes file "
-                        "(path-scoped mutation; atomic; validated). `off` disables the "
-                        "AWA guard for that path."),
+        "description": ("Set a repo's mode to on|off in the host modes file "
+                        "(path-scoped mutation; atomic; validated). `on` protects (a mutating "
+                        "command on the primary checkout is denied); `off` disables the AWA "
+                        "guard for that path."),
         "inputSchema": {"type": "object",
                         "properties": {"rel": {"type": "string",
                                                "description": "repo path/glob rel to governed root"},
-                                       "mode": {"type": "string", "enum": ["on", "ask_on", "off"]}},
+                                       "mode": {"type": "string", "enum": ["on", "off"]}},
                         "required": ["rel", "mode"]},
         "fn": _tool_mode_set,
     },
@@ -192,7 +193,7 @@ _TOOLS: dict[str, dict[str, Any]] = {
                         "default_mode (idempotent, non-destructive; preserves entries)."),
         "inputSchema": {"type": "object",
                         "properties": {"default_mode": {"type": "string",
-                                                        "enum": ["on", "ask_on", "off"],
+                                                        "enum": ["on", "off"],
                                                         "description": "seed default_mode when creating the file"}}},
         "fn": _tool_mode_sync,
     },
