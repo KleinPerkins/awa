@@ -161,6 +161,43 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         })
         self.assertEqual(resp.get("permission"), "allow")
 
+    def test_false_broker_payload_does_not_allow(self):
+        """Desktop sessionStart often carries broker:false — must NOT cloud-degrade."""
+        for broker in (False, 0, "false", "0", ""):
+            with self.subTest(broker=broker):
+                resp = self._guard_payload({
+                    "command": "git commit -am x",
+                    "cwd": str(self.repo),
+                    "cloud_agent_identity_broker": broker,
+                })
+                self.assertEqual(resp.get("permission"), "deny", broker)
+
+    def test_false_broker_env_does_not_allow(self):
+        env = dict(os.environ)
+        env["AWA_GOVERNED_ROOT"] = str(self.root)
+        env["AWA_POLICY"] = str(self.policy)
+        env["cloud_agent_identity_broker"] = "false"
+        proc = subprocess.run([str(_GUARD)],
+                              input=json.dumps({"command": "git commit -am x", "cwd": str(self.repo)}),
+                              capture_output=True, text=True, env=env)
+        self.assertEqual(json.loads(proc.stdout).get("permission"), "deny")
+
+    def test_classifier_unavailable_asks_not_denies(self):
+        """classify_context fail-safe (include + reason fail-safe: ask) must ASK, not DENY."""
+        lib = _REPO / "kernel" / "lib" / "awa_policy.py"
+        orig_mode = lib.stat().st_mode
+        try:
+            lib.chmod(0o000)
+            resp = self._guard_payload({
+                "command": "git commit -am x",
+                "cwd": str(self.repo),
+            })
+            self.assertEqual(resp.get("permission"), "ask")
+            self.assertIn("user_message", resp)
+            self.assertIn("agent_message", resp)
+        finally:
+            lib.chmod(orig_mode)
+
     def test_cloud_env_flag_allows(self):
         """Same degrade-to-allow, signalled by an env flag (AWA_FORCE_CLOUD)."""
         env = dict(os.environ)

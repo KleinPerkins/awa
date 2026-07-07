@@ -268,18 +268,35 @@ def _is_truthy(val) -> bool:
     return str(val).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _affirmative_broker(val) -> bool:
+    """Only a real broker handle counts — Desktop payloads often carry false/0/\"false\"."""
+    if val is None:
+        return False
+    if val is False or val == 0:
+        return False
+    if isinstance(val, (list, dict)) and not val:
+        return False
+    s = str(val).strip()
+    if not s:
+        return False
+    if s.lower() in ("false", "0", "no", "off"):
+        return False
+    return True
+
+
 def _is_cloud(cwd: str) -> bool:
     """Detect a Cursor Cloud / background agent so the guard degrades to ALLOW *before* any
     deny branch. Cloud VMs are already-isolated, own-branch `/workspace` clones — hard-blocking
     one would brick a legitimate isolated workspace, and it never mutates a shared primary.
-    Signals (any): a background-agent / identity-broker env var, or a `/workspace` root.
+    Signals (any): a truthy background-agent env flag, an affirmative identity-broker handle,
+    or a `/workspace` root.
     """
     for name in _CLOUD_ENV_FLAGS:
         val = os.environ.get(name)
         if val is None:
             continue
         if "broker" in name.lower():
-            if str(val).strip():
+            if _affirmative_broker(val):
                 return True
         elif _is_truthy(val):
             return True

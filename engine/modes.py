@@ -289,32 +289,70 @@ def _preserved_default(existing: Optional[str]) -> str:
     return DEFAULT_DEFAULT_MODE
 
 
+def _report_mode(value: str) -> tuple[str, str]:
+    """Map a stored modes-file value to the operator-facing report (parity with dashboard).
+
+    Returns (mode, mode_error). mode is one of on|off|invalid|\"\" (unset).
+    """
+    if value == "":
+        return "", ""
+    v = str(value).strip().lower()
+    if v in MODE_VALUES:
+        return v, ""
+    return "invalid", (
+        f"invalid mode value {value!r} (expected one of: {', '.join(MODE_VALUES)})"
+    )
+
+
+def _report_default_mode(dm: Optional[str]) -> tuple[Optional[str], str]:
+    if dm is None:
+        return None, ""
+    if dm in MODE_VALUES:
+        return dm, ""
+    return "invalid", (
+        f"invalid default_mode {dm!r} (expected one of: {', '.join(MODE_VALUES)})"
+    )
+
+
 # ---- verbs ------------------------------------------------------------------
 def list_modes(path: str | Path) -> dict:
     """List every explicit entry + the governing default_mode (read-only)."""
     modes, dm, schema, exists = _read(path)
-    return {
+    reported_modes = {k: _report_mode(v)[0] for k, v in modes.items()}
+    reported_dm, dm_error = _report_default_mode(dm if exists else None)
+    out = {
         "action": "list",
         "path": str(path),
         "exists": exists,
         "schema": schema,
-        "default_mode": dm if exists else None,
-        "modes": modes,
+        "default_mode": reported_dm if exists else None,
+        "modes": reported_modes,
     }
+    if dm_error:
+        out["default_mode_error"] = dm_error
+    return out
 
 
 def get_mode(path: str | Path, rel: str) -> dict:
     """Return the explicit entry for ``rel`` (exact key), or "" when unset (read-only)."""
     rel = _validate_rel(_canon_rel(rel))
     modes, dm, schema, exists = _read(path)
-    return {
+    raw = modes.get(rel, "")
+    mode, mode_error = _report_mode(raw)
+    reported_dm, dm_error = _report_default_mode(dm if exists else None)
+    out = {
         "action": "get",
         "path": str(path),
         "rel": rel,
         "present": rel in modes,
-        "mode": modes.get(rel, ""),
-        "default_mode": dm,
+        "mode": mode,
+        "default_mode": reported_dm,
     }
+    if mode_error:
+        out["mode_error"] = mode_error
+    if dm_error:
+        out["default_mode_error"] = dm_error
+    return out
 
 
 def set_mode(path: str | Path, rel: str, mode) -> dict:

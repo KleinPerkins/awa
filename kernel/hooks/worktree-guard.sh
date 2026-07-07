@@ -289,16 +289,32 @@ def _truthy(v):
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _affirmative_broker(v):
+    """Only a real broker HANDLE counts as cloud — Desktop payloads often carry
+    `cloud_agent_identity_broker: false` (or 0 / \"false\"), which must NOT degrade to allow."""
+    if v is None:
+        return False
+    if v is False or v == 0:
+        return False
+    if isinstance(v, (list, dict)) and not v:
+        return False
+    s = str(v).strip()
+    if not s:
+        return False
+    if s.lower() in ("false", "0", "no", "off"):
+        return False
+    return True
+
+
 # Cloud / background-agent detection -> the shell gate degrades to allow BEFORE the deny
 # branch (a Cursor Cloud VM is an already-isolated, own-branch /workspace clone; never
-# hard-block it). Signals (any): a payload/env background-agent flag, a present identity
-# broker (value is a handle), or a /workspace root.
+# hard-block it). Signals (any): a truthy background-agent flag, an affirmative identity
+# broker handle (not false/0/\"false\"), or a /workspace root.
 is_cloud = False
 for src in (data, tool_input):
     if _truthy(src.get("is_background_agent")):
         is_cloud = True
-    broker = src.get("cloud_agent_identity_broker")
-    if broker not in (None, "", [], {}):
+    if _affirmative_broker(src.get("cloud_agent_identity_broker")):
         is_cloud = True
 if workspace == "/workspace" or workspace.startswith("/workspace/"):
     is_cloud = True
@@ -307,7 +323,7 @@ for name in ("CURSOR_BACKGROUND_AGENT", "CURSOR_CLOUD_AGENT", "IS_BACKGROUND_AGE
     if _truthy(os.environ.get(name, "")):
         is_cloud = True
 for name in ("cloud_agent_identity_broker", "CURSOR_AGENT_IDENTITY_BROKER"):
-    if str(os.environ.get(name, "")).strip():
+    if _affirmative_broker(os.environ.get(name)):
         is_cloud = True
 
 print("payload_ok=%s" % ("yes" if payload_ok else "no"))
@@ -458,23 +474,39 @@ if [ "$event" = "file-edit" ]; then
   exit 0
 fi
 
+is_uncertain_include() {
+  local reason="$1"
+  case "$reason" in
+    *"fail-safe: ask"*|classifier\ unavailable*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 check_probe() {
-  local probe="$1" reason="$2" status classification linked
+  local probe="$1" probe_ctx="$2" status classification linked cls_reason
   status="$(classify_dir "$probe" || true)"
   if [ -z "$status" ]; then
     if included_looking_path "$probe"; then
       respond_ask \
         "AWA could not verify worktree safety for an included-looking checkout." \
-        "Hook payload/status could not be classified for $probe ($reason). Run '$DEV_WORKTREE status' there, or set DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 only for deliberate primary mutation."
+        "Hook payload/status could not be classified for $probe ($probe_ctx). Run '$DEV_WORKTREE status' there, or set DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 only for deliberate primary mutation."
       exit 0
     fi
     return 0
   fi
   classification="$(printf '%s\n' "$status" | awk -F': ' '$1=="classification"{print $2; exit}')"
   linked="$(printf '%s\n' "$status" | awk -F': ' '$1=="linked-worktree"{print $2; exit}')"
+  cls_reason="$(printf '%s\n' "$status" | awk -F': ' '$1=="reason"{print $2; exit}')"
   # Only an INCLUDED primary checkout (mode ON) is protected; exclude/advisory/off allow.
   if [ "$classification" = "include" ] && [ "$linked" = "no" ]; then
     if [ "$is_mutating" -eq 1 ]; then
+      if is_uncertain_include "$cls_reason"; then
+        # Classifier unavailable / uncertainty path -> ask (honest no-op), never deny.
+        respond_ask \
+          "AWA could not verify worktree safety for an included-looking checkout." \
+          "Classifier was unavailable for $probe ($cls_reason). Run '$DEV_WORKTREE status' there, or relaunch in a Safe Workspace via the Cursor Agents-Window Worktree dropdown."
+        exit 0
+      fi
       # CONFIRMED mutating command on an included primary -> enforced DENY. Cursor honors deny;
       # ask is non-blocking (L4), so deny is the only shape that actually prevents the mutation.
       respond_deny \
@@ -488,7 +520,7 @@ check_probe() {
       # allow, but we also never claim ask prevents anything.
       respond_ask \
         "AWA could not classify this command for an included primary checkout." \
-        "Hook payload was unparseable ($reason) for an included primary checkout. If this was a mutating command, relaunch in a Safe Workspace via the Cursor Agents-Window Worktree dropdown, or set DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 in Cursor's environment."
+        "Hook payload was unparseable ($probe_ctx) for an included primary checkout. If this was a mutating command, relaunch in a Safe Workspace via the Cursor Agents-Window Worktree dropdown, or set DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 in Cursor's environment."
       exit 0
     fi
   fi

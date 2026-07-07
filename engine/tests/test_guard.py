@@ -196,6 +196,24 @@ class TestDecideShellDegraded(EngineTestCase):
         self.assertEqual(d.permission, "allow")
         self.assertEqual(d.classification, "cloud")
 
+    def test_false_broker_env_does_not_cloud_allow(self):
+        """A false/0 broker env must not degrade to allow on Desktop."""
+        repo = self.make_repo()
+        pol = self._policy_for(self._tmp.name)
+        saved = {k: os.environ.get(k) for k in (
+            "cloud_agent_identity_broker", "CURSOR_AGENT_IDENTITY_BROKER")}
+        try:
+            for val in ("false", "0", ""):
+                os.environ["cloud_agent_identity_broker"] = val
+                d = guard.decide_shell(repo, "git commit -am x", pol)
+                self.assertEqual(d.permission, "deny", val)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
     def test_self_governed_repo_allows(self):
         repo = self.make_repo()
         Path(repo, "_ops").mkdir()
