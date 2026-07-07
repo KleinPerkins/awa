@@ -101,13 +101,16 @@ with **187** passing tests (`make verify`). Copy-honesty `recovery-manager` capa
 | L9/L10 cloud project hooks | **Verified** | `hook-probe/RESULTS-CLOUD-2026-07-05.md` |
 | Live AWA-MCP (`awa_*` + `beforeMCPExecution`) | **Verified** | `hook-probe/RESULTS-MCP-2026-07-05.md` |
 | R-A `move_agent_to_root` | **Verified (A+B+C)** | `live-verify/RESULTS-R-A-2026-07-05.md` |
-| E2E UAT mode + MCP write + apply-back (2026-07-06) | **Partially closed (headless GREEN; live UX pending operator)** | `live-verify/RESULTS-e2e-uat-20260706.md` — headless: mode guard ask/off, MCP mode tools + broad-off reject, apply-back PR on disposable remote; **operator pending:** live ask prompt, `beforeMCPExecution` on `awa_mode_set`, cloud re-probe post-hardening, dashboard canvas |
+| E2E UAT mode + MCP write + apply-back (2026-07-06) | **Partially closed (headless GREEN; live UX pending operator)** — **superseded by 2026-07-07** | `live-verify/RESULTS-e2e-uat-20260706.md` — headless: mode guard ask/off, MCP mode tools + broad-off reject, apply-back PR on disposable remote; **operator pending:** live ask prompt, `beforeMCPExecution` on `awa_mode_set`, cloud re-probe post-hardening, dashboard canvas. **Superseded by 2026-07-07: ASK_ON removed (two-state on/off, enforced `deny`; dashboard no longer emits `ask_on`) — see `live-verify/RESULTS-e2e-uat-20260707.md`** |
 
 **E2E UAT (2026-07-06):** after per-repo mode + round-2 hardening (`a965adf`), headless verification
 confirmed `awa_mode_*` MCP tools resolve against host `modes_file`, broad-off `.` is rejected with
 MCP `isError: true`, ASK_ON/OFF guard decisions match policy, dashboard JSON surfaces `ask_on`,
 and apply-back opened PR #1 on disposable `KleinPerkins/awa-uat-eligible-20260706T110803`. Live
 Desktop/cloud UX rows require operator sign-off via `live-verify/OPERATOR-UAT-SESSION.md`.
+**(Superseded 2026-07-07: ASK_ON was removed — the runtime is now two-state on/off with an enforced
+hook `deny` on included-primary mutations, and the dashboard no longer emits `ask_on`; this row
+describes pre-refactor ASK_ON behavior. See `live-verify/RESULTS-e2e-uat-20260707.md`.)**
 
 **L9/L10 (Verified, cloud probe 2026-07-05):** live Cursor **Cloud** agent on committed project
 hooks in `KleinPerkins/awa-cloud-hook-uat` recorded 6 hook events: 3× `beforeShellExecution`
