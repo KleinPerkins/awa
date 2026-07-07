@@ -11,7 +11,7 @@
 
 - KleinPerkins/awa is the SSP product (kernel + engine + dashboard + contract); KleinPerkins/dev is the thin host overlay (_ops delegators, `worktree-policy.yml`, `worktree-modes.yml`).
 - Runtime installs to `~/.local/share/awa/current`; GCB shelf at KleinPerkins/skills `global/tools/awa` (Flavor-2 standalone-release pointer).
-- Per-repo ON/ASK_ON/OFF modes live in a tool-owned `awa-modes/v1` file; host policy references it via `modes_file:` (LD overlay uses `default_mode: ask_on` for new eligible repos).
+- Per-repo ON/OFF modes live in a tool-owned `awa-modes/v1` file; host policy references it via `modes_file:` (LD overlay uses `default_mode: on`). ON = a confirmed mutating command on an included primary returns an enforced hook `deny` (Cursor enforces `deny`, treats `ask` as non-blocking — L4); one fail-safe rule (only exact `off` disables; any other value => ON); Cloud/background agent degrades to allow; `mode repair` migrates a legacy `ask_on` forward to `on`.
 - Kernel-first invariant: never weaken engine-off safety; `make verify` is the repo gate (contract-freeze, zero-link, parity, guard tests).
 - Product repo mutations use `_ops/bin/dev-worktree.sh ensure` + linked worktree; ~/dev is worktree-excluded — edit host overlay in place on a branch.
 - MCP mode tools mutate only the host modes file — never repos, git state, or primary checkouts.

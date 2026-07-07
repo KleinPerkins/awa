@@ -1,11 +1,12 @@
 """Tests for engine/modes.py (RECORD tooling) + the mutating MCP mode tools.
 
 Covers: set/get/remove/list round-trip, atomic write (no temp residue), invalid-value
-rejection, default_mode preservation, repair (drop invalid), sync (create + idempotent +
-non-destructive), and a cross-check that a written file parses identically through the
-classifier's own modes loader (PolicyConfig.load / mode_for). Also asserts the new
-mutating MCP tools are registered and dispatch into modes.py, path-scoped to the host
-modes file.
+rejection (only on|off accepted), default_mode preservation, repair (fail-safe: coerce any
+non-`off` VALUE to `on`, drop only an invalid KEY; normalize a legacy default_mode to `on`),
+sync (create + idempotent + non-destructive), and a cross-check that a written file parses
+identically through the classifier's own modes loader (PolicyConfig.load / mode_for). Also
+asserts the new mutating MCP tools are registered and dispatch into modes.py, path-scoped to
+the host modes file.
 """
 
 from __future__ import annotations
@@ -52,14 +53,16 @@ class TestSetGetRemoveList(ModesTestCase):
 
     def test_set_updates_existing(self):
         modes.set_mode(self.path, "proj", "on")
-        out = modes.set_mode(self.path, "proj", "ask_on")
+        out = modes.set_mode(self.path, "proj", "off")
         self.assertEqual(out["previous"], "on")
-        self.assertEqual(out["mode"], "ask_on")
-        self.assertEqual(modes.get_mode(self.path, "proj")["mode"], "ask_on")
+        self.assertEqual(out["mode"], "off")
+        self.assertEqual(modes.get_mode(self.path, "proj")["mode"], "off")
 
     def test_set_normalizes_case(self):
-        modes.set_mode(self.path, "proj", "ASK_ON")
-        self.assertEqual(modes.get_mode(self.path, "proj")["mode"], "ask_on")
+        modes.set_mode(self.path, "proj", "ON")
+        self.assertEqual(modes.get_mode(self.path, "proj")["mode"], "on")
+        modes.set_mode(self.path, "other", "OFF")
+        self.assertEqual(modes.get_mode(self.path, "other")["mode"], "off")
 
     def test_get_absent(self):
         modes.sync(self.path)
@@ -99,6 +102,13 @@ class TestValidation(ModesTestCase):
         # no file written on rejection
         self.assertFalse(self.path.exists())
 
+    def test_set_rejects_legacy_ask_on(self):
+        # `ask_on` is a REMOVED value: `set` validates against the 2-value set and rejects it
+        # (no third mode). Migration of a pre-existing legacy value is repair()'s job.
+        with self.assertRaises(modes.ModesError):
+            modes.set_mode(self.path, "proj", "ask_on")
+        self.assertFalse(self.path.exists())
+
     def test_set_rejects_empty_rel(self):
         with self.assertRaises(modes.ModesError):
             modes.set_mode(self.path, "  ", "on")
@@ -107,6 +117,12 @@ class TestValidation(ModesTestCase):
         with self.assertRaises(modes.ModesError):
             modes.sync(self.path, default_mode="bogus")
 
+    def test_sync_rejects_legacy_ask_on_default(self):
+        # A caller can no longer SEED a legacy default via sync (it validates on|off). The
+        # install/overlay migration path uses `repair`, which normalizes it instead.
+        with self.assertRaises(modes.ModesError):
+            modes.sync(self.path, default_mode="ask_on")
+
 
 class TestRelInjection(ModesTestCase):
     """A `rel` is written as a raw YAML key; a hostile rel must not inject a second key."""
@@ -114,14 +130,14 @@ class TestRelInjection(ModesTestCase):
     def test_injecting_rel_rejected_and_default_unchanged(self):
         # A newline-bearing rel that would inject `default_mode: off` must be rejected AND
         # leave the modes file (incl. its default_mode) completely untouched.
-        modes.sync(self.path, default_mode="ask_on")
+        modes.sync(self.path, default_mode="off")
         before = self.path.read_text(encoding="utf-8")
         evil = "proj\ndefault_mode: off"
         with self.assertRaises(modes.ModesError):
             modes.set_mode(self.path, evil, "on")
         after = self.path.read_text(encoding="utf-8")
         self.assertEqual(before, after)
-        self.assertEqual(modes.list_modes(self.path)["default_mode"], "ask_on")
+        self.assertEqual(modes.list_modes(self.path)["default_mode"], "off")
 
     def test_rel_with_colon_rejected(self):
         with self.assertRaises(modes.ModesError):
@@ -161,10 +177,10 @@ class TestRelInjection(ModesTestCase):
     def test_valid_path_and_glob_rels_allowed(self):
         modes.set_mode(self.path, "capabilities/awa", "on")
         modes.set_mode(self.path, "personal/*", "off")
-        modes.set_mode(self.path, "a/b_c.d-e", "ask_on")
+        modes.set_mode(self.path, "a/b_c.d-e", "on")
         self.assertEqual(
             modes.list_modes(self.path)["modes"],
-            {"capabilities/awa": "on", "personal/*": "off", "a/b_c.d-e": "ask_on"},
+            {"capabilities/awa": "on", "personal/*": "off", "a/b_c.d-e": "on"},
         )
 
 
@@ -256,7 +272,7 @@ class TestConcurrencyLock(ModesTestCase):
         keys = [f"r{i}" for i in range(12)]
 
         def worker(k):
-            modes.set_mode(self.path, k, "ask_on")
+            modes.set_mode(self.path, k, "on")
 
         threads = [threading.Thread(target=worker, args=(k,)) for k in keys]
         for t in threads:
@@ -265,22 +281,22 @@ class TestConcurrencyLock(ModesTestCase):
             t.join()
         got = modes.list_modes(self.path)["modes"]
         for k in keys:
-            self.assertEqual(got.get(k), "ask_on", k)
+            self.assertEqual(got.get(k), "on", k)
 
 
 class TestSerializerHeader(ModesTestCase):
     """`_serialize` emits a fixed canonical header so tool round-trips are byte-stable."""
 
     def test_header_present_after_sync(self):
-        modes.sync(self.path, default_mode="ask_on")
+        modes.sync(self.path, default_mode="off")
         text = self.path.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("# AWA per-repo MODE file"))
         self.assertIn("DO NOT HAND-EDIT", text)
         self.assertIn("schema: awa-modes/v1", text)
-        self.assertIn("default_mode: ask_on", text)
+        self.assertIn("default_mode: off", text)
 
     def test_resync_byte_identical(self):
-        modes.sync(self.path, default_mode="ask_on")
+        modes.sync(self.path, default_mode="off")
         modes.set_mode(self.path, "proj", "on")
         text1 = self.path.read_text(encoding="utf-8")
         modes.sync(self.path)
@@ -288,7 +304,7 @@ class TestSerializerHeader(ModesTestCase):
         self.assertEqual(text1, text2)
 
     def test_sync_on_canonical_file_does_not_rewrite(self):
-        modes.sync(self.path, default_mode="ask_on")
+        modes.sync(self.path, default_mode="off")
         mtime_before = self.path.stat().st_mtime_ns
         out = modes.sync(self.path)
         self.assertFalse(out["rewritten"])
@@ -311,11 +327,11 @@ class TestAtomicWrite(ModesTestCase):
 
 class TestDefaultModePreserved(ModesTestCase):
     def test_default_mode_preserved_across_set_and_remove(self):
-        modes.sync(self.path, default_mode="ask_on")
+        modes.sync(self.path, default_mode="off")
         modes.set_mode(self.path, "proj", "on")
-        self.assertEqual(modes.list_modes(self.path)["default_mode"], "ask_on")
+        self.assertEqual(modes.list_modes(self.path)["default_mode"], "off")
         modes.remove_mode(self.path, "proj")
-        self.assertEqual(modes.list_modes(self.path)["default_mode"], "ask_on")
+        self.assertEqual(modes.list_modes(self.path)["default_mode"], "off")
 
     def test_set_on_fresh_file_uses_backcompat_default(self):
         modes.set_mode(self.path, "proj", "on")
@@ -324,7 +340,10 @@ class TestDefaultModePreserved(ModesTestCase):
 
 
 class TestRepair(ModesTestCase):
-    def test_repair_drops_invalid_and_normalizes_default(self):
+    def test_repair_coerces_invalid_value_and_normalizes_default(self):
+        # FAIL-SAFE migration: an invalid VALUE is coerced forward to `on` (kept + protected),
+        # NOT dropped; a legacy/invalid default_mode normalizes to `on`. Only an invalid KEY
+        # (tested separately) is dropped.
         self.path.write_text(
             "schema: awa-modes/v1\n"
             "default_mode: bogus\n"
@@ -334,15 +353,36 @@ class TestRepair(ModesTestCase):
             encoding="utf-8",
         )
         out = modes.repair(self.path)
-        self.assertEqual(out["modes"], {"good": "on"})
-        self.assertIn("bad", out["dropped"])
+        self.assertEqual(out["modes"], {"good": "on", "bad": "on"})  # coerced, not dropped
+        self.assertEqual(out["dropped"], {})
         self.assertTrue(out["default_mode_normalized"])
         self.assertEqual(out["default_mode"], modes.DEFAULT_DEFAULT_MODE)
         # persisted
-        self.assertEqual(modes.list_modes(self.path)["modes"], {"good": "on"})
+        self.assertEqual(modes.list_modes(self.path)["modes"], {"good": "on", "bad": "on"})
+
+    def test_repair_migrates_legacy_ask_on_to_on(self):
+        # The install/overlay migration path: a pre-refactor file with default_mode: ask_on and
+        # a per-repo ask_on entry self-heals to on (both), preserving `off`. This is the ONLY
+        # sanctioned way a legacy `ask_on` migrates forward.
+        self.path.write_text(
+            "schema: awa-modes/v1\n"
+            "default_mode: ask_on\n"
+            "modes:\n"
+            "  keepon: ask_on\n"
+            "  disabled: off\n",
+            encoding="utf-8",
+        )
+        out = modes.repair(self.path)
+        self.assertEqual(out["default_mode"], "on")
+        self.assertTrue(out["default_mode_normalized"])
+        self.assertEqual(out["modes"], {"keepon": "on", "disabled": "off"})
+        self.assertEqual(out["dropped"], {})
+        # persisted + reads back through the classifier loader as on/off only
+        self.assertEqual(modes.list_modes(self.path)["default_mode"], "on")
+        self.assertEqual(modes.list_modes(self.path)["modes"], {"keepon": "on", "disabled": "off"})
 
     def test_repair_idempotent(self):
-        modes.sync(self.path, default_mode="ask_on")
+        modes.sync(self.path, default_mode="off")
         modes.set_mode(self.path, "proj", "on")
         first = modes.repair(self.path)
         text1 = self.path.read_text(encoding="utf-8")
@@ -358,9 +398,9 @@ class TestRepair(ModesTestCase):
 
 class TestSync(ModesTestCase):
     def test_sync_creates_with_schema_and_default(self):
-        out = modes.sync(self.path, default_mode="ask_on")
+        out = modes.sync(self.path, default_mode="off")
         self.assertTrue(out["created"])
-        self.assertEqual(out["default_mode"], "ask_on")
+        self.assertEqual(out["default_mode"], "off")
         self.assertEqual(out["schema"], modes.SCHEMA)
         self.assertTrue(self.path.exists())
 
@@ -369,14 +409,14 @@ class TestSync(ModesTestCase):
         self.assertEqual(out["default_mode"], "on")
 
     def test_sync_idempotent_and_nondestructive(self):
-        modes.sync(self.path, default_mode="ask_on")
+        modes.sync(self.path, default_mode="off")
         modes.set_mode(self.path, "proj", "off")
         before = self.path.read_text(encoding="utf-8")
         out = modes.sync(self.path, default_mode="on")  # must NOT clobber existing
         after = self.path.read_text(encoding="utf-8")
         self.assertFalse(out["created"])
         self.assertEqual(before, after)  # preserved default_mode + entry
-        self.assertEqual(modes.list_modes(self.path)["default_mode"], "ask_on")
+        self.assertEqual(modes.list_modes(self.path)["default_mode"], "off")
         self.assertEqual(modes.list_modes(self.path)["modes"], {"proj": "off"})
 
 
@@ -384,7 +424,7 @@ class TestClassifierRoundTrip(ModesTestCase):
     """A file written by modes.py must parse identically through the classifier loader."""
 
     def test_roundtrip_via_policyconfig(self):
-        modes.sync(self.path, default_mode="ask_on")
+        modes.sync(self.path, default_mode="off")
         modes.set_mode(self.path, "capabilities/awa", "on")
         modes.set_mode(self.path, "personal/*", "off")
 
@@ -396,7 +436,7 @@ class TestClassifierRoundTrip(ModesTestCase):
             encoding="utf-8",
         )
         cfg = policy.PolicyConfig.load(policy_path)
-        self.assertEqual(cfg.default_mode, "ask_on")
+        self.assertEqual(cfg.default_mode, "off")
         self.assertEqual(cfg.modes["capabilities/awa"], "on")
         self.assertEqual(cfg.modes["personal/*"], "off")
         # mode_for agrees with what the tool set (glob first-match).
@@ -509,7 +549,7 @@ class TestMcpModeTools(ModesTestCase):
              "awa_mode_repair", "awa_mode_sync"} <= names)
 
     def test_set_get_remove_via_mcp_mutates_only_modes_file(self):
-        self._call("awa_mode_sync", {"default_mode": "ask_on"})
+        self._call("awa_mode_sync", {"default_mode": "off"})
         _, out = self._call("awa_mode_set", {"rel": "proj", "mode": "on"})
         self.assertEqual(out["mode"], "on")
         # written to exactly the configured modes file

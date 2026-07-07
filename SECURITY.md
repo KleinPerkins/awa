@@ -10,6 +10,51 @@
 > adapter/CLI, the `beforeShellExecution` gate `worktree-guard.sh`, and the host's
 > `worktree-verify` suite), which live in the host repo, not here.
 
+## Platform limitation — Cursor enforces hook `deny`, not `ask` (L4)
+
+**Finding (L4, proven live).** Cursor's agent honors a `beforeShellExecution` hook that returns
+`{"permission":"deny"}` (the command is blocked), but treats `{"permission":"ask"}` as
+**non-blocking** on the agent path: the agent proceeds as if allowed, with no human modal. And
+`afterFileEdit` ignores the permission field entirely — a returned `deny` there is discarded and the
+edit lands on disk (independently observed 2026-07-05; the returned `deny` was ignored). This is a
+Cursor platform behavior, documented in the Cursor community forum (threads reporting
+`beforeShellExecution: ask` as non-blocking on the agent path) and acknowledged by Cursor staff as a
+known limitation with no committed ETA.
+
+**Consequence for AWA (design decision).** AWA does **not** rely on `ask` for prevention. On the one
+case where prevention must actually happen — a **confirmed mutating command on an INCLUDED PRIMARY
+checkout** (mode ON) — the guard returns an **enforced `deny`**, not `ask`. `ask` is retained only as
+an **honest no-op signal** on the genuine-uncertainty path (an included-looking checkout whose command
+payload the hook could not parse): AWA emits `ask` there knowing Cursor will not block, so it never
+*silently* downgrades an uncertain case to allow, but it also never pretends `ask` prevents anything.
+
+**Fail-safety posture.** The deny path is fail-*safe*, never fail-*brick*:
+
+- **Only `off` disables.** Any other mode value (a typo, a removed legacy value, an unknown) resolves
+  to ON/`include` → protected. One fail-safe rule governs both the classifier read-path and the modes
+  writer.
+- **Infra failure ⇒ allow.** If the hook crashes, times out, or its interpreter is missing, it
+  degrades to `allow` (anti-brick) — the kernel guarantee is *detection*, which never depends on the
+  gate succeeding.
+- **Cloud ⇒ allow.** A Cursor Cloud / background agent runs in an already-isolated, own-branch
+  `/workspace` clone; the guard detects that (background-agent identity broker / `is_background_agent`
+  / a `/workspace` root) and degrades to `allow` **before** the deny branch, so a cloud VM is never
+  hard-blocked.
+
+**Recovery / override (operator path).** A `deny` on a primary checkout is recovered by the operator,
+not by the agent retrying: relaunch the agent in a Safe Workspace via the Cursor Agents-Window
+Worktree dropdown (AWA adopts the linked worktree and then allows mutation), or set
+`DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1` in Cursor's environment/settings. Note an inline
+`DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 <cmd>` prefix does **not** work — the hook reads its own process
+env, not the command's inline assignment — and `cd <worktree> && <cmd>` is still denied. As a last
+resort an operator who deliberately wants a repo unprotected can set it `off`.
+
+**Residual to close.** A live ask-then-deny probe on `beforeShellExecution` — recording, on both
+Desktop and Cloud, that a returned `ask` lets the command run and a returned `deny` blocks it — is
+tracked in `live-verify/RESULTS-e2e-uat-20260707.md` (Phase 1). The `ask`-is-non-blocking and
+`afterFileEdit`-ignores-permission halves are already proven (2026-07-05 live observation + on-disk
+mutation + the L2 doc snapshot); the deny-blocks-on-Desktop half is the open live confirmation.
+
 ## Cluster D — Security ledger
 
 Status legend: **Verified** (closed with evidence) / **Partially closed** (kernel part done, engine
@@ -56,13 +101,16 @@ with **187** passing tests (`make verify`). Copy-honesty `recovery-manager` capa
 | L9/L10 cloud project hooks | **Verified** | `hook-probe/RESULTS-CLOUD-2026-07-05.md` |
 | Live AWA-MCP (`awa_*` + `beforeMCPExecution`) | **Verified** | `hook-probe/RESULTS-MCP-2026-07-05.md` |
 | R-A `move_agent_to_root` | **Verified (A+B+C)** | `live-verify/RESULTS-R-A-2026-07-05.md` |
-| E2E UAT mode + MCP write + apply-back (2026-07-06) | **Partially closed (headless GREEN; live UX pending operator)** | `live-verify/RESULTS-e2e-uat-20260706.md` — headless: mode guard ask/off, MCP mode tools + broad-off reject, apply-back PR on disposable remote; **operator pending:** live ask prompt, `beforeMCPExecution` on `awa_mode_set`, cloud re-probe post-hardening, dashboard canvas |
+| E2E UAT mode + MCP write + apply-back (2026-07-06) | **Partially closed (headless GREEN; live UX pending operator)** — **superseded by 2026-07-07** | `live-verify/RESULTS-e2e-uat-20260706.md` — headless: mode guard ask/off, MCP mode tools + broad-off reject, apply-back PR on disposable remote; **operator pending:** live ask prompt, `beforeMCPExecution` on `awa_mode_set`, cloud re-probe post-hardening, dashboard canvas. **Superseded by 2026-07-07: ASK_ON removed (two-state on/off, enforced `deny`; dashboard no longer emits `ask_on`) — see `live-verify/RESULTS-e2e-uat-20260707.md`** |
 
 **E2E UAT (2026-07-06):** after per-repo mode + round-2 hardening (`a965adf`), headless verification
 confirmed `awa_mode_*` MCP tools resolve against host `modes_file`, broad-off `.` is rejected with
 MCP `isError: true`, ASK_ON/OFF guard decisions match policy, dashboard JSON surfaces `ask_on`,
 and apply-back opened PR #1 on disposable `KleinPerkins/awa-uat-eligible-20260706T110803`. Live
 Desktop/cloud UX rows require operator sign-off via `live-verify/OPERATOR-UAT-SESSION.md`.
+**(Superseded 2026-07-07: ASK_ON was removed — the runtime is now two-state on/off with an enforced
+hook `deny` on included-primary mutations, and the dashboard no longer emits `ask_on`; this row
+describes pre-refactor ASK_ON behavior. See `live-verify/RESULTS-e2e-uat-20260707.md`.)**
 
 **L9/L10 (Verified, cloud probe 2026-07-05):** live Cursor **Cloud** agent on committed project
 hooks in `KleinPerkins/awa-cloud-hook-uat` recorded 6 hook events: 3× `beforeShellExecution`
@@ -97,9 +145,11 @@ copy-honesty-check enforces gated verbs at build time.
 
 ## Shell-gate interception scope (adversarial UATs)
 
-The `beforeShellExecution` gate (`worktree-guard.sh`) is the **one** honored pre-mutation gate. Its
-mutating-command classifier is adversary-aware and intercepts the review-flagged bypasses — each has
-a UAT asserting the gate returns `ask` on an included primary checkout:
+The `beforeShellExecution` gate (`worktree-guard.sh`) is AWA's pre-mutation gate — the only hook whose
+decision Cursor can enforce *before* a command runs (`afterFileEdit` is observation-only, §H1/L4), and
+Cursor enforces only `deny`, not `ask` (see the L4 platform limitation above). Its mutating-command
+classifier is adversary-aware and intercepts the review-flagged bypasses — each has a UAT asserting the
+gate returns an enforced `deny` on an included primary checkout:
 
 - `git -C <path> commit` / `git -c k=v commit` — global options are skipped to find the real
   subcommand (not just a literal `git commit`).

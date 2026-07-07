@@ -315,8 +315,8 @@ def mode_scan_bases(cfg) -> list[str]:
     """First non-wildcard path prefix of each explicit-mode key.
 
     Dashboard enumeration hint: a repo configured ONLY via a ``modes:`` entry (an explicit
-    OFF/ASK_ON/ON repo that sits outside the include globs) would otherwise never be
-    discovered. e.g. modes {'projects/*': ask_on, 'personal/legacy': off} -> ['projects',
+    OFF/ON repo that sits outside the include globs) would otherwise never be
+    discovered. e.g. modes {'projects/*': on, 'personal/legacy': off} -> ['projects',
     'personal/legacy']. A prefix may be a directory of repos (scan its children) or name a
     repo directly (the base itself is the repo).
     """
@@ -332,8 +332,8 @@ def enumerate_repos(root: Path, cfg) -> list[Path]:
     """Scanned root + shallow git-repo children of the policy include roots + mode-only roots.
 
     Absent include-root hints (standalone default), also shallow-scan the direct children of
-    the root so sibling repos under a governed root are still discovered. Mode-configured
-    roots (from ``modes:`` keys) are additionally enumerated so explicitly-set OFF/ASK_ON/ON
+    the root so sibling repos under a governed root are still discovered.     Mode-configured
+    roots (from ``modes:`` keys) are additionally enumerated so explicitly-set OFF/ON
     repos outside the include globs still surface — a scan base may be a directory of repos
     or (for an exact mode key) the repo itself.
     """
@@ -368,8 +368,6 @@ def build(root: Path, timeout: float) -> dict:
     default_base = "main"
     repos_out: list[dict] = []
 
-    ask_on_count = 0
-
     summary = {
         "repos": 0,
         "included": 0,
@@ -391,8 +389,9 @@ def build(root: Path, timeout: float) -> dict:
         cls, reason, owner_repo = classify_repo(repo_str, rel, cfg, timeout)
 
         # Resolved explicit mode (additive-within-v1): "" (no matching modes entry),
-        # a valid value (on|ask_on|off), or "invalid" when a matching entry carries an
-        # unrecognized value. mode_error is populated only for the invalid case.
+        # a valid value (on|off), or "invalid" when a matching entry carries an
+        # unrecognized value (e.g. a removed legacy value). mode_error is populated only for
+        # the invalid case; the repo still classifies protected/include via the fail-safe rule.
         raw_mode = awa_policy.mode_for(rel, cfg)
         if raw_mode == "":
             mode = ""
@@ -446,13 +445,11 @@ def build(root: Path, timeout: float) -> dict:
         })
 
         summary["repos"] += 1
-        # `ask_on` is a distinct bucket (tracked separately + surfaced as an optional key);
-        # .get() keeps this resilient to any future open-vocabulary classification value.
+        # classify() emits only include|exclude|advisory (never a mode value); .get() keeps
+        # this resilient to any future open-vocabulary classification value.
         skey = {"include": "included", "exclude": "excluded", "advisory": "advisory"}.get(cls)
         if skey:
             summary[skey] += 1
-        if cls == awa_policy.ASK_ON:
-            ask_on_count += 1
         for wt in worktrees:
             summary["worktrees"] += 1
             if wt["is_linked"]:
@@ -468,12 +465,6 @@ def build(root: Path, timeout: float) -> dict:
             if wt["ab_status"] == "no-base":
                 summary["no_base"] += 1
         summary["orphan_branches"] += len(orphan_branches)
-
-    # Optional additive-within-v1 key: surface the ask_on bucket whenever any repo resolved
-    # to ask_on OR explicit modes are configured (so a host running the mode feature always
-    # sees the counter). Absent otherwise -> byte-stable with pre-mode emitter output.
-    if ask_on_count > 0 or cfg.modes:
-        summary["ask_on"] = ask_on_count
 
     return {
         "schema": SCHEMA,

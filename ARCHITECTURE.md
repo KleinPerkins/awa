@@ -62,23 +62,32 @@ ever regressing a green verifier.
 | `redact` | S5 secret/PII redaction pass; every persisted audit/command string is piped through it |
 | `cli` / `__main__` | `awa-engine` command surface (launched by `bin/awa-engine.sh`) |
 
-## Per-repo mode (ON / ASK_ON / OFF)
+## Per-repo mode (ON / OFF)
 
-A repo's AWA behavior is a first-class, explicitly-settable **mode** with three states, resolved
+A repo's AWA behavior is a first-class, explicitly-settable **mode** with two states, resolved
 inside the same generic zero-link classifier the shell kernel and the engine share:
 
-- **ON** → `include`: the guard **asks** before a mutating command on the primary checkout,
-  `ensure` creates a Safe Workspace, and the repo is the only mode eligible for repo-committed
+- **ON** → `include`: a confirmed mutating command on the primary checkout returns an enforced hook
+  **`deny`**, `ensure` creates a Safe Workspace, and the repo is eligible for repo-committed
   worktree-setup execution.
-- **ASK_ON** → `ask_on`: the guard still **asks** and `ensure` still creates a Safe Workspace (so
-  the nudge is coherent), but the repo is surfaced in its own dashboard bucket and is **not**
-  setup-exec eligible. This is the one genuinely new runtime behavior.
 - **OFF** → `exclude`: AWA leaves the repo alone — the guard allows, `ensure` is a no-op.
 
-For a mutating command on a primary checkout the guard asks under ON and ASK_ON and allows under
-OFF; read-only commands, linked worktrees, and adopted leases always allow in every mode.
-`afterFileEdit` stays **observation-only** in every mode (it can only write a metadata-only
-detection receipt, never pre-block).
+**Why `deny`, not `ask` (L4).** Cursor's agent enforces a `beforeShellExecution` hook that returns
+`deny` (the command is blocked) but treats `ask` as **non-blocking** on the agent path, and
+`afterFileEdit` ignores the permission field entirely. So on the one case where prevention must
+actually happen — a confirmed mutating command on an included **primary** checkout (mode ON) — the
+guard returns an enforced `deny`. `ask` is retained only as an honest no-op on the genuine-uncertainty
+path (an included-looking checkout whose command payload the hook could not parse): AWA emits `ask`
+there knowing Cursor won't block, so it never *silently* downgrades an uncertain case to allow.
+See [SECURITY.md](SECURITY.md) for the platform-limitation writeup.
+
+For a mutating command on a primary checkout the guard **denies** under ON and allows under OFF;
+read-only commands, linked worktrees, and adopted leases always allow in every mode. A Cursor Cloud
+/ background agent runs in an already-isolated, own-branch `/workspace` clone; the guard detects that
+and **degrades to allow before the deny branch**, so a cloud VM is never hard-blocked. Hook-infra
+failure (crash / timeout / missing interpreter) also degrades to allow (anti-brick). `afterFileEdit`
+stays **observation-only** in every mode (it can only write a metadata-only detection receipt, never
+pre-block).
 
 ### Storage — a tool-owned, source-tracked modes file
 
@@ -89,19 +98,19 @@ without clobbering a hand-authored policy:
 
 ```
 schema: awa-modes/v1
-default_mode: ask_on
+default_mode: on
 modes:
   projects/foo: on
   projects/bar: off
-  projects/baz: ask_on
 ```
 
 Keys are repo paths relative to the governed root (exact or glob, first-match by file order, exact
-preferred), values `on|off|ask_on` (case-normalized). `default_mode` governs eligible repos with no
-explicit entry. The file is intended to be **source-tracked** in the host overlay and rewritten only
-by the tools — never hand-edited. A repo-local mode marker is deliberately rejected: a cloned repo
-could ship `off` to silence the guard (a repo-controlled safety downgrade), so modes are host-owned
-only.
+preferred), values `on|off` (case-normalized). One **fail-safe rule** governs both the classifier
+read-path and the modes writer: only an exact `off` disables; any other value — a typo, a removed
+legacy value — resolves to `on`. `default_mode` governs eligible repos with no explicit entry. The
+file is intended to be **source-tracked** in the host overlay and rewritten only by the tools —
+never hand-edited. A repo-local mode marker is deliberately rejected: a cloned repo could ship `off`
+to silence the guard (a repo-controlled safety downgrade), so modes are host-owned only.
 
 ### Resolution precedence (classifier, first-match-wins)
 
@@ -109,14 +118,14 @@ only.
 2. explicit **OFF** → `exclude` (absolute opt-out, top precedence)
 3. legacy `overrides.exclude` / `overrides.include`
 4. **SAFETY excludes** — umbrella root, governed-marker, foreign-hook framework, read-only path
-   (these sit **above** the explicit ON/ASK_ON step, so an explicit ON/ASK_ON/invalid may not
-   override a safety-exclude)
-5. explicit **ON** → `include`; explicit **ASK_ON** → `ask_on`; **invalid** value → `ask_on`
-   (safe fallback; `policy-check` **WARNs**, never hard-fails)
+   (these sit **above** the explicit mode step, so a non-off explicit value may not override a
+   safety-exclude)
+5. any explicit **non-off** value → `include` (the fail-safe: a removed legacy value or a typo is
+   not `off`, so it protects; `policy-check` **WARNs** on an unknown value, never hard-fails)
 6. exclude glob → `exclude`
 7. no origin → `advisory`
 8. eligibility (include glob / `default: include`) mapped through **`default_mode`**:
-   `on`→`include`, `ask_on`→`ask_on`, `off`→`exclude`
+   non-`off` (e.g. `on`)→`include`, `off`→`exclude`
 
 `default_mode: on` reproduces the pre-mode classification byte-for-byte. The classifier's 4-field
 tab output is unchanged; a separate `mode-for` CLI exposes the resolved explicit mode for
@@ -126,9 +135,10 @@ identically, and their parity (including `modes_file` load and invalid handling)
 ### Default posture (product vs host)
 
 The shipped template keeps `default_mode: on` for byte-for-byte back-compat: a host with no
-`modes_file`/`modes` behaves exactly as before. Opting eligible repos into **ASK_ON by default** is a
-host-overlay choice (`default_mode: ask_on`), a safety tightening — same guard-ask + ensure, but
-eligible repos are no longer setup-exec eligible and surface in the `ask_on` bucket.
+`modes_file`/`modes` behaves exactly as before, and every eligible repo is protected (an
+included-primary mutation denies). A host may set `default_mode: off` to leave new eligible repos
+alone by default; any non-`off` default (including a stale legacy value) fails safe to ON, and
+`mode repair` normalizes a legacy `default_mode` forward to `on` (the sanctioned migration path).
 
 ### Tools — generalized verbs (view / add / update / delete / repair / sync)
 
@@ -160,12 +170,15 @@ removal/rename of a required verb/flag/key — or a changed schema string — is
 requires a versioned bump (`awa-contract.v2.json`). Additive, backward-compatible OPTIONAL fields
 are allowed within v1.
 
-The per-repo mode work is **additive within v1 — no v2**. The contract freezes keys and `schema`
-literals, not value sets, so the new `ask_on` classification/reason value lives in the open-vocabulary
-`classification`/`reason` fields; the new optional `summary.ask_on`, `repo.mode`, and `repo.mode_error`
-dashboard fields, the new `mode` CLI verb, and the new `awa_mode_*` MCP tools are all additive (the
-freeze checker asserts frozen verbs/flags/keys/shapes exist, not that none are added). The frozen
-guard `ask`/`allow` shapes are unchanged — ASK_ON reuses the same `ask` permission shape as ON.
+The per-repo mode surface stays **within v1 — no v2**. The contract freezes keys and `schema`
+literals, not value sets: `classify()` now emits only `include | exclude | advisory | not-git` (the
+`ask_on` classification value was removed with ASK_ON), and the `repo.mode`/`repo.mode_error`
+dashboard fields, the `mode` CLI verb, and the `awa_mode_*` MCP tools remain additive (the freeze
+checker asserts frozen verbs/flags/keys/shapes exist, not that none are added). The guard now returns
+an enforced **`deny`** on a confirmed included-primary mutation; the contract keeps `ask` in
+`permission_values` (retained for the uncertainty path) and **adds** an additive `deny_shape`
+(`permission` + `user_message` + `agent_message`). The freeze checker asserts the included-primary
+mutation denies with `deny_shape` present and that `afterFileEdit` allows (observation-only).
 
 **File locations are NOT frozen.** The shim/hook/emitter paths recorded in the contract are
 `informational` and resolved by **role** (`AWA_HOME` / the installed release path). Re-homing the

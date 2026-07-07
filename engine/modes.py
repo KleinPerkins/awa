@@ -48,7 +48,7 @@ SCHEMA = "awa-modes/v1"
 # FIXED canonical header comment block emitted by ``_serialize`` so a tool round-trip is
 # byte-stable WITH guidance: ``sync`` (run unconditionally by install/overlay) can no longer
 # strip a source-tracked file's "DO NOT HAND-EDIT" header and leave a dirty tracked file.
-# ZERO-LINK: carries no org/host literals (the ask_on default lives only in the host overlay).
+# ZERO-LINK: carries no org/host literals.
 _HEADER = (
     "# AWA per-repo MODE file — TOOL-OWNED, source-tracked (schema awa-modes/v1).\n"
     "# DO NOT HAND-EDIT: materialized/reconciled by install/bootstrap and edited only via\n"
@@ -64,8 +64,9 @@ _REL_SAFE_RE = re.compile(r"^[A-Za-z0-9/._*?\[\]-]+\Z")
 # Broad rel keys that MUST NOT be set to `off` — they disable the guard for every matched repo.
 _BROAD_OFF_RELS = frozenset({".", "*", "**"})
 # Default governing mode for eligible repos with no explicit entry, used ONLY when a file
-# is (re)created without an existing/explicit default. "on" reproduces today's derived
-# classification byte-for-byte (product back-compat). The host overlay may seed "ask_on".
+# is (re)created without an existing/explicit default, OR to normalize an invalid/legacy
+# default. "on" reproduces today's derived classification byte-for-byte (product back-compat)
+# and is the fail-safe target: only an exact `off` disables protection.
 DEFAULT_DEFAULT_MODE = "on"
 
 
@@ -143,6 +144,16 @@ def _reject_broad_off(rel: str, mode: str) -> None:
         )
 
 
+def _coerce_repo_mode(value) -> str:
+    """The ONE fail-safe rule for a per-repo mode VALUE on the writer path: only an exact
+    ``off`` disables the guard; ANY other value (a removed legacy value, a typo, an unknown)
+    maps to ``on`` (protected). Generic — never names a specific legacy token. A ``repair``
+    or ``sync`` thus MIGRATES a stale value forward (kept, as ``on``) instead of silently
+    dropping it and leaving the repo to fall back to the default.
+    """
+    return "off" if str(value).strip().lower() == "off" else "on"
+
+
 # ---- path resolution (host-supplied; zero-link) -----------------------------
 def resolve_modes_file(policy_path: str | Path) -> Optional[str]:
     """Resolve the modes-file path from a host policy's ``modes_file:`` pointer.
@@ -201,7 +212,10 @@ def _serialize(modes: dict, default_mode: str) -> str:
             # raw YAML key, so repair/sync can NEVER persist an unsafe key introduced by a
             # hand-edit (e.g. one bearing a newline/colon that could inject `default_mode: off`).
             _validate_rel(key)
-            lines.append(f"  {key}: {val}")
+            # Fail-safe VALUE choke point: only `off` disables; any other value serializes as
+            # `on`. Callers already coerce, so this is defense-in-depth (never persists a stale
+            # legacy value that would later read back as `invalid`).
+            lines.append(f"  {key}: {_coerce_repo_mode(val)}")
     else:
         lines.append("modes: {}")
     return _HEADER + "\n".join(lines) + "\n"
@@ -352,8 +366,14 @@ def remove_mode(path: str | Path, rel: str) -> dict:
 
 
 def repair(path: str | Path) -> dict:
-    """Rewrite/normalize the file: drop invalid mode values + empty keys, normalize
-    default_mode, and report what changed. Idempotent."""
+    """Rewrite/normalize the file and report what changed. Idempotent.
+
+    Fail-safe migration: an invalid/legacy mode VALUE (anything not exactly ``off``) is
+    coerced forward to ``on`` (kept + protected), NOT dropped — so a removed legacy value or a
+    typo self-heals to protected instead of silently falling back to the default. Only an
+    invalid/unsafe KEY (empty, or one that fails rel validation) is dropped. An invalid/legacy
+    ``default_mode`` (anything not in MODE_VALUES) normalizes to ``on``.
+    """
     with _modes_lock(path):
         modes, dm, schema, exists = _read(path)
         if not exists:
@@ -362,7 +382,6 @@ def repair(path: str | Path) -> dict:
         dropped: dict = {}
         for key, val in modes.items():
             k = str(key).strip()
-            v = str(val).strip().lower()
             if not k:
                 dropped[str(key)] = val
                 continue
@@ -371,10 +390,9 @@ def repair(path: str | Path) -> dict:
             except ModesError:
                 dropped[k or str(key)] = val
                 continue
-            if v in MODE_VALUES:
-                cleaned[k] = v
-            else:
-                dropped[k] = val
+            # Fail-safe: keep the entry, coercing any non-`off` value to `on` (migrate legacy
+            # values forward instead of dropping and un-protecting the repo).
+            cleaned[k] = _coerce_repo_mode(val)
         default_normalized = bool(dm is not None and dm not in MODE_VALUES)
         default_mode = dm if dm in MODE_VALUES else DEFAULT_DEFAULT_MODE
         # Byte-compare no-op before writing (mirror `sync`): don't rewrite an already-canonical
@@ -402,7 +420,8 @@ def sync(path: str | Path, default_mode: Optional[str] = None) -> dict:
 
     Idempotent and non-destructive: an existing valid default_mode is PRESERVED (the
     ``default_mode`` argument only seeds a brand-new / previously-invalid default);
-    existing entries are preserved (normalized casing). Never overwrites operator entries.
+    existing entries are preserved (normalized casing, and any non-``off`` value coerced to
+    ``on`` by the shared fail-safe rule). Never overwrites operator entries.
     """
     with _modes_lock(path):
         modes, dm, schema, exists = _read(path)
@@ -421,9 +440,9 @@ def sync(path: str | Path, default_mode: Optional[str] = None) -> dict:
                 _validate_rel(k)
             except ModesError:
                 continue
-            v = str(val).strip().lower()
-            if v in MODE_VALUES:
-                norm_modes[k] = v
+            # Fail-safe: keep the entry, coercing any non-`off` value to `on` (one rule shared
+            # with repair()/_serialize) — never drop a stale value and silently un-protect.
+            norm_modes[k] = _coerce_repo_mode(val)
         # No-op write: when the parsed+reserialized content already equals the file bytes, do
         # NOT rewrite. `sync` is run unconditionally by install/overlay, so a rewrite of an
         # already-canonical, source-tracked file would dirty the tracked worktree on install.

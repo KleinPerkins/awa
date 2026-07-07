@@ -1,5 +1,10 @@
 # AWA E2E UAT results — 2026-07-06
 
+> **SUPERSEDED by 2026-07-07.** This session verified the pre-refactor `ask` / `ASK_ON` behavior.
+> The ASK_ON removal (2026-07-07) collapsed modes to ON/OFF and changed an included-primary mutation
+> from `ask` to an enforced `deny`. Kept as history; the current runbook + results are
+> `RESULTS-e2e-uat-20260707.md`. `ask_on` / `ask` references below reflect the behavior at the time.
+
 **Session:** interactive end-to-end UAT (Desktop + Cloud, full apply-back)  
 **Product pin:** `a965adf` (round-2 hardening #14)  
 **Host overlay pin:** `8d32d6c` (pre-session) → overlay MCP env repaired at session start via local install  

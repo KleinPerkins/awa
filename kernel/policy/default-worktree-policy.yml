@@ -23,15 +23,15 @@ managed_location: ~/.cursor/worktrees
 default: include
 
 # Per-repo MODE default for eligible repos with no explicit modes entry.
-#   on     -> include  (guard asks on primary mutation; ensure creates a Safe Workspace)
-#   ask_on -> ask_on   (guard asks + ensure creates a workspace, but NOT setup-exec eligible)
-#   off    -> exclude  (AWA leaves the repo alone)
-# The shipped template keeps `on` so default behavior is byte-for-byte back-compatible.
-# A host overlay MAY opt into `ask_on` to make eligible repos ask-by-default.
+#   on  -> include  (guard DENIES a mutating command on the primary checkout; ensure creates
+#                    a Safe Workspace). ON is the protected posture.
+#   off -> exclude  (AWA leaves the repo alone)
+# ONE fail-safe rule: only `off` disables; ANY other value (a typo, a removed legacy value)
+# resolves to `on`/include. The shipped template keeps `on` (byte-for-byte back-compatible).
 default_mode: on
 
 # Optional pointer to a tool-owned, source-tracked modes file (schema awa-modes/v1) holding
-# a `default_mode` + a `modes:` map of rel-glob -> on|off|ask_on. It is resolved relative to
+# a `default_mode` + a `modes:` map of rel-glob -> on|off. It is resolved relative to
 # this policy file's directory (`~`/absolute also allowed) and is rewritten ONLY by the mode
 # tools (`dev-worktree.sh mode ...`, `python3 -m engine mode ...`, the awa_mode_* MCP tools) —
 # never hand-edited. Left commented here (the generic template configures no repos). A host

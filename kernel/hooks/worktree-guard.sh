@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Cursor mutation backstop hook (AWA kernel). It is a soft backstop for the always-applied
-# worktree rule: fail open outside repos, ask before included primary mutations, and allow
-# an explicit operator override for deliberate primary work.
+# Cursor mutation backstop hook (AWA kernel). It is a backstop for the always-applied worktree
+# rule: fail open outside repos, DENY a confirmed mutating command on an included primary
+# checkout (Cursor enforces `deny`, treats `ask` as non-blocking — L4), degrade-to-allow for a
+# Cursor Cloud / background agent, and allow an explicit operator override for deliberate work.
 #
 # ZERO-LINK: carries NO org/host literals. "Is this an included primary checkout?" is decided
 # GENERICALLY by dev-worktree.sh (via kernel/lib/awa_policy.py + the policy). The only fallback
@@ -10,7 +11,7 @@
 # FAIL-SAFE (incident 2026-07-05): this is a nudge-to-worktree backstop, NOT a security
 # sandbox. On hook-internal failure, timeout (SIGTERM), or invalid state we MUST emit
 # valid allow JSON and exit 0 so a global/project failClosed gate cannot brick every
-# workspace on load. Genuine ask/allow decisions are unchanged on the happy path.
+# workspace on load. Genuine deny/ask/allow decisions are unchanged on the happy path.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"   # kernel/hooks
@@ -39,6 +40,7 @@ payload_ok="no"
 cmd=""
 cwd=""
 is_mutating="0"
+is_cloud="no"
 has_paths="no"
 paths=()
 eval "$(HOOK_INPUT="$input" python3 - <<'PY'
@@ -63,7 +65,7 @@ def _first_root(value):
     below is also absent, so the old chain fell through to os.getcwd() — the HOOK
     SCRIPT's own execution directory (~/.cursor), never the actual target repo. That
     silently misclassified the target as outside any governed root -> ALLOW, defeating
-    the ask on exactly the scenario AWA exists to catch. FAIL-SAFE (incident 2026-07-06)."""
+    the guard on exactly the scenario AWA exists to catch. FAIL-SAFE (incident 2026-07-06)."""
     if isinstance(value, list):
         for item in value:
             if isinstance(item, str) and item:
@@ -105,7 +107,7 @@ _INPLACE = {"sed", "perl", "gawk", "awk"}
 # Prefix wrappers whose OPTIONS (not just their name) must be skipped before resolving the
 # real program (parity with engine/guard.py). Skipping only the name lets `nice -n 10 git
 # commit`, `env -C /r git commit`, `timeout 5 git commit`, `xargs -I{} git commit`, etc.
-# classify non-mutating and fast-path ALLOW — a silent bypass under default ask_on.
+# classify non-mutating and fast-path ALLOW — a silent bypass of the deny on an included primary.
 _PREFIX_WRAPPERS = ("sudo", "command", "nice", "env", "time", "nohup", "xargs",
                     "timeout", "ionice", "chrt", "stdbuf", "builtin", "exec", "doas",
                     "run0", "setsid")
@@ -282,10 +284,37 @@ for p in paths:
         p = os.path.join(workspace, p)
     resolved.append(p)
 
+
+def _truthy(v):
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+# Cloud / background-agent detection -> the shell gate degrades to allow BEFORE the deny
+# branch (a Cursor Cloud VM is an already-isolated, own-branch /workspace clone; never
+# hard-block it). Signals (any): a payload/env background-agent flag, a present identity
+# broker (value is a handle), or a /workspace root.
+is_cloud = False
+for src in (data, tool_input):
+    if _truthy(src.get("is_background_agent")):
+        is_cloud = True
+    broker = src.get("cloud_agent_identity_broker")
+    if broker not in (None, "", [], {}):
+        is_cloud = True
+if workspace == "/workspace" or workspace.startswith("/workspace/"):
+    is_cloud = True
+for name in ("CURSOR_BACKGROUND_AGENT", "CURSOR_CLOUD_AGENT", "IS_BACKGROUND_AGENT",
+             "is_background_agent", "AWA_FORCE_CLOUD"):
+    if _truthy(os.environ.get(name, "")):
+        is_cloud = True
+for name in ("cloud_agent_identity_broker", "CURSOR_AGENT_IDENTITY_BROKER"):
+    if str(os.environ.get(name, "")).strip():
+        is_cloud = True
+
 print("payload_ok=%s" % ("yes" if payload_ok else "no"))
 print("cmd=%s" % shlex.quote(cmd))
 print("cwd=%s" % shlex.quote(workspace))
 print("is_mutating=%s" % ("1" if classify_mutating(cmd) else "0"))
+print("is_cloud=%s" % ("yes" if is_cloud else "no"))
 print("has_paths=%s" % ("yes" if paths else "no"))
 print("paths=(%s)" % " ".join(shlex.quote(p) for p in resolved))
 PY
@@ -297,6 +326,21 @@ respond_ask() {
 import json, sys
 print(json.dumps({
   "permission": "ask",
+  "user_message": sys.argv[1],
+  "agent_message": sys.argv[2],
+}))
+PY
+}
+
+# Enforced block. Cursor honors `deny` (unlike `ask`, which it treats as non-blocking — L4),
+# so this is the shape AWA uses to actually prevent a mutation on an included primary checkout.
+# deny_shape (frozen in the contract): permission + user_message + agent_message.
+respond_deny() {
+  local user_message="$1" agent_message="$2"
+  python3 - "$user_message" "$agent_message" <<'PY'
+import json, sys
+print(json.dumps({
+  "permission": "deny",
   "user_message": sys.argv[1],
   "agent_message": sys.argv[2],
 }))
@@ -356,6 +400,13 @@ if [ "${DEV_WORKTREE_GUARD_ALLOW_PRIMARY:-0}" = "1" ]; then
   exit 0
 fi
 
+# Cloud degrade-to-allow, BEFORE any deny branch: a Cursor Cloud / background agent runs in an
+# already-isolated, own-branch /workspace clone; hard-blocking it would brick a legitimate VM.
+if [ "$is_cloud" = "yes" ]; then
+  respond_allow
+  exit 0
+fi
+
 # FAST PATH (perf; behavior-preserving). A well-formed, non-mutating shell command is provably
 # an ALLOW regardless of classify_dir, so return allow now and skip the expensive status probe.
 if [ "$event" = "shell" ] && [ "$payload_ok" = "yes" ] && [ "$is_mutating" -eq 0 ]; then
@@ -396,8 +447,9 @@ if [ "$event" = "file-edit" ]; then
       [ -n "$status" ] || continue
       classification="$(printf '%s\n' "$status" | awk -F': ' '$1=="classification"{print $2; exit}')"
       linked="$(printf '%s\n' "$status" | awk -F': ' '$1=="linked-worktree"{print $2; exit}')"
-      # Detection receipt for BOTH on(include) and ask_on primary hits (observation-only).
-      if { [ "$classification" = "include" ] || [ "$classification" = "ask_on" ]; } && [ "$linked" = "no" ]; then
+      # Detection receipt for an included (mode ON) primary hit (observation-only; afterFileEdit
+      # cannot pre-block, so we record an honest receipt and allow).
+      if [ "$classification" = "include" ] && [ "$linked" = "no" ]; then
         write_detection_receipt "$target" "$probe"
       fi
     done
@@ -420,19 +472,31 @@ check_probe() {
   fi
   classification="$(printf '%s\n' "$status" | awk -F': ' '$1=="classification"{print $2; exit}')"
   linked="$(printf '%s\n' "$status" | awk -F': ' '$1=="linked-worktree"{print $2; exit}')"
-  # ASK_ON asks on primary mutation exactly like on(include); exclude/advisory allow.
-  if { [ "$classification" = "include" ] || [ "$classification" = "ask_on" ]; } && [ "$linked" = "no" ]; then
-    if [ "$payload_ok" != "yes" ] || [ "$is_mutating" -eq 1 ] || [ "$reason" = "file-edit" ]; then
+  # Only an INCLUDED primary checkout (mode ON) is protected; exclude/advisory/off allow.
+  if [ "$classification" = "include" ] && [ "$linked" = "no" ]; then
+    if [ "$is_mutating" -eq 1 ]; then
+      # CONFIRMED mutating command on an included primary -> enforced DENY. Cursor honors deny;
+      # ask is non-blocking (L4), so deny is the only shape that actually prevents the mutation.
+      respond_deny \
+        "AWA blocked a mutating command on your primary checkout. Relaunch in a Safe Workspace (Cursor Agents-Window Worktree dropdown) to continue." \
+        "AWA DENIED a mutating command on an INCLUDED PRIMARY checkout (mode ON). STOP retrying: re-running it — including 'cd <worktree> && <cmd>' or an inline 'DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 <cmd>' prefix (this hook reads its OWN process env, not the command's inline env) — will be denied again. Recovery is an OPERATOR action: relaunch this agent in a Safe Workspace via the Cursor Agents-Window Worktree dropdown (AWA adopts the linked worktree, then allows), or set DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 in Cursor's environment/settings and relaunch. Last resort, only if the operator deliberately wants this repo unprotected: '$DEV_WORKTREE mode set <rel> off'."
+      exit 0
+    fi
+    if [ "$payload_ok" != "yes" ]; then
+      # Genuine uncertainty (unparseable payload) on an included-looking primary -> ask. An
+      # honest no-op: Cursor ignores ask, so we never silently downgrade an uncertain case to
+      # allow, but we also never claim ask prevents anything.
       respond_ask \
-        "This appears to target an included primary checkout. Use a Safe Workspace first?" \
-        "Run '$DEV_WORKTREE ensure', then call move_agent_to_root with the printed rootPath before mutating this repo. Override only deliberately with DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1."
+        "AWA could not classify this command for an included primary checkout." \
+        "Hook payload was unparseable ($reason) for an included primary checkout. If this was a mutating command, relaunch in a Safe Workspace via the Cursor Agents-Window Worktree dropdown, or set DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 in Cursor's environment."
       exit 0
     fi
   fi
 }
 
-# Shell / unknown-payload path: the real pre-exec gate. beforeShellExecution `ask`/`deny` IS
-# honored by Cursor, so this is where prevention actually happens.
+# Shell / unknown-payload path: the real pre-exec gate. Cursor enforces `deny` (it treats `ask`
+# as non-blocking — L4), so a confirmed mutation on an included primary returns deny here — this
+# is where prevention actually happens.
 check_probe "$(dir_for_probe "$cwd")" "workspace"
 
 respond_allow

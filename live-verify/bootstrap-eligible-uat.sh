@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bootstrap-eligible-uat.sh — create a disposable eligible repo under ~/dev/personal for AWA UAT.
 #
-# The repo is classified include/ask_on (has origin, under governed root, not excluded).
+# The repo is classified include/on (has origin, under governed root, not excluded).
 # Use for mode, guard, ensure, and apply-back live verification. NEVER copy into a governed repo.
 #
 # Usage:
@@ -35,5 +35,5 @@ echo "  remote:     origin -> KleinPerkins/awa-uat-eligible-${TS} (create with g
 echo ""
 echo "Next:"
 echo "  gh repo create KleinPerkins/awa-uat-eligible-${TS} --private --source=\"$TARGET\" --push"
-echo "  ~/dev/_ops/bin/dev-worktree.sh status   # expect classification ask_on (host default_mode)"
+echo "  ~/dev/_ops/bin/dev-worktree.sh status   # expect classification include (host default_mode on)"
 echo "  See live-verify/OPERATOR-UAT-SESSION.md"
