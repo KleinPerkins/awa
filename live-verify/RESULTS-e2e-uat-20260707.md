@@ -125,9 +125,9 @@ recorded here BEFORE any irreversible delete (especially the apply-back proof re
 |----------|------|----------|--------------|--------|
 | `awa-uat-eligible-20260706T110803` | GitHub repo (apply-back proof) | `KleinPerkins/awa-uat-eligible-20260706T110803` | `gh repo delete` (evidence recorded above) | DELETED 2026-07-07 |
 | `awa-uat-20260706T110803` | local git repo (clone of ^) | `~/dev/personal/awa-uat-20260706T110803` | `rm -rf` | REMOVED 2026-07-07 |
-| `refactor/remove-ask-on` | local branch (merged `awa#17`→`5522474`) | AWA linked worktree | `git worktree remove` + branch delete | REMOVED 2026-07-07 |
+| `refactor/remove-ask-on` | local branch (merged `awa#17`→`5522474`) | AWA linked worktree | removed by **coordinator** (parent-only root move) — not this cleanup worker | COORDINATOR 2026-07-07 |
 | `refactor/remove-ask-on-overlay` | local branch (merged `dev#26`→`5374d45`) | `~/dev` | `git branch -D` | REMOVED 2026-07-07 |
-| `awa-20260707094822` | AWA linked worktree | `~/.local/share/awa/worktrees/awa/awa-20260707094822` | `dev-worktree.sh clean` (bundle-or-refuse) | BUNDLED+REMOVED 2026-07-07 |
+| `awa-20260707094822` | AWA linked worktree | `~/.local/share/awa/worktrees/awa/awa-20260707094822` | removed by **coordinator** (parent-only root move) — not this cleanup worker | COORDINATOR 2026-07-07 |
 
 ### Already absent / no-op (verified read-only)
 
