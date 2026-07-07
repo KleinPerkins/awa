@@ -122,6 +122,32 @@ edits to a primary are independently **detected** via the `afterFileEdit` metada
 (observation-only, cannot pre-block — see §H1). Prevention is best-effort on shell; detection is the
 guaranteed floor.
 
+**Fixed regression (found live, 2026-07-06 — `workspace_roots` payload-shape gap).** Live operator
+UAT on a fresh Cursor Desktop chat rooted directly at an eligible fixture repo found the gate
+returning `allow` (not `ask`) for a plain `git commit`, with **no ask prompt shown**. Root cause:
+Cursor's real `beforeShellExecution` payload sends the target directory as `workspace_roots`
+(plural, snake_case, a JSON array) whenever the caller relies on the chat's default root instead of
+an explicit `cwd` override — the common case for exactly this scenario (a chat opened directly in
+the target checkout, no `cd`/override on the command). The parser's fallback chain only checked
+`cwd`, `workspaceRoot` (singular camelCase), `workspace_path`, `root`, `projectRoot` — never
+`workspace_roots` — so on an empty `cwd` it fell through every key to `os.getcwd()`: the **hook
+script's own** execution directory (e.g. `~/.cursor`), never the target repo. That silently
+misclassified the target as outside any governed root, defeating the ask on precisely the case AWA
+exists to catch. Confirmed via Cursor's own hook debug log (`cursor.hooks.*.log`): both the host
+delegator and kernel copy of `worktree-guard.sh` independently returned `{"permission":"allow"}` for
+the identical real payload. **Fix:** `workspace-guard.sh` and `worktree-session.sh` now also check
+`workspace_roots[0]` (and `tool_input.workspace_roots[0]`) before falling back to `os.getcwd()`,
+strictly after all existing explicit keys (no precedence regression). **Evidence:**
+`engine/tests/test_guard_hook_wrappers.py::test_empty_cwd_falls_back_to_workspace_roots` (+ 2 more)
+drive the real bash hook end-to-end with the exact real-world payload shape; confirmed red (`allow`)
+against the pre-fix script, green (`ask`) against the fix. **Why prior UATs missed it:** every
+existing hook-payload fixture in this repo (`test_guard_hook_wrappers.py`'s pre-fix `_guard()`
+helper, `test_mcp.py`, `kernel/checks/awa-contract-freeze.sh`, and the host's
+`_ops/checks/worktree-verify.sh`) always synthesized an explicit `cwd`, never the real empty-cwd +
+`workspace_roots` shape — a systemic fixture-realism gap, not just a code bug. Those fixtures still
+correctly prove the classifier itself; they just never exercised workspace *resolution* against a
+real payload.
+
 ## §H3 threat model — repo-controlled setup execution (RCE/worm)
 
 - **Assets.** The operator's machine, credentials, and every other repo they can reach.

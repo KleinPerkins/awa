@@ -13,11 +13,19 @@ try:
     data=json.loads(sys.argv[1] or "{}")
 except Exception:
     data={}
+found = None
 for key in ("cwd","workspaceRoot","root","projectRoot"):
     if data.get(key):
-        print(data[key]); break
-else:
-    print(os.getcwd())
+        found = data[key]; break
+if found is None:
+    # Cursor's real payload carries `workspace_roots` (plural, snake_case, a list), not
+    # `workspaceRoot` (parity fix with worktree-guard.sh, incident 2026-07-06).
+    roots = data.get("workspace_roots")
+    if isinstance(roots, list):
+        for item in roots:
+            if isinstance(item, str) and item:
+                found = item; break
+print(found if found is not None else os.getcwd())
 PY
 )"
 
