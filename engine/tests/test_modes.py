@@ -70,6 +70,34 @@ class TestSetGetRemoveList(ModesTestCase):
         self.assertFalse(g["present"])
         self.assertEqual(g["mode"], "")
 
+    def test_get_reports_invalid_legacy_value(self):
+        self.path.write_text(
+            "schema: awa-modes/v1\n"
+            "default_mode: on\n"
+            "modes:\n"
+            "  proj: ask_on\n",
+            encoding="utf-8",
+        )
+        g = modes.get_mode(self.path, "proj")
+        self.assertTrue(g["present"])
+        self.assertEqual(g["mode"], "invalid")
+        self.assertIn("mode_error", g)
+        self.assertIn("ask_on", g["mode_error"])
+
+    def test_list_reports_invalid_legacy_values(self):
+        self.path.write_text(
+            "schema: awa-modes/v1\n"
+            "default_mode: ask_on\n"
+            "modes:\n"
+            "  good: on\n"
+            "  legacy: ask_on\n",
+            encoding="utf-8",
+        )
+        listed = modes.list_modes(self.path)
+        self.assertEqual(listed["modes"], {"good": "on", "legacy": "invalid"})
+        self.assertEqual(listed["default_mode"], "invalid")
+        self.assertIn("default_mode_error", listed)
+
     def test_remove(self):
         modes.set_mode(self.path, "a", "on")
         modes.set_mode(self.path, "b", "off")

@@ -308,6 +308,8 @@ class TestModesFile(unittest.TestCase):
                               "  proj: on\n"
                               "  other: off\n")
             cfg = policy.PolicyConfig.load(pol)
+            # modes_file wins on key collision; loader preserves stored bytes verbatim
+            # (classify/mode-for apply the fail-safe rule at read time).
             self.assertEqual(cfg.modes["proj"], "ask_on")   # file wins on collision
             self.assertEqual(cfg.modes["other"], "off")     # inline preserved
             self.assertEqual(cfg.modes["extra"], "on")      # file-only preserved
