@@ -68,11 +68,13 @@ class TestBashGuardWrapperParity(unittest.TestCase):
                        text=True, env=self._git_env)
 
     def _guard(self, command: str) -> dict:
-        payload = json.dumps({"cwd": str(self.repo), "command": command})
+        return self._guard_payload({"cwd": str(self.repo), "command": command})
+
+    def _guard_payload(self, payload: dict) -> dict:
         env = dict(os.environ)
         env["AWA_GOVERNED_ROOT"] = str(self.root)
         env["AWA_POLICY"] = str(self.policy)
-        proc = subprocess.run([str(_GUARD)], input=payload, capture_output=True,
+        proc = subprocess.run([str(_GUARD)], input=json.dumps(payload), capture_output=True,
                               text=True, env=env)
         return json.loads(proc.stdout)
 
@@ -100,6 +102,41 @@ class TestBashGuardWrapperParity(unittest.TestCase):
                     'bash -c "git status"'):
             resp = self._guard(cmd)
             self.assertEqual(resp.get("permission"), "allow", cmd)
+
+    def test_empty_cwd_falls_back_to_workspace_roots(self):
+        """Regression (incident 2026-07-06): Cursor's REAL beforeShellExecution payload sends
+        `cwd: ""` plus `workspace_roots: [...]` (plural, snake_case, a list) whenever the
+        caller relies on the chat's default root instead of an explicit override — the common
+        case for a chat rooted directly in the target checkout. The old fallback chain only
+        checked `workspaceRoot` (singular, camelCase, absent from the real payload) and fell
+        through to `os.getcwd()` (the hook script's OWN directory, never the target repo),
+        silently misclassifying an included primary as outside any governed root -> ALLOW.
+        This must ask, exactly like the explicit-cwd form."""
+        resp = self._guard_payload({
+            "command": "git commit -am x",
+            "cwd": "",
+            "workspace_roots": [str(self.repo)],
+        })
+        self.assertEqual(resp.get("permission"), "ask")
+        self.assertIn("user_message", resp)
+        self.assertIn("agent_message", resp)
+
+    def test_missing_cwd_key_falls_back_to_workspace_roots(self):
+        """Same fix, payload shape with no `cwd` key at all (not just empty string)."""
+        resp = self._guard_payload({
+            "command": "git commit -am x",
+            "workspace_roots": [str(self.repo)],
+        })
+        self.assertEqual(resp.get("permission"), "ask")
+
+    def test_workspace_roots_readonly_still_allows(self):
+        """The fallback must not over-ask: a read-only command via workspace_roots allows."""
+        resp = self._guard_payload({
+            "command": "git status",
+            "cwd": "",
+            "workspace_roots": [str(self.repo)],
+        })
+        self.assertEqual(resp.get("permission"), "allow")
 
 
 if __name__ == "__main__":

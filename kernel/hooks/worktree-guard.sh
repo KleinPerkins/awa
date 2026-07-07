@@ -53,6 +53,24 @@ except Exception:
 
 tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
 cmd = data.get("command") or tool_input.get("command") or ""
+
+
+def _first_root(value):
+    """Cursor's real beforeShellExecution/afterFileEdit payload carries `workspace_roots`
+    (plural, snake_case, a list) — NOT `workspaceRoot`. Without this, `cwd` is empty
+    whenever the caller relies on the chat's default root (no explicit override, the
+    COMMON case for a chat rooted directly in the target checkout), and every other key
+    below is also absent, so the old chain fell through to os.getcwd() — the HOOK
+    SCRIPT's own execution directory (~/.cursor), never the actual target repo. That
+    silently misclassified the target as outside any governed root -> ALLOW, defeating
+    the ask on exactly the scenario AWA exists to catch. FAIL-SAFE (incident 2026-07-06)."""
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, str) and item:
+                return item
+    return None
+
+
 workspace = (
     data.get("cwd")
     or data.get("workspaceRoot")
@@ -61,6 +79,8 @@ workspace = (
     or data.get("projectRoot")
     or tool_input.get("cwd")
     or tool_input.get("workspaceRoot")
+    or _first_root(data.get("workspace_roots"))
+    or _first_root(tool_input.get("workspace_roots"))
     or os.getcwd()
 )
 
