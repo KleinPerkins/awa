@@ -366,6 +366,9 @@ def can_clean(worktree_path: str) -> tuple[bool, str]:
     return True, "safe to clean (merged/pushed, no dirty/ignored files)"
 
 
+# INTENTIONAL divergence: kernel branch_is_cleanup_safe also accepts patch-id/squash
+# equivalence (git cherry). This engine mirror stays ancestry-only (over-refuses, safe)
+# until fast-follow B aligns it. Never relax engine refusal below the kernel gate.
 def _branch_is_safe(path: str, branch: str, head: str) -> bool:
     for ref in ("refs/heads/main", "refs/remotes/origin/main"):
         if gitutil.ref_exists(path, ref) and gitutil.merge_base_is_ancestor(path, head, ref):

@@ -110,9 +110,10 @@ The kernel worktree CLI (`dev-worktree.sh`, frozen verbs): `status`, `ensure`, `
 
 The engine (`awa-engine <verb>`, launched by `bin/awa-engine.sh`): `doctor`, lifecycle
 (`adopt`/`attest`/`apply-back`/`publish`/`retire`/`lease-read`), recovery
-(`recover patch|bundle|restore-patch|list`), guard (`guard shell`/`guard can-clean` — the
-engine-off kernel guarantee), `daemon` (`status`/`run-once`), `events`, and `mcp-serve` (a stdio
-JSON-RPC MCP server exposing read-only tools).
+(`recover patch|bundle|restore-patch|list`), guard (`guard shell`/`guard can-clean` — engine-off
+advisory; `guard can-clean` may refuse when kernel `clean` succeeds after squash-merge detection
+because engine cleanup remains ancestry-stricter until fast-follow B), `daemon` (`status`/`run-once`),
+`events`, and `mcp-serve` (a stdio JSON-RPC MCP server exposing read-only tools).
 
 ## Layout
 
