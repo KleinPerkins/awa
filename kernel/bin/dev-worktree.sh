@@ -406,7 +406,7 @@ branch_ref_points_at() {
 }
 
 branch_is_cleanup_safe() {
-  local path="$1" branch="$2" head="$3" upstream remotes
+  local path="$1" branch="$2" head="$3" upstream remotes ref cherry
   if git -C "$path" show-ref --verify --quiet refs/heads/main &&
      git -C "$path" merge-base --is-ancestor "$head" refs/heads/main 2>/dev/null; then
     printf 'merged into local main'
@@ -427,6 +427,20 @@ branch_is_cleanup_safe() {
     printf 'present on remote branch %s' "$(printf '%s\n' "$remotes" | paste -sd, -)"
     return 0
   fi
+  # Squash-merge detection: every branch commit is already present upstream by PATCH-ID
+  # (survives squash). Hardened so it can NEVER mark genuinely-unshared work safe.
+  for ref in refs/heads/main refs/remotes/origin/main; do
+    git -C "$path" show-ref --verify --quiet "$ref" || continue
+    if [ "$(git -C "$path" rev-list --merges --count "$ref..$head" 2>/dev/null || echo 1)" != "0" ]; then
+      continue
+    fi
+    cherry="$(git -C "$path" cherry "$ref" "$head" 2>/dev/null || true)"
+    [ -n "$cherry" ] || continue
+    if ! printf '%s\n' "$cherry" | grep -q '^+'; then
+      printf 'patch-equivalent already in %s (squash-merged)' "${ref##*/}"
+      return 0
+    fi
+  done
   return 1
 }
 
@@ -442,6 +456,8 @@ Next actions:
   1. Inspect unshared commits: git -C "$path" log --oneline --decorate --not main --not --remotes
   2. Preserve them:          git -C "$path" push -u origin "$branch"
   3. Retry cleanup:          $SELF_NAME clean --path "$path"
+  4. If squash-merged:       git -C "$path" fetch origin && $SELF_NAME clean --path "$path"
+                             (local main or origin/main must include the squash commit)
 
 Use --delete-branch only after those commits are preserved or intentionally disposable.
 EOF
@@ -569,8 +585,8 @@ clean_worktree() {
     git --git-dir="$common_dir" worktree remove "$path"
   fi
   if [ "$delete_branch" -eq 1 ]; then
-    if branch_ref_points_at "$common_dir" "$branch" "$head"; then
-      git --git-dir="$common_dir" branch -D "$branch"
+    if git --git-dir="$common_dir" update-ref -d "refs/heads/$branch" "$head" 2>/dev/null; then
+      note "deleted branch '$branch' at $head (atomic update-ref)"
     else
       die "branch $branch no longer points at captured HEAD $head; leaving branch in place"
     fi
