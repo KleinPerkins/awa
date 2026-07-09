@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import egress
+
 # Plain-language prompts for the router's missing_params (the raw slot names never reach the PM).
 _PARAM_PLAIN = {
     "which_work": "which protected work you mean",
@@ -27,7 +29,10 @@ _PARAM_PLAIN = {
 
 
 def _plain_param(name: str) -> str:
-    return _PARAM_PLAIN.get(name, f"a value for \u201c{name}\u201d")
+    """Plain prompt for a KNOWN catalog slot. An unknown/unmodeled slot name (e.g. one a router
+    injects) is NEVER echoed into PM copy — it may itself be jargon (a banned term like `branch`) —
+    so it falls back to a generic, jargon-free phrase (SHOULD-FIX 3)."""
+    return _PARAM_PLAIN.get(name) or "one more detail"
 
 
 def _confidence(verdict: str, missing: list[str]) -> dict:
@@ -137,11 +142,25 @@ def render_confirmation(consequence: dict, catalog_entry: dict | None = None) ->
     }
 
 
+_SAFE_BLOCK_REASON = "to keep your work safe"
+_SAFE_BLOCK_NEXT = "Your work is untouched. Tell me what you'd like to do instead."
+
+
+def _pm_safe(text: str, fallback: str) -> str:
+    """Return `text` only when it is jargon-free (zero Tier A/B/C banned terms), otherwise the safe
+    fallback. Guards kernel-emitted block copy so no raw guard/mechanism text can reach the PM."""
+    return text if (text and not egress.find_banned_terms(text)) else fallback
+
+
 def render_block(block: dict) -> dict:
     """Plain-language rendering of a KERNEL block/refusal (the guard or the clean gate said no).
-    Never leaks the mechanism; always gives a plain reason + a safe next step."""
-    reason = block.get("plain_reason") or block.get("reason") or "to keep your work safe"
-    next_step = block.get("next") or "Your work is untouched. Tell me what you'd like to do instead."
+    Never leaks the mechanism: it renders ONLY a kernel-emitted, PM-safe `plain_reason`/`plain_next`
+    — the raw `reason`/`next` guard text (which carries jargon like "mutating command", "primary
+    checkout", "worktree", "branch", "main", "merge") is DROPPED, not shown — and even the plain_*
+    strings are scanned through the banned-term filter, so a mislabeled 'plain' string still cannot
+    leak jargon (MUST-FIX 2)."""
+    reason = _pm_safe(block.get("plain_reason", ""), _SAFE_BLOCK_REASON)
+    next_step = _pm_safe(block.get("plain_next", ""), _SAFE_BLOCK_NEXT)
     return {
         "blocked": True,
         "headline": "I stopped before doing that to keep your work safe",

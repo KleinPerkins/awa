@@ -6,6 +6,7 @@ A/B/C banned terms across all rendered strings (AWA snapshot)."""
 
 from __future__ import annotations
 
+import json
 import unittest
 
 from consumer import egress, translators
@@ -72,6 +73,41 @@ class TestTranslators(unittest.TestCase):
                                       "next": "Save it first, then ask me again."})
         self.assertTrue(r["blocked"])
         self.assertIn("Nothing was changed", r["reassurance"])
+
+    def test_render_block_never_leaks_real_kernel_guard_text(self):
+        """MUST-FIX 2 — render_block must not leak raw kernel guard text. Fed a REAL/representative
+        kernel block (mutating command / primary checkout / worktree / branch / main / merge in the
+        raw reason+next), the rendered block carries ZERO Tier A/B/C banned terms. BITES pre-fix:
+        reason/next were rendered raw into the PM-facing block."""
+        real_block = {
+            "reason": ("this would run a mutating command against the primary checkout on the main "
+                       "branch instead of a worktree"),
+            "next": "Create a worktree and re-run, or merge the branch into main first.",
+        }
+        r = translators.render_block(real_block)
+        self.assertEqual(egress.scan_object(r), [], "render_block leaked kernel mechanism jargon")
+        self.assertTrue(r["blocked"])
+        self.assertIn("Nothing was changed", r["reassurance"])
+
+    def test_render_block_uses_scanned_kernel_plain_reason(self):
+        """A kernel-emitted plain_reason/plain_next that IS jargon-free is used verbatim; one that
+        sneaks in a banned term is dropped for the safe generic (defense in depth)."""
+        clean = translators.render_block({"plain_reason": "there was work that was not saved yet",
+                                           "plain_next": "Save it first, then ask me again."})
+        self.assertIn("not saved yet", clean["plain"])
+        self.assertEqual(egress.scan_object(clean), [])
+        dirty = translators.render_block({"plain_reason": "the branch was not merged to main"})
+        self.assertEqual(egress.scan_object(dirty), [], "a jargon-y plain_reason must be scrubbed")
+
+    def test_plain_param_never_echoes_unknown_or_banned_slot(self):
+        """SHOULD-FIX 3 — a router-injected unknown slot (e.g. 'branch', itself a banned term) must
+        never be echoed into PM copy. BITES pre-fix: _plain_param echoed 'a value for "branch"' into
+        the rendered needs/next."""
+        p = make_proposal(verb="protect", safety_class="write", verdict="strong",
+                          missing_params=["branch"])
+        r = translators.render_proposal(p, self.entry["protect"])
+        self.assertEqual(egress.scan_object(r), [], "unknown/banned slot name leaked into PM copy")
+        self.assertNotIn("branch", json.dumps(r, ensure_ascii=False).lower())
 
     def test_outcome_is_honest_about_failure(self):
         ok = translators.render_outcome(True, did="save your progress", detail="I checked and it worked.")

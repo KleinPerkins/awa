@@ -8,10 +8,15 @@ The loop is the ONLY place the pieces meet, and it enforces the constitutional s
     through `intent map` only to understand the utterance.
   * AWA's OWN verbs EXECUTE — and only AFTER the confirmation gate passes. The loop never runs a
     verb straight from the router's output.
-  * Every consequence confirmation is sourced from the KERNEL (awa_consequence), never the router.
-    The confirmation gate is `kernel_consequence.requires_confirmation OR proposal
-    .requires_confirmation` — so even if the router downgrades a destructive intent to a read
-    (its documented structural limit), the kernel's per-target consequence still forces the confirm.
+  * Every consequence confirmation is sourced from the KERNEL (awa_consequence) and the CONSUMER
+    CATALOG, never the router. The confirmation gate fires on THREE router-independent triggers:
+    (1) the KERNEL per-target consequence is destructive/irreversible/shared; (2) the CATALOG marks
+    the verb destructive-class or gives it a required literal `confirm` slot (CR9 — derived from the
+    catalog entry, NOT the router's `missing_params`, so a lying router that empties missing_params
+    and claims verdict=strong cannot suppress it); (3) the router is UNCERTAIN (verdict != strong).
+    So even if the router downgrades a destructive intent to a read (its documented structural
+    limit), a destructive-class verb still confirms. The router's own `requires_confirmation` is
+    deliberately NOT a trigger — it is True for every write and would nag benign writes.
 
 KERNEL-FIRST / OFF-SWITCH (KI1 + CR6): the router is OPTIONAL. If it is not installed/importable,
 `map` returns nothing and the loop DEGRADES to ask + a secondary explicit path (the five plain
@@ -83,6 +88,23 @@ def _catalog_entry(catalog: dict, verb: str) -> dict | None:
     return None
 
 
+def _catalog_requires_literal_confirm(entry: dict | None) -> bool:
+    """CR9, sourced from the CONSUMER CATALOG (never the router). A verb requires an explicit
+    literal confirmation iff its catalog entry is destructive-class OR declares a required `confirm`
+    slot whose value must be supplied literally (`source: literal`). Deriving this from the catalog
+    — not the router's `missing_params` — makes the destructive-class confirmation gate fully
+    router-independent: a lying router (`missing_params=[]`, `verdict=strong`) cannot empty it."""
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("safety_class") == "destructive":
+        return True
+    for p in entry.get("param_schema", []) or []:
+        if (isinstance(p, dict) and p.get("name") == "confirm"
+                and p.get("required") and p.get("source") == "literal"):
+            return True
+    return False
+
+
 class OperatorLoop:
     """One instance per catalog. Dependencies are injected so the loop is testable without a live
     router / real mutations, and so the kernel path is explicit and swappable ONLY for tests."""
@@ -127,7 +149,6 @@ class OperatorLoop:
         result: dict = {
             "utterance": utterance,
             "router_available": None,
-            "proposal": None,
             "understanding": None,
             "verb": None,
             "target": target,
@@ -137,6 +158,11 @@ class OperatorLoop:
             "outcome": None,
             "narration": None,
             "feedback": None,
+            # Internal machinery — NOT PM-facing. The raw router envelope carries routing metadata
+            # (tool_path/why[]/safety_class/start_point) that must never be shown to the operator; it
+            # lives here (and in the feedback record), and an agent serializes the PM subset via
+            # pm_view() (SHOULD-FIX 8). The rendered `understanding` is the PM-facing version.
+            "_internal": {"proposal": None},
         }
 
         proposal = self.map(utterance)
@@ -161,7 +187,7 @@ class OperatorLoop:
             result["feedback"] = self._feedback(utterance, None, CHOICE_CLARIFY, "noop")
             return result
 
-        result["proposal"] = proposal
+        result["_internal"]["proposal"] = proposal
         verb = proposal.get("verb") or None
         entry = _catalog_entry(self.catalog, verb) if verb else None
         result["verb"] = verb
@@ -177,8 +203,15 @@ class OperatorLoop:
             result["feedback"] = self._feedback(utterance, proposal, CHOICE_CLARIFY, "noop")
             return result
 
-        # CONFIRM-CONSEQUENCE (kernel-sourced, independent of the router).
-        consequence = self.kernel.consequence_for_verb(verb, target or "", facts=facts)
+        # CONFIRM-CONSEQUENCE (kernel-sourced, independent of the router). A verb whose CATALOG entry
+        # declares `removes_shared_reference: true` (optional; default false — no current AWA verb
+        # sets it, so it is wired defensively) tells the kernel this removal also drops a shared
+        # reference, so the kernel's `affects_shared_ref` reason ("changes something other people
+        # rely on") can surface on the product path. Derived from the CATALOG, never the router
+        # (SHOULD-FIX 4).
+        remove_saved_reference = bool(entry.get("removes_shared_reference"))
+        consequence = self.kernel.consequence_for_verb(
+            verb, target or "", facts=facts, remove_saved_reference=remove_saved_reference)
         result["consequence"] = consequence
         confirmation = translators.render_confirmation(consequence, entry)
         result["confirmation"] = confirmation
@@ -189,13 +222,14 @@ class OperatorLoop:
         #   1. KERNEL consequence is destructive/irreversible/shared (the airtight backstop; this is
         #      the real defense for the router's destructive->read downgrade — it is computed from
         #      the ACTUAL verb+target facts, never the router's label).
-        #   2. The verb carries a CR9 literal-confirm slot (`confirm` in its required params) — a
-        #      destructive verb always takes an explicit operator confirmation of the literal.
+        #   2. The CONSUMER CATALOG marks the verb destructive-class or gives it a required literal
+        #      `confirm` slot (CR9) — read from the catalog ENTRY, never the router's missing_params,
+        #      so a lying router (missing_params=[], verdict=strong) cannot empty this trigger.
         #   3. The router is UNCERTAIN (verdict weak/none) — honest confidence asks before acting.
         # A STRONG, benign write (save/protect/resume) trips none of these -> it runs without a nag.
         # NOTE: the blanket router `requires_confirmation` (True for every write) is deliberately NOT
         # OR'd in — that would nag benign writes; the kernel term + CR9 + uncertainty cover safety.
-        literal_confirm_required = "confirm" in missing
+        literal_confirm_required = _catalog_requires_literal_confirm(entry)
         must_confirm = bool(
             consequence.get("requires_confirmation")
             or literal_confirm_required
@@ -261,3 +295,19 @@ class OperatorLoop:
             "outcome": outcome,
             "session_id": self.session_id,
         }
+
+
+# PM-facing view (SHOULD-FIX 8): the ONLY keys an agent should serialize back to the operator.
+# Everything else in a loop result — the raw router `proposal` (now under `_internal`), the `verb`
+# token, the kernel `consequence` descriptor, the `feedback` record, and `_internal` — is internal
+# machinery that carries routing/kernel metadata the PM must never see. `understanding`/
+# `confirmation`/`narration` are the plain-language renderings the operator actually reads.
+_PM_FACING_KEYS = ("utterance", "decision", "understanding", "confirmation", "narration",
+                   "secondary_explicit_path")
+
+
+def pm_view(result: dict) -> dict:
+    """Return the strictly PM-facing subset of a loop result — what an agent renders to the operator.
+    The raw router envelope (tool_path/why[]/safety_class/start_point) and other internal machinery
+    are deliberately excluded, so no routing metadata can leak into PM output."""
+    return {k: result[k] for k in _PM_FACING_KEYS if k in result}
