@@ -15,15 +15,15 @@
   "expected_proposal_status": "frozen",
   "expected_proposal_frozen_since": "2026-07-09",
   "expected_constitution_checks": {
-    "egress": "active"
+    "egress_zero_banned_terms": "active"
   },
-  "expected_constitution_checks_note": "The `egress` constitution machine-check is expected ACTIVE (flipped from spec) now that the system-wide operator egress gate is enforced across all seven PM-facing surfaces. AWA's side is authoritatively declared + enforced in consumer/egress-gate.v1.json (machine-checked by make verify, router-uninstalled). The router-side byte-flip of machine_checks.egress in intent-constitution/v1 is the cross-repo counterpart: the seam test asserts it WHEN the router declares that machine-check (so a router still on `spec` turns the co-installed seam job red), and is a no-op if the router constitution does not (yet) carry a machine_checks map.",
+  "expected_constitution_checks_note": "The router constitution's egress machine-check — named `egress_zero_banned_terms` (phase `egress`, enforces CR10) in KleinPerkins/intent-router's intent-constitution/v1 — is expected ACTIVE now that the system-wide operator egress gate is enforced across all seven PM-facing surfaces. AWA's side is authoritatively declared + enforced in consumer/egress-gate.v1.json (machine-checked by `make verify`, router-uninstalled). The router-side byte-flip of machine_checks.egress_zero_banned_terms spec->active is the cross-repo counterpart done in the router's own repo: the seam test (test_constitution_egress_check_active_if_declared) reads the real key + its `status` and asserts it WHEN the router declares that machine-check, so a router still on `spec` turns the co-installed seam job RED; it is a no-op only if the router declares no egress check at all. As of this pin the router still declares `spec`, so the router-side PR (flip status + repoint test_id off tests.test_deferred_spec) is the remaining cross-repo step.",
   "assertions": [
     "intent_router.catalog.SCHEMA == 'intent-catalog/v1'",
     "contracts/intent-proposal.v1.json.schema == 'intent-proposal/v1' AND .status == 'frozen'",
     "contracts/intent-catalog.v1.json.schema == 'intent-catalog/v1'",
     "the router's authoritative catalog-verify passes AWA's real catalog with zero Tier A/B/C banned terms",
     "AWA's egress-terms snapshot is a superset of the router's composed Tier A/B tiers (drift guard)",
-    "IF the router constitution declares machine_checks, its `egress` check == 'active' (cross-repo flip enforcement)"
+    "IF the router constitution declares the egress machine-check (egress_zero_banned_terms), its status == 'active' (cross-repo flip enforcement; router still declares 'spec' as of this pin)"
   ]
 }

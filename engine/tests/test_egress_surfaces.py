@@ -388,9 +388,13 @@ class TestEgressSurfaces(_EgressBase):
         cited += gate["mcp_consent"]["authoritative_tests"]
         for dotted in cited:
             self.assertTrue(_resolve(dotted), f"cited authoritative test does not exist: {dotted}")
-        # The constitution cross-repo flip is named and points at the seam enforcement.
-        self.assertEqual(gate["constitution_check"]["name"], "egress")
-        self.assertEqual(gate["constitution_check"]["to"], "active")
+        # The constitution cross-repo flip names the REAL router machine-check (egress_zero_banned_terms,
+        # verified against the live router constitution) and points at the seam enforcement test.
+        cc = gate["constitution_check"]
+        self.assertEqual(cc["name"], "egress_zero_banned_terms")
+        self.assertEqual(cc["router_field"], "machine_checks.egress_zero_banned_terms")
+        self.assertEqual(cc["to"], "active")
+        self.assertIn("test_constitution_egress_check_active_if_declared", cc["cross_repo_flip"])
 
     # -- honest confidence, asserted directly (plan ~187) --------------------------------------
     def test_honest_confidence_present_on_status_and_dashboard(self):

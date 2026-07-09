@@ -90,11 +90,14 @@
     ]
   },
   "constitution_check": {
-    "name": "egress",
+    "name": "egress_zero_banned_terms",
+    "aka": "the `egress` phase machine-check (enforces CR10)",
     "router_contract": "intent-constitution/v1",
-    "router_field": "machine_checks.egress",
+    "router_field": "machine_checks.egress_zero_banned_terms",
     "from": "spec",
     "to": "active",
-    "cross_repo_flip": "The byte-flip of machine_checks.egress spec->active in KleinPerkins/intent-router intent-constitution.v1.json is the cross-repo counterpart to this AWA-side declaration. AWA cannot write the router repo; the co-installed CI seam job (engine/tests/test_consumer_seam.py::TestRouterSeam::test_constitution_egress_check_active_if_declared) enforces it when the router declares that machine-check, and consumer/router-pin.json records the expectation. AWA's side is active NOW and enforced by `make verify` via the surface tests above (router-uninstalled)."
+    "router_current_status": "spec",
+    "router_authoritative_test_id": "tests.test_deferred_spec.TestDeferredSpec.test_spec_egress_zero_banned_terms (router repoints this off test_deferred_spec to its active egress test when it flips)",
+    "cross_repo_flip": "The byte-flip of machine_checks.egress_zero_banned_terms spec->active in KleinPerkins/intent-router intent-constitution.v1.json is the cross-repo counterpart to this AWA-side declaration, and is done in the router's own repo (out of scope for AWA's single PR). AWA cannot write the router repo; the co-installed CI seam job (engine/tests/test_consumer_seam.py::TestRouterSeam::test_constitution_egress_check_active_if_declared) reads the real key + its `status` and enforces `active` when the router declares that machine-check, and consumer/router-pin.json records the expectation. AWA's side is active NOW and enforced by `make verify` via the surface tests above (router-uninstalled); the router still declares `spec`, so its flip PR is the remaining cross-repo step and the seam job (once credentialed) stays RED until it lands."
   }
 }
