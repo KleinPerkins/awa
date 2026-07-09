@@ -35,6 +35,11 @@ reports honestly what actually happened. The PM just talks; the assistant does t
 
 **Facilitator setup (do this before the PM sits down, ~5 min):**
 
+Run `make trial` from the AWA checkout. It creates a unique, marked throwaway target and normally
+removes only that generated target through AWA's standard cleanup. If ownership or cleanup cannot be
+proved, the command preserves the generated paths and prints recovery details; inspect those exact
+paths and use the printed recovery command rather than deleting the directory by hand.
+
 1. Have the assistant ready to take plain-English requests, with its ability to understand the PM's
    words **switched on** for steps 1–6.
 2. Prepare one **throwaway** safe copy that contains a little bit of work that has **not** been saved

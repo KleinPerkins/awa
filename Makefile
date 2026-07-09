@@ -1,6 +1,6 @@
 # AWA — Agent Worktree Automation (standalone system). Make targets: help-first, .PHONY.
 .DEFAULT_GOAL := help
-.PHONY: help install repair doctor check uninstall verify verify-install test version
+.PHONY: help install repair doctor check uninstall verify verify-install test trial version
 
 help: ## Show available targets
 	@echo "AWA — Agent Worktree Automation (standalone system: generic kernel + engine + dashboard)"
@@ -12,6 +12,7 @@ help: ## Show available targets
 	@echo "  make verify          - engine tests + contract freeze + zero-link + install --check"
 	@echo "  make verify-install  - full install lifecycle in a throwaway HOME (headless/CI-safe)"
 	@echo "  make test            - engine test suite (unittest; local-only, no network)"
+	@echo "  make trial           - run the exact seven-step real-PM trial"
 	@echo "  make version         - print the engine version"
 
 install: ## Install AWA (idempotent)
@@ -31,6 +32,9 @@ uninstall: ## Remove the install (KEEP_STATE=1 to preserve recovery state)
 
 test: ## Run the engine (kernel + engine core) test suite
 	@bash engine/tests/run-tests.sh
+
+trial: ## Run the exact real-PM facilitator workflow (TRIAL_ARGS=--auto for rehearsal)
+	@python3 consumer/trial_runner.py $(TRIAL_ARGS)
 
 verify: ## Full local verification: tests + freeze + zero-link + install --check
 	@bash engine/tests/run-tests.sh

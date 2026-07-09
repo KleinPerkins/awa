@@ -102,3 +102,9 @@ jobs:
           # skip; the seam assertions then bite on any pinned-contract drift.
           AWA_SEAM_REQUIRE_ROUTER=1 python3 -m unittest -v \
             engine.tests.test_consumer_seam engine.tests.test_consumer_golden
+          # Prove the trial harness's REAL isolated lifecycle: installer ON + fresh worker,
+          # KEEP_STATE uninstall + two fresh OFF workers, then installer restore + doctor.
+          AWA_TRIAL_REQUIRE_ROUTER_LIFECYCLE=1 \
+            AWA_TRIAL_ROUTER_SOURCE="$RUNNER_TEMP/intent-router" \
+            python3 -m unittest -v \
+              engine.tests.test_consumer_trial_runner.TestRouterLifecycleSeam
