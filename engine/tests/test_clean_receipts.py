@@ -188,6 +188,31 @@ class CleanReceiptsTest(EngineTestCase):
         self.assertTrue(rec["flags"]["force"])
         self.assertFalse(Path(wt).exists())
 
+    def test_ignored_scan_failed_refused(self) -> None:
+        """unknown-evidence-blocks (the clean-path half): if the git-ignored scan ITSELF fails,
+        child state is UNKNOWN, so the destructive remove must REFUSE (never proceed on an
+        unclassifiable tree). Fault-injected via a `git` shim that fails only the --ignored scan."""
+        import shutil
+        _, wt = self.safe_worktree("ignoredscanfail")
+        real_git = shutil.which("git")
+        self.assertTrue(real_git, "git must be on PATH")
+        shim_dir = Path(self._tmp.name) / "gitshim"
+        shim_dir.mkdir(parents=True, exist_ok=True)
+        shim = shim_dir / "git"
+        shim.write_text(
+            "#!/usr/bin/env bash\n"
+            'for a in "$@"; do case "$a" in --ignored*) exit 128 ;; esac; done\n'
+            f'exec "{real_git}" "$@"\n',
+            encoding="utf-8")
+        shim.chmod(0o755)
+        env = {"PATH": f"{shim_dir}:{os.environ.get('PATH', '')}"}
+        r = self.run_clean("--path", wt, env=env)
+        self.assertNotEqual(r.returncode, 0, "an unknown ignored-scan result MUST refuse")
+        rec = self.only_receipt(r)
+        self.assertEqual((rec["disposition"], rec["reason_code"]), ("refused", "ignored_scan_failed"))
+        self.assertTrue(Path(wt).exists(),
+                        "the worktree MUST be preserved when child-state evidence is unknown")
+
     def _safe_worktree_with_ignored(self, name: str) -> tuple[str, str]:
         repo = self.make_repo(name)
         wt = self.add_worktree(repo, "feat/x")
@@ -260,6 +285,9 @@ class CleanReceiptsTest(EngineTestCase):
             ("refused", "ignored_present"), ("removed", "removed_with_branch"),
             ("error", "branch_moved"), ("removed", "removed_kept_branch"),
             ("refused", "unattributed_exit"),
+            # fail-CLOSED hardening reason codes (BLOCKER #1 / MAJOR #2 / MINOR #4)
+            ("refused", "roots_lib_missing"), ("refused", "disposition_unavailable"),
+            ("refused", "reactivated_during_clean"),
         }
         # every disposition is a valid clean_receipt/v1 disposition value
         for disp, _reason in authored:

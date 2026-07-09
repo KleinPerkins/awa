@@ -53,22 +53,44 @@ DIR_MODE = 0o700
 FILE_MODE = 0o600
 
 # Default heartbeat TTL. A root whose last heartbeat is younger than this (and whose owning
-# process cannot be proven dead) is treated as ACTIVE. Deliberately generous: a sessionStart
-# refresh should comfortably cover a normal working session, and the fail-safe direction is
-# to BLOCK removal of a possibly-in-use workspace. Tunable via AWA_HEARTBEAT_TTL_SECONDS
-# (K0 open decision: receipt/heartbeat storage paths + TTL).
+# process cannot be proven dead) is treated as ACTIVE. Deliberately generous: the guard hot-path
+# refresh + a sessionStart refresh should comfortably cover a normal working session, and the
+# fail-safe direction is to BLOCK removal of a possibly-in-use workspace. Tunable via
+# AWA_HEARTBEAT_TTL_SECONDS, but CLAMPED (see _ttl_seconds) so a stray env export can never
+# silently DISABLE protection.
 DEFAULT_TTL_SECONDS = 12 * 3600
+# Floor for an operator-supplied TTL: a value below this is clamped up, and <=0 / non-integer is
+# treated as "use the default" (MINOR #6 — a `AWA_HEARTBEAT_TTL_SECONDS=0` export must NOT make
+# every pid-less heartbeat instantly stale/removable).
+MIN_TTL_SECONDS = 300
 
 
 def _ttl_seconds(override: int | None = None) -> int:
     if override is not None:
+        # TRUSTED programmatic override (internal re-reads / unit tests): NOT clamped, so a test
+        # may still force stale with ttl=0. The safety-critical clean gate never passes an
+        # override — it goes through the CLAMPED env/default path below.
         return max(0, int(override))
     raw = os.environ.get("AWA_HEARTBEAT_TTL_SECONDS", "").strip()
     if raw:
         try:
-            return max(0, int(raw))
+            val = int(raw)
         except ValueError:
-            pass
+            sys.stderr.write(
+                f"awa_roots: ignoring non-integer AWA_HEARTBEAT_TTL_SECONDS={raw!r}; "
+                f"using default {DEFAULT_TTL_SECONDS}s\n")
+            return DEFAULT_TTL_SECONDS
+        if val <= 0:
+            sys.stderr.write(
+                f"awa_roots: AWA_HEARTBEAT_TTL_SECONDS={val} would disable protection; "
+                f"using default {DEFAULT_TTL_SECONDS}s\n")
+            return DEFAULT_TTL_SECONDS
+        if val < MIN_TTL_SECONDS:
+            sys.stderr.write(
+                f"awa_roots: clamping AWA_HEARTBEAT_TTL_SECONDS={val} up to floor "
+                f"{MIN_TTL_SECONDS}s\n")
+            return MIN_TTL_SECONDS
+        return val
     return DEFAULT_TTL_SECONDS
 
 
@@ -251,7 +273,8 @@ def heartbeat(root_path: str, *, branch: str | None = None, common_dir: str | No
 
 def _disp(disposition: str, reason: str, root_path: str, *, exists: bool,
           record: dict | None = None, ttl: int | None = None,
-          age: int | None = None) -> dict:
+          age: int | None = None, failsafe: bool = False,
+          pid_backed: bool = False) -> dict:
     return {
         "disposition": disposition,
         "reason": reason,
@@ -261,12 +284,23 @@ def _disp(disposition: str, reason: str, root_path: str, *, exists: bool,
         "age_seconds": age,
         "record": record,
         "blocks_removal": disposition == DISP_ACTIVE,
+        # failsafe=True  -> ACTIVE derived from UNKNOWN evidence (unreadable record / unparseable
+        #                   heartbeat time). This is the ONLY active flavor an operator `--force`
+        #                   may override (it is not backed by any positive liveness signal).
+        # pid_backed=True -> ACTIVE derived from a recorded owning process alive on this boot
+        #                   (the strongest signal; NEVER force-overridable).
+        "failsafe": bool(failsafe),
+        "pid_backed": bool(pid_backed),
     }
 
 
 def disposition(root_path: str, *, ttl: int | None = None) -> dict:
     """Canonical disposition for a root. SINGLE SOURCE OF TRUTH used by the clean gate and by
-    sessionStart guidance. UNKNOWN evidence resolves to ``active`` (blocks removal)."""
+    sessionStart guidance. UNKNOWN evidence resolves to ``active`` (blocks removal).
+
+    NOTE (lease vs heartbeat): the removal gate consults ONLY this heartbeat disposition. The
+    ``.awa/lease.json`` ``status:"active"`` field is NOT a removal-blocking signal — do not
+    assume editing a lease changes removability."""
     ttl_s = _ttl_seconds(ttl)
     ap = canon(root_path)
     exists = os.path.exists(ap)
@@ -276,7 +310,7 @@ def disposition(root_path: str, *, ttl: int | None = None) -> dict:
         return _disp(DISP_ACTIVE,
                      "active_root record present but unreadable — fail-safe active "
                      "(unknown evidence blocks removal)",
-                     ap, exists=exists, ttl=ttl_s)
+                     ap, exists=exists, ttl=ttl_s, failsafe=True)
     if rec is None:
         if exists:
             return _disp(DISP_UNTRACKED, "no active_root record for this root", ap, exists=True, ttl=ttl_s)
@@ -295,7 +329,7 @@ def disposition(root_path: str, *, ttl: int | None = None) -> dict:
     if rec_boot and rec_boot == cur_boot and isinstance(pid, int) and pid > 0:
         if _pid_alive(pid):
             return _disp(DISP_ACTIVE, f"recorded session process (pid {pid}) is alive on this boot",
-                         ap, exists=True, record=rec, ttl=ttl_s)
+                         ap, exists=True, record=rec, ttl=ttl_s, pid_backed=True)
         return _disp(DISP_STALE, f"recorded session process (pid {pid}) is gone on this boot",
                      ap, exists=True, record=rec, ttl=ttl_s)
 
@@ -307,7 +341,7 @@ def disposition(root_path: str, *, ttl: int | None = None) -> dict:
         return _disp(DISP_ACTIVE,
                      "active_root record present without a parseable heartbeat time — "
                      "fail-safe active (unknown evidence blocks removal)",
-                     ap, exists=True, record=rec, ttl=ttl_s)
+                     ap, exists=True, record=rec, ttl=ttl_s, failsafe=True)
     age = _now_epoch() - int(last)
     if age < ttl_s:
         return _disp(DISP_ACTIVE, f"heartbeat fresh ({age}s < {ttl_s}s TTL)",
@@ -327,6 +361,9 @@ def remove_root(root_path: str) -> bool:
         return False
 
 
+# K2 TODO (deferred — observability, NOT a safety gap): dead-root records and clean receipts
+# accumulate unbounded under roots/ and receipts/. Add a prune/TTL + a size cap in K2. The
+# SAFETY-relevant escape (clearing a stuck record) ships now as `forget` / `--force`, below.
 def dead_roots() -> list[dict]:
     """Every recorded root whose path no longer exists — used for sessionStart guidance."""
     out: list[dict] = []
@@ -432,6 +469,16 @@ def main(argv: list[str] | None = None) -> int:
     di.add_argument("--ttl", type=int, default=None)
     di.add_argument("--format", choices=["json", "tsv"], default="json")
 
+    # `gate` is the SINGLE line the kernel clean gate consumes: a fixed 5-field TSV that lets the
+    # bash gate stay tiny AND fail CLOSED (an empty line / non-zero exit => tool unavailable =>
+    # the gate refuses). Fields: disposition, reason, failsafe(0/1), pid_backed(0/1), record(0/1).
+    ga = sub.add_parser("gate", help="emit the clean gate's canonical disposition line (TSV)")
+    ga.add_argument("--root", required=True)
+    ga.add_argument("--ttl", type=int, default=None)
+
+    fg = sub.add_parser("forget", help="operator override: forget a root's heartbeat record")
+    fg.add_argument("--root", required=True)
+
     wr = sub.add_parser("write-receipt", help="write a clean_receipt/v1 record")
     wr.add_argument("--disposition", required=True)
     wr.add_argument("--reason", default="unspecified")
@@ -472,6 +519,25 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write(f"{d['disposition']}\t{d['reason']}\n")
             return 0
         return _print(d)
+    if args.cmd == "gate":
+        d = disposition(args.root, ttl=args.ttl)
+        # Sanitize the reason so a literal tab/newline can never desync the fixed-field parse.
+        reason = str(d["reason"]).replace("\t", " ").replace("\n", " ")
+        rec_present = 1 if d.get("record") is not None else 0
+        sys.stdout.write("\t".join([
+            str(d["disposition"]), reason,
+            "1" if d.get("failsafe") else "0",
+            "1" if d.get("pid_backed") else "0",
+            str(rec_present),
+        ]) + "\n")
+        return 0
+    if args.cmd == "forget":
+        # Operator override (agent-invoked on the operator's behalf): clear a stuck heartbeat
+        # record so a corrupt/future/fail-safe-active root is not permanently un-cleanable via
+        # the tool (MINOR #7). This touches only kernel state, never git/worktrees.
+        removed = remove_root(args.root)
+        return _print({"forgot": removed, "root": canon(args.root),
+                       "note": "heartbeat record cleared; the root is now removable if content-safe"})
     if args.cmd == "write-receipt":
         dest = write_receipt(
             disposition=args.disposition, reason=args.reason, message=args.message,

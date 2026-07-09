@@ -18,6 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"   # kernel/hooks
 KERNEL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"                        # kernel
 DEV_WORKTREE="$KERNEL_DIR/bin/dev-worktree.sh"
 AWA_POLICY_LIB="$KERNEL_DIR/lib/awa_policy.py"
+AWA_ROOTS_LIB="${AWA_ROOTS_LIB:-$KERNEL_DIR/lib/awa_roots.py}"
 POLICY="${AWA_POLICY:-$KERNEL_DIR/policy/default-worktree-policy.yml}"
 
 input="$(cat 2>/dev/null || true)"
@@ -422,6 +423,46 @@ if [ "$is_cloud" = "yes" ]; then
   respond_allow
   exit 0
 fi
+
+# MAJOR #3: keep an ACTIVELY-USED session's protection ALIVE. sessionStart writes the heartbeat
+# once, but a long working session can outlive the 12h TTL (or sessionStart may never have fired),
+# after which the canonical disposition flips to STALE and the Safe Workspace becomes freely
+# removable even though a live session is using it. Every shell command IS an activity signal, so
+# refresh the per-root heartbeat here. THROTTLED to keep the hot path cheap: the common case is a
+# single stat() of a stamp file; the git+python refresh runs at most once per throttle window
+# (AWA_HEARTBEAT_REFRESH_THROTTLE, default 180s). Best-effort ONLY — every error is swallowed and
+# it NEVER changes the gate decision, delays a deny, or takes an OS lock (a deliberate non-goal).
+maybe_refresh_active_heartbeat() {
+  [ "$event" = "shell" ] || return 0
+  [ -f "$AWA_ROOTS_LIB" ] || return 0
+  [ -n "$cwd" ] && [ -d "$cwd" ] || return 0
+  local throttle="${AWA_HEARTBEAT_REFRESH_THROTTLE:-180}" now stamp_dir key stamp mtime top gd common
+  stamp_dir="${XDG_STATE_HOME:-$HOME/.local/state}/awa/roots"
+  key="$(printf '%s' "$cwd" | cksum 2>/dev/null | awk '{print $1"_"$2}')"
+  [ -n "$key" ] || return 0
+  stamp="$stamp_dir/.hb-hot-$key"
+  now="$(date +%s 2>/dev/null || echo 0)"
+  if [ -f "$stamp" ]; then
+    mtime="$(stat -f %m "$stamp" 2>/dev/null || stat -c %Y "$stamp" 2>/dev/null || echo 0)"
+    [ "$((now - mtime))" -lt "$throttle" ] && return 0
+  fi
+  # Throttle elapsed (or first command in this cwd): only NOW pay for git + python.
+  top="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || { mkdir -p "$stamp_dir" 2>/dev/null && : >"$stamp" 2>/dev/null; return 0; }
+  [ -n "$top" ] || return 0
+  gd="$(git -C "$cwd" rev-parse --path-format=absolute --git-dir 2>/dev/null)" || return 0
+  common="$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
+  [ -n "$gd" ] && [ -n "$common" ] || return 0
+  mkdir -p "$stamp_dir" 2>/dev/null || true
+  chmod 700 "$stamp_dir" 2>/dev/null || true
+  : >"$stamp" 2>/dev/null || true
+  # Only a LINKED worktree (Safe Workspace) is heart-beaten; the primary checkout is never a
+  # removal target and must not acquire a removal-blocking heartbeat (git-dir == git-common-dir).
+  [ "$gd" != "$common" ] || return 0
+  python3 "$AWA_ROOTS_LIB" heartbeat --root "$top" --common-dir "$common" \
+    --session-id "${DEV_SESSION_ID:-}" >/dev/null 2>&1 || true
+  return 0
+}
+maybe_refresh_active_heartbeat
 
 # FAST PATH (perf; behavior-preserving). A well-formed, non-mutating shell command is provably
 # an ALLOW regardless of classify_dir, so return allow now and skip the expensive status probe.

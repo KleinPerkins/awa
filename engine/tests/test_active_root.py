@@ -157,9 +157,18 @@ class ActiveRootTest(EngineTestCase):
         git(repo, "merge", "--squash", "feat/s")
         commit_all(repo, "squash")
         AR.heartbeat(wt)  # active...
+        # ...but AGE the record far past the (default) TTL so the canonical disposition is STALE.
+        # We age the record rather than exporting AWA_HEARTBEAT_TTL_SECONDS=0, because that env
+        # value is now CLAMPED (MINOR #6) — a stray `0` must never be able to disable protection.
+        rp = Path(AR.record_path(wt))
+        rec = json.loads(rp.read_text(encoding="utf-8"))
+        rec["last_heartbeat_epoch"] = int(time.time()) - 100000
+        rec["last_heartbeat"] = "2000-01-01T00:00:00Z"
+        rec.pop("pid", None)  # no live pid -> falls to the (expired) TTL branch
+        rp.write_text(json.dumps(rec), encoding="utf-8")
+        self.assertEqual(AR.disposition(wt)["disposition"], "stale")
         env = os.environ.copy()
         env["AWA_HOME"] = str(_REPO_ROOT)
-        env["AWA_HEARTBEAT_TTL_SECONDS"] = "0"  # ...but TTL=0 -> stale -> allows removal
         r = subprocess.run([self.dev_worktree, "clean", "--path", wt, "--delete-branch"],
                            cwd=str(_REPO_ROOT), env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -196,6 +205,99 @@ class ActiveRootTest(EngineTestCase):
     def test_session_hook_is_failsafe_json_even_outside_worktree(self) -> None:
         out = self._run_session_hook(str(self.data_home))
         self.assertIn("additional_context", out)
+
+    # ---- MAJOR #3: the guard hot-path keeps an actively-used session alive past the raw TTL ----
+    @property
+    def guard_hook(self) -> str:
+        return str(_REPO_ROOT / "kernel" / "hooks" / "worktree-guard.sh")
+
+    def _run_guard(self, cwd: str, command: str = "ls") -> subprocess.CompletedProcess:
+        payload = json.dumps({"command": command, "workspace_roots": [cwd]})
+        env = os.environ.copy()
+        env["AWA_HOME"] = str(_REPO_ROOT)
+        env["DEV_SESSION_ID"] = "guard-refresh-test"
+        env["AWA_HEARTBEAT_REFRESH_THROTTLE"] = "0"  # deterministic: never throttle in-test
+        # ensure no ambient cloud signal degrades the guard to a no-op allow
+        for k in ("CURSOR_BACKGROUND_AGENT", "CURSOR_CLOUD_AGENT", "IS_BACKGROUND_AGENT",
+                  "AWA_FORCE_CLOUD"):
+            env.pop(k, None)
+        return subprocess.run([self.guard_hook], input=payload, cwd=cwd, env=env,
+                              capture_output=True, text=True)
+
+    def _age_heartbeat(self, root: str, seconds_ago: int = 100000) -> None:
+        rp = Path(AR.record_path(root))
+        rec = json.loads(rp.read_text(encoding="utf-8"))
+        rec["last_heartbeat_epoch"] = int(time.time()) - seconds_ago
+        rec["last_heartbeat"] = "2000-01-01T00:00:00Z"
+        rec.pop("pid", None)
+        rp.write_text(json.dumps(rec), encoding="utf-8")
+
+    def test_guard_hotpath_refresh_keeps_active_session_alive_past_ttl(self) -> None:
+        """A genuinely-active session older than the raw TTL (or one where sessionStart never
+        fired) would otherwise go STALE -> freely removable. Running ANY command in the worktree
+        must refresh the heartbeat so wall-clock alone cannot downgrade an active session."""
+        repo = self.make_repo("guardrefresh")
+        wt = self.add_worktree(repo, "feat/g")
+        AR.heartbeat(wt)
+        self._age_heartbeat(wt)  # older than the TTL -> stale WITHOUT a refresh
+        self.assertEqual(AR.disposition(wt)["disposition"], "stale",
+                         "precondition: an un-refreshed old heartbeat is stale")
+        r = self._run_guard(wt, "ls")  # activity -> guard refreshes
+        self.assertIn('"permission": "allow"', r.stdout, r.stdout + r.stderr)
+        self.assertEqual(AR.disposition(wt)["disposition"], "active",
+                         "an actively-used session must NOT be stale past the raw TTL")
+
+    def test_guard_hotpath_creates_heartbeat_when_sessionstart_missed(self) -> None:
+        """Even if sessionStart never fired (no record at all), the first command in a linked
+        worktree creates the heartbeat -> the Safe Workspace becomes protected."""
+        repo = self.make_repo("guardcreate")
+        wt = self.add_worktree(repo, "feat/gc")
+        self.assertEqual(AR.disposition(wt)["disposition"], "untracked")  # no record yet
+        self._run_guard(wt, "ls")
+        self.assertEqual(AR.disposition(wt)["disposition"], "active")
+
+    def test_guard_hotpath_does_not_heartbeat_primary_checkout(self) -> None:
+        """The primary checkout is never a removal target and must not acquire a blocking
+        heartbeat (git-dir == git-common-dir)."""
+        repo = self.make_repo("guardprimary")
+        self._run_guard(repo, "ls")
+        self.assertIn(AR.disposition(repo)["disposition"], ("untracked", "absent"),
+                      "the primary checkout must not be heart-beaten")
+
+    # ---- MINOR #6: TTL env clamp (a stray 0 / negative / garbage cannot disable protection) ----
+    def test_ttl_env_is_clamped(self) -> None:
+        saved = os.environ.get("AWA_HEARTBEAT_TTL_SECONDS")
+        try:
+            for raw, expect in (("0", AR.DEFAULT_TTL_SECONDS),
+                                ("-5", AR.DEFAULT_TTL_SECONDS),
+                                ("not-an-int", AR.DEFAULT_TTL_SECONDS),
+                                ("10", AR.MIN_TTL_SECONDS),      # below floor -> clamped up
+                                ("600", 600)):                    # above floor -> honored
+                os.environ["AWA_HEARTBEAT_TTL_SECONDS"] = raw
+                self.assertEqual(AR._ttl_seconds(), expect, f"TTL env {raw!r}")
+        finally:
+            if saved is None:
+                os.environ.pop("AWA_HEARTBEAT_TTL_SECONDS", None)
+            else:
+                os.environ["AWA_HEARTBEAT_TTL_SECONDS"] = saved
+
+    def test_ttl_env_zero_does_not_make_fresh_heartbeat_removable(self) -> None:
+        """The safety proof: with AWA_HEARTBEAT_TTL_SECONDS=0 a FRESH active heartbeat is STILL
+        active (env 0 is clamped to the default), so a stray export cannot flip every pid-less
+        active workspace to removable."""
+        root = self.a_dir("ttlzero")
+        AR.heartbeat(root)
+        saved = os.environ.get("AWA_HEARTBEAT_TTL_SECONDS")
+        try:
+            os.environ["AWA_HEARTBEAT_TTL_SECONDS"] = "0"
+            d = AR.disposition(root)
+            self.assertEqual(d["disposition"], "active")
+            self.assertTrue(d["blocks_removal"])
+        finally:
+            if saved is None:
+                os.environ.pop("AWA_HEARTBEAT_TTL_SECONDS", None)
+            else:
+                os.environ["AWA_HEARTBEAT_TTL_SECONDS"] = saved
 
 
 if __name__ == "__main__":
