@@ -1,0 +1,20 @@
+{
+  "schema": "awa-egress-terms/v1",
+  "purpose": "AWA's LOCAL snapshot of the shared banned-term tiers (router constitution Tier A + Tier B) plus AWA's own contributed Tier C on-disk leakers. Used by AWA's router-INDEPENDENT egress self-checks (catalog self-check, translator + golden egress) so `make verify` proves zero banned terms with the router UNINSTALLED. When the router IS installed, the seam test asserts this snapshot is a SUPERSET of the router's authoritative tiers (drift guard), and the router's own `catalog-verify` is the authority. Tiers only EXTEND; they never shrink.",
+  "matching_rule": "Word/phrase-bounded. Naturally-lowercase terms match case-INsensitively (so `WORKTREE`/`Merge` are caught); all-caps acronyms (`PR`, `MCP`, `HEAD`) match case-SENSITIVELY so they do not collide with ordinary English (`pr`, `head`). Mirrors the router's intent_router.catalog matcher exactly; the seam test proves the two agree.",
+  "tier_a_mechanism": [
+    "kernel", "engine", "guard", "hook", "daemon", "mcp", "schema", "disposition",
+    "flags", "callback", "socket", "descriptor",
+    "lease", "worktree", "common-dir", "mode", "heartbeat", "archive-protect",
+    "bundle", "quarantine ref", "receipt"
+  ],
+  "tier_b_git_workflow": [
+    "branch", "commit", "push", "pull", "merge", "rebase", "PR", "main", "origin",
+    "detached", "dirty", "ahead", "behind", "orphan", "HEAD"
+  ],
+  "tier_c_awa": [
+    "awa_mode_set", "awa_guard_shell", "awa_lease_read",
+    "--bundle", "--force", "--path",
+    "mutating command", "primary checkout", "policy-check: OK", "WAL mode", "Orphan AWA branches"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "schema": "awa-router-pin/v1",
+  "purpose": "Pins the intent-router pre-release AWA is proven against, and the EXACT router contract-version strings the seam test asserts. Neither repo's own CI tests the router<->AWA seam; this pin + engine/tests/test_consumer_seam.py is that test. A router contract-version bump (v1 -> v2) or a rename MUST break the seam test.",
+  "router": {
+    "repo": "KleinPerkins/intent-router",
+    "ref": "main",
+    "base_sha": "f44dbadd",
+    "install_note": "Point the router at this ref so `import intent_router` resolves — a clone of KleinPerkins/intent-router checked out at `ref` (main) on PYTHONPATH, or `pip install -e <clone>`. base_sha f44dbadd is the router-main commit that FROZE intent-proposal/v1 (the merge of router PR #4; `git show f44dbadd:contracts/intent-proposal.v1.json` shows status:frozen). Locally the seam test SKIPS (never fails) when the router is not importable — the kernel-first / off-switch property (make verify passes router-uninstalled). The dedicated CI seam job (.github/workflows/ci.yml job `router-seam`) co-installs the router at this ref and runs the seam NON-skipped with AWA_SEAM_REQUIRE_ROUTER=1, so a future router contract drift (v1->v2 / unfreeze / rename) turns AWA CI red instead of silently skipping."
+  },
+  "expected_contract_versions": {
+    "intent-catalog": "intent-catalog/v1",
+    "intent-proposal": "intent-proposal/v1",
+    "intent-constitution": "intent-constitution/v1"
+  },
+  "expected_proposal_status": "frozen",
+  "expected_proposal_frozen_since": "2026-07-09",
+  "assertions": [
+    "intent_router.catalog.SCHEMA == 'intent-catalog/v1'",
+    "contracts/intent-proposal.v1.json.schema == 'intent-proposal/v1' AND .status == 'frozen'",
+    "contracts/intent-catalog.v1.json.schema == 'intent-catalog/v1'",
+    "the router's authoritative catalog-verify passes AWA's real catalog with zero Tier A/B/C banned terms",
+    "AWA's egress-terms snapshot is a superset of the router's composed Tier A/B tiers (drift guard)"
+  ]
+}

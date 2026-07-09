@@ -39,7 +39,7 @@ _REPO_ROOT = _ENGINE_DIR.parent
 _SELF = Path(__file__).resolve()
 
 # Shipped/vendored surface — kept in lock-step with install.sh COPY_TREES/COPY_FILES + CI.
-_SCAN_DIRS = ["engine", "kernel", "dashboard", "contracts", "bin", ".github"]
+_SCAN_DIRS = ["engine", "kernel", "dashboard", "contracts", "bin", "consumer", ".github"]
 _SCAN_FILES = ["install.sh", "bootstrap.sh", "Makefile", "ARCHITECTURE.md", "README.md",
                "SECURITY.md", "pyproject.toml"]
 _SKIP_PARTS = {"__pycache__", ".pytest_cache", ".git", "node_modules", ".mypy_cache", ".ruff_cache"}

@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import ast
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
 
+from .consumer_test_support import scan_tree_for_router_usage
 from .helpers import EngineTestCase, commit_all, git
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -29,7 +29,6 @@ _KERNEL = _REPO_ROOT / "kernel"
 _ENGINE = _REPO_ROOT / "engine"
 _DEV_WORKTREE = _KERNEL / "bin" / "dev-worktree.sh"
 _ROOTS_PY = _KERNEL / "lib" / "awa_roots.py"
-_SESSION = _KERNEL / "hooks" / "worktree-session.sh"
 
 # stdlib roots the kernel libs are ALLOWED to import (union'd with sys.stdlib_module_names when
 # present, so the check also works on Python 3.9 where that attribute does not exist).
@@ -39,18 +38,6 @@ _KNOWN_STDLIB = {
     "functools", "itertools", "collections", "datetime", "tempfile", "importlib", "ast",
     "io", "math", "contextlib", "shutil", "stat", "glob", "textwrap", "enum", "errno",
 }
-# router artifacts do NOT exist yet; the kernel must never grow an IMPORT or a READ of one.
-# NOTE: matched as usage patterns (import/from/path/env/state file), NOT the bare word, so the
-# kernel's own "router-OFF" / "no router installed" documentation prose is allowed.
-_ROUTER_USAGE = [
-    re.compile(r"\bimport\s+\w*router", re.I),
-    re.compile(r"\bfrom\s+\w*router", re.I),
-    re.compile(r"\b(intent[_-]?router|egress)\s*[=(.]", re.I),
-    re.compile(r"router[\w-]*\.(json|db|state|ya?ml)", re.I),
-    re.compile(r"/router/", re.I),
-    re.compile(r"AWA_ROUTER", re.I),
-    re.compile(r"router_(state|dir|home|path)", re.I),
-]
 # macOS immutable-flag primitives — forbidden PRODUCT-WIDE for K0/K1 (archive-only is K2).
 _IMMUTABLE_TOKENS = ("chflags", "uchg", "schg", "uappnd", "SF_IMMUTABLE", "st_flags")
 # advisory-lock primitives — forbidden in the KERNEL change surface (the engine's pre-existing
@@ -80,13 +67,13 @@ class KernelOffMatrixTest(EngineTestCase):
 
     # ---- router-off: the kernel imports/reads no router artifact ------------
     def test_kernel_has_no_router_import_or_read(self) -> None:
-        for f in (_ROOTS_PY, _DEV_WORKTREE, _SESSION):
-            text = f.read_text(encoding="utf-8")
-            for rx in _ROUTER_USAGE:
-                m = rx.search(text)
-                if m is not None:
-                    self.fail(f"{f.name} imports/reads router state ({rx.pattern!r} matched "
-                              f"{m.group(0)!r}) — the kernel must have ZERO router coupling")
+        """SHOULD-FIX 7 — delegate to the ONE comprehensive kernel rglob scan
+        (consumer_test_support.scan_tree_for_router_usage) instead of a narrow hardcoded 3-file list,
+        so the WHOLE kernel surface (every kernel/*.py and *.sh) is covered — not just three files."""
+        offenders = scan_tree_for_router_usage(_KERNEL)
+        self.assertEqual(offenders, [],
+                         "the kernel must import/read ZERO router artifacts (KI2):\n"
+                         + "\n".join(offenders))
 
     # ---- behavioral: engine unimportable, kernel still blocks an active root -
     def _engine_off_env(self) -> dict[str, str]:
