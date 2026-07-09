@@ -5,7 +5,7 @@
 > Desktop hard-deny + Cloud degrade-to-allow, live MCP write tools, full apply-back  
 > **Evidence ledger:** `live-verify/RESULTS-e2e-uat-20260707.md`
 
-Run this in **one Desktop agent chat** (coordinator). Use a **separate Cloud agent** only for Phase 4.
+Run this in **one Desktop agent chat** (your primary driving chat). Use a **separate Cloud agent** only for Phase 4.
 
 This session bootstraps its OWN fresh fixtures — it does **not** reference any earlier dated fixture.
 

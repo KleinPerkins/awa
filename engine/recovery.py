@@ -7,6 +7,10 @@ Built BEFORE any new destructive cleanup. Two artifact kinds:
              makes "uncommitted work is preserved" true (§H1 recovery-manager gate).
   * BUNDLE — a tar.gz of git-IGNORED files (`.env`, local `*.db`, build output) that
              `git worktree remove` would otherwise delete with no recovery.
+  * WORKTREE-ARCHIVE — a tar.gz of the WHOLE worktree tree (tracked + untracked + ignored,
+             minus `.git`) captured as a protected, archive-only safety net. It is written
+             read-only (file mode 0o400 — NO OS immutable flag / lock) and `prune_artifacts`
+             REFUSES to destroy it, so a later cleanup can never silently discard it.
 
 S1: secret-pattern files are EXCLUDED from a bundle (recorded as skipped) unless the
 operator explicitly opts in. S5: the manifest + audit are metadata-only (never file
@@ -34,6 +38,10 @@ _SECRET = re.compile(
     re.I,
 )
 
+# Manifest `kind` for the protected whole-worktree archive (D2). `prune_artifacts` treats any
+# artifact whose manifest marks `protected: true` as never-deletable.
+WORKTREE_ARCHIVE_KIND = "worktree-archive"
+
 
 def _slug(name: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")
@@ -52,6 +60,16 @@ class BundleResult:
     included: list[str] = field(default_factory=list)
     skipped_secrets: list[str] = field(default_factory=list)
     skipped_symlink_escape: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ArchiveResult:
+    archive: str
+    manifest: str
+    included: list[str] = field(default_factory=list)
+    skipped_secrets: list[str] = field(default_factory=list)
+    skipped_symlink_escape: list[str] = field(default_factory=list)
+    protected: bool = True
 
 
 def create_bundle(worktree_path: str, *, allow_secrets: bool = False,
@@ -122,6 +140,98 @@ def create_bundle(worktree_path: str, *, allow_secrets: bool = False,
                            f"bundle {archive.name}: {len(included)} incl, "
                            f"{len(skipped_secrets)} secret-skipped", lease_id)
     return BundleResult(str(archive), str(manifest), included, skipped_secrets, skipped_symlink)
+
+
+def create_worktree_archive(worktree_path: str, *, allow_secrets: bool = False,
+                            recovery_dir: Path | None = None,
+                            state: state_mod.State | None = None,
+                            lease_id: str | None = None) -> ArchiveResult:
+    """Archive the WHOLE worktree tree (tracked + untracked + ignored, minus `.git`) as a
+    PROTECTED, archive-only safety net (D2).
+
+    S1/S2/S5-safe, exactly like `create_bundle`: secret-pattern files are excluded (unless
+    `allow_secrets`), symlinks whose real target escapes the worktree root are dropped, and the
+    manifest is metadata-only. The archive + manifest are then made READ-ONLY (file mode 0o400)
+    so the protected copy cannot be edited/truncated in place — deliberately PERMS-ONLY, with NO
+    macOS immutable flag / OS lock (a locked K0/K1 non-goal, enforced product-wide by the
+    kernel-off matrix). `prune_artifacts` refuses to delete it.
+    """
+    src = os.path.abspath(worktree_path)
+    src_real = os.path.realpath(src)
+    rec = Path(recovery_dir) if recovery_dir else paths.recovery_dir()
+    paths.ensure_dir(rec)
+
+    included: list[str] = []
+    skipped_secrets: list[str] = []
+    skipped_symlink: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(src):
+        dirnames[:] = [d for d in dirnames if d != ".git"]  # never descend git metadata.
+        for fn in filenames:
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, src)
+            if rel == ".git" or rel.startswith(".git" + os.sep):
+                continue  # a linked worktree's `.git` is a pointer FILE — skip it.
+            real = os.path.realpath(full)
+            if real != src_real and not real.startswith(src_real + os.sep):
+                skipped_symlink.append(rel)  # S2: escapes the worktree root.
+                continue
+            if _SECRET.search(rel) and not allow_secrets:
+                skipped_secrets.append(rel)  # S1.
+            else:
+                included.append(rel)
+    included.sort()
+    skipped_secrets.sort()
+    skipped_symlink.sort()
+
+    slug = _slug(os.path.basename(src))
+    stamp = _stamp()
+    archive = rec / f"{slug}-{stamp}.worktree.tar.gz"
+    manifest = rec / f"{slug}-{stamp}.worktree.manifest.json"
+
+    if included:
+        listfile = str(archive) + ".list"
+        Path(listfile).write_text("\n".join(included) + "\n", encoding="utf-8")
+        try:
+            rc = subprocess.run(
+                ["tar", "-czf", str(archive), "-C", src, "-T", listfile],
+            ).returncode
+        finally:
+            try:
+                os.remove(listfile)
+            except OSError:
+                pass
+        if rc != 0:
+            raise RuntimeError(f"tar failed ({rc}) creating {archive}")
+    else:
+        archive.write_bytes(b"")  # nothing safe to archive; still write the manifest.
+
+    manifest_doc = {
+        "kind": WORKTREE_ARCHIVE_KIND,
+        "protected": True,
+        "source": src,
+        "archive": str(archive),
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "included": included,
+        "skipped_secrets": skipped_secrets,
+        "skipped_symlink_escape": skipped_symlink,
+        "allow_secrets": allow_secrets,
+        "hardening": "archive-only (read-only file mode 0o400); no OS immutable flag / lock",
+    }
+    paths.write_private(manifest, json.dumps(manifest_doc, indent=2) + "\n")
+    # Archive-only hardening (perms-only, no OS lock): make the archive + manifest READ-ONLY.
+    for p in (archive, manifest):
+        try:
+            os.chmod(p, 0o400)
+        except OSError:
+            pass
+
+    if state is not None:
+        state.record_recovery(WORKTREE_ARCHIVE_KIND, src, str(archive), str(manifest), lease_id)
+        state.record_event("recovery_worktree_archive",
+                           f"protected whole-worktree archive {archive.name}: "
+                           f"{len(included)} file(s), {len(skipped_secrets)} secret-skipped",
+                           lease_id)
+    return ArchiveResult(str(archive), str(manifest), included, skipped_secrets, skipped_symlink, True)
 
 
 def restore_bundle(archive: str, dest: str) -> list[str]:
@@ -213,3 +323,70 @@ def list_artifacts(recovery_dir: Path | None = None) -> list[dict]:
             out.append({"kind": "patch", "archive": str(p),
                         "size": p.stat().st_size})
     return out
+
+
+def prune_artifacts(recovery_dir: Path | None = None, *,
+                    older_than_seconds: float | None = None,
+                    force: bool = False) -> dict:
+    """Cleanup pass over recovery artifacts that REFUSES to destroy a protected archive (D2).
+
+    A protected whole-worktree archive (manifest ``protected: true``) is NEVER deleted — not
+    even with ``force`` — so a later cleanup cannot silently discard the safety net. Other
+    (non-protected) artifacts are eligible only when explicitly requested: ``force`` deletes
+    them, or ``older_than_seconds`` deletes those whose manifest/patch mtime is at least that
+    old. With neither, nothing is deleted (the pass just reports what it would keep/refuse).
+
+    Returns ``{"deleted": [...], "refused_protected": [...], "kept": [...]}`` (archive paths).
+    """
+    rec = Path(recovery_dir) if recovery_dir else paths.recovery_dir()
+    result: dict[str, list[str]] = {"deleted": [], "refused_protected": [], "kept": []}
+    if not rec.exists():
+        return result
+    now = time.time()
+
+    def _eligible(p: Path) -> bool:
+        if force:
+            return True
+        if older_than_seconds is None:
+            return False
+        try:
+            return (now - p.stat().st_mtime) >= older_than_seconds
+        except OSError:
+            return False
+
+    def _rm(p: Path) -> None:
+        try:
+            os.chmod(p, 0o600)  # loosen only what we are deleting (bundles are already 0o600).
+        except OSError:
+            pass
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+    for p in sorted(rec.iterdir()):
+        if p.name.endswith(".manifest.json"):
+            try:
+                doc = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                doc = {}
+            label = doc.get("archive") or str(p)
+            if doc.get("protected"):
+                result["refused_protected"].append(label)  # cleanup MUST refuse to destroy it.
+                continue
+            if _eligible(p):
+                archive = doc.get("archive")
+                if archive and Path(archive).exists():
+                    _rm(Path(archive))
+                _rm(p)
+                result["deleted"].append(label)
+            else:
+                result["kept"].append(label)
+        elif p.suffix == ".patch":
+            if _eligible(p):
+                _rm(p)
+                result["deleted"].append(str(p))
+            else:
+                result["kept"].append(str(p))
+        # A `.tar.gz` is reached via its manifest; a protected archive is thus never unlinked here.
+    return result

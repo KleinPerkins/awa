@@ -183,11 +183,120 @@ def ingest_detection_receipts(state: state_mod.State,
     return ingested
 
 
+def ingest_clean_receipts(state: state_mod.State,
+                          receipts_dir: Path | None = None) -> int:
+    """K2 observability: fold the kernel's `clean_receipt/v1` records (one JSON file per
+    terminal `clean`, written by dev-worktree.sh — the engine-OFF safety path) into the
+    durable timeline, idempotently by receipt_id.
+
+    Like `ingest_detection_receipts`, this is the engine OBSERVING the kernel after the fact:
+    the receipts are authored with the engine off; the engine only reflects them into its
+    queryable state so a terminal clean shows up in the observable history. Returns the count
+    of newly-folded receipts. NON-load-bearing — it changes no gate/refusal decision.
+    """
+    rd = Path(receipts_dir) if receipts_dir else paths.receipts_dir()
+    if not rd.is_dir():
+        return 0
+    ingested = 0
+    for f in sorted(rd.glob("clean-*.json")):
+        try:
+            rec = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(rec, dict) or rec.get("schema") != "clean_receipt/v1":
+            continue
+        if state.record_clean_receipt(rec):
+            ingested += 1
+    if ingested:
+        state.record_event("clean_receipts_ingested", f"folded {ingested} clean receipt(s)")
+    return ingested
+
+
+def _removed_attributed_paths(receipts_dir: Path) -> set[str]:
+    """Canonical paths of worktrees whose removal IS attributed to an AWA clean receipt
+    (disposition `removed`). Read straight from disk so the detector is self-contained
+    (independent of whether the receipts were already folded into state)."""
+    removed: set[str] = set()
+    if not receipts_dir.is_dir():
+        return removed
+    for f in receipts_dir.glob("clean-*.json"):
+        try:
+            rec = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(rec, dict) and rec.get("disposition") == "removed" and rec.get("path"):
+            removed.add(os.path.realpath(str(rec["path"])))
+    return removed
+
+
+def detect_missing_unattributed(state: state_mod.State, *,
+                                roots_dir: Path | None = None,
+                                receipts_dir: Path | None = None) -> list[dict]:
+    """K2 observability: detect a Safe Workspace that VANISHED with no attributing record.
+
+    A kernel `active_root/v1` record whose `root_path` no longer exists is a candidate. When an
+    AWA `clean` removes a worktree it also drops that heartbeat record, so a lingering record for
+    a missing path means the worktree disappeared OUTSIDE the AWA clean path. We cross-check the
+    `removed` clean receipts: if one attributes that exact path, it is an attributed removal (the
+    record merely lingered) and is NOT flagged. Otherwise it is `worktree_missing_unattributed`.
+
+    Purely observational: records a (deduplicated) detection + event and returns the findings.
+    It removes nothing and changes no gate/refusal decision.
+    """
+    rd = Path(roots_dir) if roots_dir else paths.roots_dir()
+    rep = Path(receipts_dir) if receipts_dir else paths.receipts_dir()
+    removed = _removed_attributed_paths(rep)
+    found: list[dict] = []
+    if not rd.is_dir():
+        return found
+    for f in sorted(rd.glob("*.json")):
+        try:
+            rec = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(rec, dict):
+            continue
+        rpath = rec.get("root_path")
+        if not rpath or os.path.exists(rpath):
+            continue  # no path recorded, or the worktree is still present.
+        if os.path.realpath(str(rpath)) in removed:
+            continue  # an AWA clean receipt attributes this removal — not unattributed.
+        if not state.detection_exists("worktree_missing_unattributed", str(rpath)):
+            state.record_detection(repo=str(rec.get("git_common_dir") or ""),
+                                   path=str(rpath), kind="worktree_missing_unattributed")
+            state.record_event("worktree_missing_unattributed",
+                               f"vanished Safe Workspace with no attributing clean receipt: {rpath}")
+        found.append({"path": rpath, "branch": rec.get("branch"),
+                      "git_common_dir": rec.get("git_common_dir")})
+    return found
+
+
+def timeline(state: state_mod.State, limit: int = 100) -> list[dict]:
+    """The observable engine timeline: detection receipts + folded clean receipts merged and
+    sorted newest-first. Read-only view over durable state (call the ingest/detect passes first
+    to populate it). Each entry carries a `type` discriminator (`detection` | `clean_receipt`)."""
+    entries: list[dict] = []
+    for d in state.detections(limit=limit):
+        entries.append({"type": "detection", "ts": d.get("ts"), "kind": d.get("kind"),
+                        "repo": d.get("repo"), "path": d.get("path")})
+    for r in state.clean_receipts(limit=limit):
+        entries.append({"type": "clean_receipt", "ts": r.get("ts"),
+                        "disposition": r.get("disposition"), "reason_code": r.get("reason_code"),
+                        "path": r.get("path"), "branch": r.get("branch"),
+                        "archive": r.get("archive"), "root_disposition": r.get("root_disposition")})
+    entries.sort(key=lambda e: (e.get("ts") or ""), reverse=True)
+    return entries[:limit]
+
+
 def run_once(state: state_mod.State, *, delete_remote: bool = False) -> dict:
     """One bounded maintenance pass. Returns a summary (bookkeeping only)."""
     cleaned = cleanup_quarantine_refs(state, delete_remote=delete_remote)
     ingested = ingest_detection_receipts(state)
+    clean_ingested = ingest_clean_receipts(state)
+    missing = detect_missing_unattributed(state)
     return {"quarantine_cleaned": cleaned, "detections_ingested": ingested,
+            "clean_receipts_ingested": clean_ingested,
+            "missing_unattributed": len(missing),
             "active_leases": len(state.list_leases("active"))}
 
 

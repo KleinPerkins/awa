@@ -134,6 +134,17 @@ def cmd_recover(args: argparse.Namespace) -> int:
     if args.what == "restore-bundle":
         restored = recovery.restore_bundle(args.archive, args.worktree)
         return _emit({"action": "restore-bundle", "ok": True, "restored": restored})
+    if args.what == "archive":
+        with state_mod.State(assert_local=False) as st:
+            r = recovery.create_worktree_archive(args.worktree, allow_secrets=args.allow_secrets,
+                                                 state=st)
+        return _emit({"action": "archive", "kind": recovery.WORKTREE_ARCHIVE_KIND,
+                      "protected": r.protected, "archive": r.archive, "manifest": r.manifest,
+                      "included": r.included, "skipped_secrets": r.skipped_secrets,
+                      "skipped_symlink_escape": r.skipped_symlink_escape})
+    if args.what == "prune":
+        res = recovery.prune_artifacts(older_than_seconds=args.older_than, force=args.force)
+        return _emit({"action": "prune", **res})
     if args.what == "list":
         return _emit({"artifacts": recovery.list_artifacts()})
     return _emit({"ok": False, "error": f"unknown recover subcommand: {args.what}"}, code=2)
@@ -258,6 +269,19 @@ def cmd_events(args: argparse.Namespace) -> int:
                       "leases": st.list_leases()})
 
 
+def cmd_timeline(args: argparse.Namespace) -> int:
+    """Fold the kernel's detection + clean receipts (and detect vanished worktrees), then emit
+    the merged, newest-first observable timeline. Purely observational — changes no decision."""
+    with state_mod.State(assert_local=False) as st:
+        detections = daemon_mod.ingest_detection_receipts(st)
+        receipts = daemon_mod.ingest_clean_receipts(st)
+        missing = daemon_mod.detect_missing_unattributed(st)
+        return _emit({"action": "timeline",
+                      "ingested": {"detections": detections, "clean_receipts": receipts},
+                      "missing_unattributed": missing,
+                      "timeline": daemon_mod.timeline(st, limit=args.limit)})
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="awa", description="AWA engine CLI (backs the frozen kernel)")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -288,13 +312,18 @@ def build_parser() -> argparse.ArgumentParser:
     lr.add_argument("--worktree", required=True)
     lr.set_defaults(fn=cmd_lease_read)
 
-    rc = sub.add_parser("recover", help="recovery manager (bundle/patch/restore/list)")
-    rc.add_argument("what", choices=["bundle", "patch", "restore-patch", "restore-bundle", "list"])
+    rc = sub.add_parser("recover", help="recovery manager (bundle/patch/archive/restore/list/prune)")
+    rc.add_argument("what", choices=["bundle", "patch", "archive", "restore-patch",
+                                     "restore-bundle", "list", "prune"])
     rc.add_argument("--worktree", default=".")
     rc.add_argument("--patch", default="")
     rc.add_argument("--archive", default="")
     rc.add_argument("--allow-secrets", action="store_true")
     rc.add_argument("--index", action="store_true")
+    rc.add_argument("--older-than", dest="older_than", type=float, default=None,
+                    help="prune: delete non-protected artifacts at least this many seconds old")
+    rc.add_argument("--force", action="store_true",
+                    help="prune: delete eligible non-protected artifacts (protected archives are still refused)")
     rc.set_defaults(fn=cmd_recover)
 
     g = sub.add_parser("guard", help="engine-off kernel guard (shell/can-clean)")
@@ -344,6 +373,11 @@ def build_parser() -> argparse.ArgumentParser:
     ev = sub.add_parser("events", help="recent audit events + leases")
     ev.add_argument("--limit", type=int, default=50)
     ev.set_defaults(fn=cmd_events)
+
+    tl = sub.add_parser("timeline",
+                        help="observable timeline: detection + clean receipts folded, newest-first")
+    tl.add_argument("--limit", type=int, default=100)
+    tl.set_defaults(fn=cmd_timeline)
 
     sub.add_parser("mcp-serve", help="run the local stdio MCP server (read-only state + path-scoped mode config tools)").set_defaults(fn=cmd_mcp_serve)
 
