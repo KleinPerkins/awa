@@ -33,7 +33,7 @@ HOOKS_JSON="${AWA_HOOKS_JSON:-$HOME/.cursor/hooks.json}"
 MCP_JSON="${AWA_MCP_JSON:-$HOME/.cursor/mcp.json}"
 
 # Top-level items copied into the runtime (a self-describing, re-runnable install).
-COPY_TREES=(kernel engine dashboard contracts bin)
+COPY_TREES=(kernel engine dashboard contracts bin consumer)
 COPY_FILES=(pyproject.toml Makefile install.sh bootstrap.sh ARCHITECTURE.md README.md SECURITY.md LICENSE)
 
 # Ensure the host-configured per-repo modes file exists (schema awa-modes/v1 + a default_mode),
