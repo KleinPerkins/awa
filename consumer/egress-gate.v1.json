@@ -1,0 +1,103 @@
+{
+  "schema": "awa-egress-gate/v1",
+  "purpose": "AWA's authoritative declaration that the SYSTEM-WIDE operator egress gate is ACTIVE (flipped from spec): all seven PM-facing surfaces are proven to contain ZERO Tier A/B/C banned terms and to express honest confidence, enforced by named tests inside AWA's router-independent `make verify`. This is the AWA side of the `egress` constitution machine-check; the router-side byte-flip in intent-constitution/v1 is the cross-repo counterpart (see constitution_check + consumer/router-pin.json).",
+  "status": "active",
+  "previous_status": "spec",
+  "single_source_of_truth": {
+    "terms": "consumer/egress-terms.json",
+    "matcher": "consumer/egress.py",
+    "note": "One matcher + one term snapshot reused by every surface's test, so the banned-term set cannot drift per-surface. The seam test proves this snapshot is a superset of the router's authoritative Tier A/B tiers and that the two matchers agree."
+  },
+  "banned_tiers": {
+    "tier_a_mechanism": "lease, worktree, common-dir, kernel, engine, guard, mode, disposition, heartbeat, archive-protect, bundle, quarantine ref, MCP, hook, receipt, flags (+ AWA locals)",
+    "tier_b_git_workflow": "branch, commit, push, pull, merge, rebase, PR, main/origin, detached, dirty, ahead/behind, orphan, HEAD",
+    "tier_c_on_disk_leakers": "awa_mode_set/awa_guard_shell/awa_lease_read, --bundle/--force/--path, 'mutating command', 'primary checkout', 'policy-check: OK', 'WAL mode', 'Orphan AWA branches'"
+  },
+  "matching_rule": "Word/phrase-bounded. Naturally-lowercase terms match case-INsensitively; all-caps acronyms (PR/MCP/HEAD) match case-SENSITIVELY so they do not collide with ordinary English. Mirrors the router matcher exactly.",
+  "bite_proof": "Non-tautological: every surface test asserts the REAL rendered output is clean, THEN re-scans that same output with one banned term injected into a real string and REQUIRES a hit (see assertCleanAndBites). Reintroducing a banned term on ANY surface turns the gate red.",
+  "surfaces": [
+    {
+      "id": 1,
+      "surface": "chat loop (operator loop)",
+      "render_path": "consumer/operator_loop.py + consumer/translators.py (understanding/confirmation/narration/secondary path)",
+      "authoritative_tests": [
+        "engine.tests.test_egress_surfaces.TestEgressSurfaces.test_surface1_chat_loop",
+        "engine.tests.test_consumer_egress.TestConsumerEgress.test_live_loop_surface_over_golden_set_is_jargon_free"
+      ]
+    },
+    {
+      "id": 2,
+      "surface": "guard block / refuse message",
+      "render_path": "kernel/hooks/worktree-guard.sh permission.user_message (deny + ask paths), driven end-to-end",
+      "authoritative_tests": [
+        "engine.tests.test_egress_surfaces.TestEgressSurfaces.test_surface2_guard_block"
+      ]
+    },
+    {
+      "id": 3,
+      "surface": "dashboard canvas",
+      "render_path": "dashboard/seed.canvas.tsx PM_COPY block + dashboard/emitter.py plain_* fields (real emit)",
+      "authoritative_tests": [
+        "engine.tests.test_egress_surfaces.TestEgressSurfaces.test_surface3_dashboard_pm_copy_block",
+        "engine.tests.test_egress_surfaces.TestEgressSurfaces.test_surface3_dashboard_plain_fields_exhaustive",
+        "engine.tests.test_egress_surfaces.TestEgressSurfaces.test_surface3_dashboard_real_emit"
+      ]
+    },
+    {
+      "id": 4,
+      "surface": "MCP approval / consent labels",
+      "render_path": "engine/mcp_server.py consent_prompt() — plain intent, never a tool name",
+      "authoritative_tests": [
+        "engine.tests.test_egress_surfaces.TestEgressSurfaces.test_surface4_mcp_consent_plain_intent"
+      ]
+    },
+    {
+      "id": 5,
+      "surface": "discard / save confirmation",
+      "render_path": "consumer/translators.py render_confirmation over kernel/lib/awa_consequence.py descriptor",
+      "authoritative_tests": [
+        "engine.tests.test_egress_surfaces.TestEgressSurfaces.test_surface5_discard_save_confirmation"
+      ]
+    },
+    {
+      "id": 6,
+      "surface": "doctor / status",
+      "render_path": "dashboard/emitter.py render_status_lines() (also `emitter.py --plain`)",
+      "authoritative_tests": [
+        "engine.tests.test_egress_surfaces.TestEgressSurfaces.test_surface6_doctor_status"
+      ]
+    },
+    {
+      "id": 7,
+      "surface": "detection receipts / timeline",
+      "render_path": "consumer/translators.py render_timeline() over the real afterFileEdit detection receipt",
+      "authoritative_tests": [
+        "engine.tests.test_egress_surfaces.TestEgressSurfaces.test_surface7_detection_receipts_timeline"
+      ]
+    }
+  ],
+  "honest_confidence": {
+    "requirement": "Every PM-facing status names what it checked AND what it could not (checked/not_checked); no bare pill implies an unauditable guarantee; a partially-built protection names its hole in plain words.",
+    "authoritative_tests": [
+      "engine.tests.test_egress_surfaces.TestEgressSurfaces.test_honest_confidence_present_on_status_and_dashboard",
+      "engine.tests.test_egress_surfaces.TestEgressSurfaces.test_surface6_doctor_status"
+    ]
+  },
+  "mcp_consent": {
+    "requirement": "Approval labels state plain intent (e.g. 'Temporarily stop protecting this repo?'), never a tool name or mechanism term.",
+    "authoritative_tests": [
+      "engine.tests.test_egress_surfaces.TestEgressSurfaces.test_surface4_mcp_consent_plain_intent"
+    ]
+  },
+  "constitution_check": {
+    "name": "egress_zero_banned_terms",
+    "aka": "the `egress` phase machine-check (enforces CR10)",
+    "router_contract": "intent-constitution/v1",
+    "router_field": "machine_checks.egress_zero_banned_terms",
+    "from": "spec",
+    "to": "active",
+    "router_current_status": "spec",
+    "router_authoritative_test_id": "tests.test_deferred_spec.TestDeferredSpec.test_spec_egress_zero_banned_terms (router repoints this off test_deferred_spec to its active egress test when it flips)",
+    "cross_repo_flip": "The byte-flip of machine_checks.egress_zero_banned_terms spec->active in KleinPerkins/intent-router intent-constitution.v1.json is the cross-repo counterpart to this AWA-side declaration, and is done in the router's own repo (out of scope for AWA's single PR). AWA cannot write the router repo; the co-installed CI seam job (engine/tests/test_consumer_seam.py::TestRouterSeam::test_constitution_egress_check_active_if_declared) reads the real key + its `status` and enforces `active` when the router declares that machine-check, and consumer/router-pin.json records the expectation. AWA's side is active NOW and enforced by `make verify` via the surface tests above (router-uninstalled); the router still declares `spec`, so its flip PR is the remaining cross-repo step and the seam job (once credentialed) stays RED until it lands."
+  }
+}

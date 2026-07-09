@@ -76,6 +76,30 @@ class TestRouterSeam(unittest.TestCase):
         ok, errors = catalog.verify_catalog_file(CATALOG_PATH)
         self.assertTrue(ok, "router catalog-verify rejected AWA's catalog:\n" + "\n".join(errors))
 
+    def test_constitution_egress_check_active_if_declared(self):
+        """Cross-repo flip enforcement: once the system-wide operator egress gate is active (AWA side
+        declared in consumer/egress-gate.v1.json), the router constitution's egress machine-check must
+        read `active`, not `spec`. The router names this check `egress_zero_banned_terms` (phase
+        `egress`, enforces CR10); a bare `egress` alias is accepted for forward-compat. Each check is a
+        dict carrying a `status` field (a bare-string value is tolerated defensively). Defensive on
+        SHAPE, biting on VALUE: if the router declares no such check this is a no-op, but while the
+        router still declares egress `spec` the co-installed seam job goes RED — the honest signal that
+        the router side of the flip (its own repo PR) has not landed yet."""
+        c = json.loads((self.contracts / "intent-constitution.v1.json").read_text(encoding="utf-8"))
+        checks = c.get("machine_checks") or c.get("checks") or {}
+        if not isinstance(checks, dict):
+            return
+        key = next((k for k in ("egress_zero_banned_terms", "egress") if k in checks), None)
+        if key is None:
+            return
+        val = checks[key]
+        status = str(val.get("status") if isinstance(val, dict) else val).lower()
+        expected = self.pin.get("expected_constitution_checks", {})
+        want = str(expected.get(key, expected.get("egress", "active"))).lower()
+        self.assertEqual(status, want,
+                         f"router constitution `{key}` machine-check must be flipped spec->active "
+                         "(consumer/egress-gate.v1.json + router-pin.json expect 'active')")
+
     def test_awa_egress_snapshot_is_superset_of_router_tiers(self):
         """Drift guard: AWA's local egress snapshot must contain every shared Tier A + Tier B term the
         router constitution declares. If the router ADDS a shared banned term, AWA's snapshot must be

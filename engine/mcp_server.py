@@ -200,6 +200,35 @@ _TOOLS: dict[str, dict[str, Any]] = {
 }
 
 
+# ---- PM-facing consent (surface: MCP approval / consent labels) -------------
+# The MUTATING tools (the awa_mode_* config verbs) are the only ones that ever prompt for
+# operator consent. The consent label a PM sees MUST state the plain INTENT of the action —
+# never the tool name and never a mechanism word (Tier A/B/C). The tool NAME + description
+# stay agent-facing metadata (internal); this is the one string the operator reads.
+MUTATING_TOOLS = frozenset({"awa_mode_set", "awa_mode_remove", "awa_mode_repair", "awa_mode_sync"})
+
+
+def consent_prompt(name: str, args: dict | None = None) -> str | None:
+    """Plain-intent consent label for an MCP tool call, or None for a read-only tool (no consent
+    needed). States WHAT WILL HAPPEN in a non-technical sentence — never the tool name, never a
+    Tier A/B/C term. Scanned + asserted by the system-wide egress gate."""
+    args = args or {}
+    if name == "awa_mode_set":
+        want = str(args.get("mode", "")).strip().lower()
+        if want == "off":
+            return "Temporarily stop protecting this repo?"
+        if want == "on":
+            return "Start protecting this repo again?"
+        return "Change the protection setting for this repo?"
+    if name == "awa_mode_remove":
+        return "Go back to the default protection for this repo?"
+    if name == "awa_mode_repair":
+        return "Tidy up your saved protection settings?"
+    if name == "awa_mode_sync":
+        return "Set up your protection settings if they are not there yet?"
+    return None
+
+
 def _result(rid: Any, result: dict) -> dict:
     return {"jsonrpc": "2.0", "id": rid, "result": result}
 
