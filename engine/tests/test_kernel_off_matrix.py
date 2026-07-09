@@ -31,6 +31,14 @@ _DEV_WORKTREE = _KERNEL / "bin" / "dev-worktree.sh"
 _ROOTS_PY = _KERNEL / "lib" / "awa_roots.py"
 _SESSION = _KERNEL / "hooks" / "worktree-session.sh"
 
+# stdlib roots the kernel libs are ALLOWED to import (union'd with sys.stdlib_module_names when
+# present, so the check also works on Python 3.9 where that attribute does not exist).
+_KNOWN_STDLIB = {
+    "__future__", "argparse", "hashlib", "json", "os", "platform", "subprocess", "sys",
+    "time", "calendar", "re", "fnmatch", "shlex", "dataclasses", "pathlib", "typing",
+    "functools", "itertools", "collections", "datetime", "tempfile", "importlib", "ast",
+    "io", "math", "contextlib", "shutil", "stat", "glob", "textwrap", "enum", "errno",
+}
 # router artifacts do NOT exist yet; the kernel must never grow an IMPORT or a READ of one.
 # NOTE: matched as usage patterns (import/from/path/env/state file), NOT the bare word, so the
 # kernel's own "router-OFF" / "no router installed" documentation prose is allowed.
@@ -54,8 +62,7 @@ _LOCK_TOKENS = ("flock", "fcntl", "lockf")
 class KernelOffMatrixTest(EngineTestCase):
     # ---- stdlib-only: no engine / third-party imports in the kernel libs ----
     def test_kernel_libs_are_stdlib_only(self) -> None:
-        stdlib = set(getattr(sys, "stdlib_module_names", set()))
-        self.assertTrue(stdlib, "need sys.stdlib_module_names (py>=3.10) for this check")
+        stdlib = _KNOWN_STDLIB | set(getattr(sys, "stdlib_module_names", set()))
         for py in sorted(_KERNEL.rglob("*.py")):
             tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
             roots: set[str] = set()

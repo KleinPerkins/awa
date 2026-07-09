@@ -158,17 +158,8 @@ class CleanReceiptsTest(EngineTestCase):
     # ---- "ignored-files-are-child-state" invariant --------------------------
     def test_ignored_files_present_refused(self) -> None:
         """git-ignored local files are CHILD STATE: a clean refuses (bundle-or-refuse)."""
-        repo, wt = self.safe_worktree("ignored")
-        Path(wt, ".gitignore").write_text("secret.env\n", encoding="utf-8")
-        # commit the .gitignore itself so the tree is clean, then drop an ignored file.
-        git(wt, "checkout", "-q", "feat/x")
-        Path(wt, ".gitignore").write_text("secret.env\n", encoding="utf-8")
-        commit_all(wt, "add gitignore")
-        git(repo, "checkout", "-q", "main")
-        git(repo, "merge", "--squash", "feat/x")
-        commit_all(repo, "squash w/ gitignore")
-        Path(wt, "secret.env").write_text("TOKEN=abc\n", encoding="utf-8")  # ignored child state
-        r = self.run_clean("--path", wt)
+        repo, wt = self._safe_worktree_with_ignored("ignored")
+        r = self.run_clean("--path", wt)  # no --bundle / --force
         self.assertNotEqual(r.returncode, 0)
         rec = self.only_receipt(r)
         self.assertEqual((rec["disposition"], rec["reason_code"]), ("refused", "ignored_present"))
