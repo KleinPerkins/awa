@@ -92,7 +92,7 @@ not retained in the captured `events.jsonl`, so L4 rests on the live observation
 the L2 doc-snapshot; optional re-drive: `live-verify/desktop-hook-redrive-runbook.md`). **Engine
 build (reconciled 2026-07-05):** recovery manager, daemon/watcher, MCP server, and degraded-mode
 guard are **built** in this repo (`engine/recovery.py`, `daemon.py`, `mcp_server.py`, `guard.py`)
-with **187** passing tests (`make verify`). Copy-honesty `recovery-manager` capability is green when
+with the full engine test suite (`engine/tests/`) passing under `make verify`. Copy-honesty `recovery-manager` capability is green when
 `engine.tests.test_recovery` passes (see host `operator-copy.json`). **Live verification ledger
 (operator-driven, 2026-07-05):**
 

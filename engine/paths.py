@@ -67,6 +67,18 @@ def detections_dir() -> Path:
     return awa_state_dir() / "detections"
 
 
+def receipts_dir() -> Path:
+    """Kernel-owned clean_receipt/v1 records (written by dev-worktree.sh clean). The engine only
+    READS these to fold them into its observable timeline — same XDG anchor as awa_roots.py."""
+    return awa_state_dir() / "receipts"
+
+
+def roots_dir() -> Path:
+    """Kernel-owned active_root/v1 heartbeat records. The engine only READS these (never writes)
+    to detect vanished-but-unattributed worktrees — same XDG anchor as awa_roots.py."""
+    return awa_state_dir() / "roots"
+
+
 def locks_dir() -> Path:
     return awa_state_dir() / "locks"
 

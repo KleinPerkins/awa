@@ -85,8 +85,20 @@ CREATE TABLE IF NOT EXISTS recovery_artifacts (
     archive TEXT NOT NULL,
     manifest TEXT
 );
+CREATE TABLE IF NOT EXISTS clean_receipts (
+    receipt_id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    disposition TEXT NOT NULL,
+    reason_code TEXT,
+    path TEXT,
+    branch TEXT,
+    archive TEXT,
+    root_disposition TEXT,
+    detail TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_events_lease ON events(lease_id);
 CREATE INDEX IF NOT EXISTS idx_leases_common ON leases(git_common_dir);
+CREATE INDEX IF NOT EXISTS idx_detections_kind_path ON detections(kind, path);
 """
 
 
@@ -224,6 +236,46 @@ class State:
     def detections(self, limit: int = 100) -> list[dict]:
         rows = self.conn.execute(
             "SELECT * FROM detections ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def detection_exists(self, kind: str, path: str) -> bool:
+        """True if a detection with this (kind, path) is already recorded — lets an observer
+        (e.g. the vanished-worktree detector) stay idempotent across repeated passes."""
+        row = self.conn.execute(
+            "SELECT 1 FROM detections WHERE kind=? AND path=? LIMIT 1", (kind, path)
+        ).fetchone()
+        return row is not None
+
+    # ---- clean receipts (folded from the kernel's clean_receipt/v1 records) ---
+    def record_clean_receipt(self, receipt: dict) -> bool:
+        """Fold ONE kernel clean_receipt/v1 into the durable timeline. Idempotent by
+        receipt_id (INSERT OR IGNORE) so repeated ingests never double-count. Returns True
+        only when a NEW receipt row was inserted. Detail is redacted (defense-in-depth)."""
+        receipt_id = str(receipt.get("receipt_id") or "").strip()
+        if not receipt_id:
+            return False
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO clean_receipts"
+            "(receipt_id,ts,disposition,reason_code,path,branch,archive,root_disposition,detail) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                receipt_id,
+                str(receipt.get("time") or now_iso()),
+                str(receipt.get("disposition") or ""),
+                str(receipt.get("reason_code") or ""),
+                str(receipt.get("path") or ""),
+                str(receipt.get("branch") or ""),
+                str(receipt.get("archive") or ""),
+                str(receipt.get("root_disposition") or ""),
+                redact.redact(str(receipt.get("message") or "")),
+            ),
+        )
+        return cur.rowcount > 0
+
+    def clean_receipts(self, limit: int = 100) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM clean_receipts ORDER BY ts DESC, receipt_id DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
 
