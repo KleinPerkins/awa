@@ -3,8 +3,9 @@
   "version": 1,
   "frozen": "2026-07-04",
   "reframed": "2026-07-07",
+  "extended": "2026-07-08",
   "location_frozen": false,
-  "rationale": "The frozen kernel contract is BEHAVIOR ONLY: the CLI verbs/flags, the awa-worktree/v1 dashboard JSON shape, the guard permission schema, and the .awa/lease.json shape. These surfaces are the kernel's public interface; the engine may only BACK them, never silently change them. Removing/renaming a required verb/flag/key, or changing a schema string, is a breaking change that requires a versioned bump (awa-contract.v2.json). Additive, backward-compatible fields (new OPTIONAL keys) are allowed WITHIN v1. FILE LOCATIONS ARE NOT FROZEN: the shim/hook/emitter paths recorded below are informational and resolved by ROLE (AWA_HOME / the installed release path / a host overlay), because location was never the interface. Re-homing the generic kernel from a host's _ops/ into KleinPerkins/awa/kernel/ therefore needs NO contract bump (D-CONTRACT). The in-repo role-resolved freeze checker (kernel/checks/awa-contract-freeze.sh) enforces the behavior floor against the live shims wherever they are installed.",
+  "rationale": "The frozen kernel contract is BEHAVIOR ONLY: the CLI verbs/flags, the awa-worktree/v1 dashboard JSON shape, the guard permission schema, the .awa/lease.json shape, and (added additive-within-v1 2026-07-08) the clean_receipt/v1 receipt shape and the active_root/v1 heartbeat shape. These surfaces are the kernel's public interface; the engine may only BACK them, never silently change them. Removing/renaming a required verb/flag/key, or changing a schema string, is a breaking change that requires a versioned bump (awa-contract.v2.json). Additive, backward-compatible fields (new OPTIONAL keys) are allowed WITHIN v1. FILE LOCATIONS ARE NOT FROZEN: the shim/hook/emitter paths recorded below are informational and resolved by ROLE (AWA_HOME / the installed release path / a host overlay), because location was never the interface. Re-homing the generic kernel from a host's _ops/ into KleinPerkins/awa/kernel/ therefore needs NO contract bump (D-CONTRACT). The in-repo role-resolved freeze checker (kernel/checks/awa-contract-freeze.sh) enforces the behavior floor against the live shims wherever they are installed.",
   "informational": {
     "note": "NOT part of the frozen interface. These record where the reference implementation ships inside KleinPerkins/awa; hosts/installs MAY relocate them. The freeze checker resolves the live shims BY ROLE (AWA_HOME or the installed path), never by these literals.",
     "resolved_by_role": {
@@ -66,5 +67,45 @@
     "collision_boundary": "The per-git_common_dir advisory lock (git rev-parse --git-common-dir) is the real collision boundary; branch/path uniqueness is necessary but not sufficient.",
     "wal_placement": "SQLite state.db and its -wal/-shm sidecars MUST live under ${XDG_STATE_HOME:-~/.local/state}/awa on local disk, never a cloud-synced/network path.",
     "note": "No component emits a lease yet (recovery/engine unbuilt). This shape is the FORWARD contract the kernel/engine must back when leases land (Phase 2). awa-contract-freeze.sh validates any lease file that DOES exist against this shape."
+  },
+  "clean_receipt": {
+    "schema": "clean_receipt/v1",
+    "emitted_by_role": "EVERY terminal `clean` path — kernel dev-worktree.sh `clean` (incl. --bundle / --force / --delete-branch) AND every refusal/error return. Kernel-owned, holds engine-OFF and router-OFF.",
+    "required_keys": [
+      "schema", "receipt_id", "time", "verb", "disposition", "reason_code",
+      "path", "flags", "root_disposition", "tool"
+    ],
+    "flags_keys": ["bundle", "force", "delete_branch"],
+    "disposition_values": ["removed", "refused", "error"],
+    "every_terminal_path_rule": "A receipt is written on EVERY terminal clean path — success, every refusal, and error (guaranteed by an EXIT trap with a fail-safe refusal default). A new terminal clean path that emits no receipt is a contract violation (parametrized test fails CI). A disposition outside disposition_values is coerced to `refused` — a mis-wired path can never mint a spurious `removed`.",
+    "bundle_rule": "`clean --bundle` STAYS contract-compatible WITHIN v1 (the v7 resolution, not reopened): --bundle remains a frozen `clean` flag and the terminal path is honored (archive-then-remove) with flags.bundle=true recorded. It is NOT a new verb and needs NO v2.",
+    "ignored_files_are_child_state": "Ignored files count as CHILD STATE (not safe-to-delete): a clean with ignored files present REFUSES (reason_code contains `ignored`) unless --bundle (archive first) or --force (explicit override).",
+    "unknown_evidence_blocks": "If child-state evidence cannot be gathered (e.g. the ignored-file scan itself fails), the terminal path REFUSES (reason_code ignored_scan_failed) rather than proceeding — unknown/unattributed evidence blocks a destructive action.",
+    "fail_closed_rule": "The active-root gate fails CLOSED on UNCERTAINTY, never open: if the canonical-disposition tool is unavailable (empty/non-zero output) the clean REFUSES (reason_code disposition_unavailable); if the kernel lib itself is missing the clean REFUSES (reason_code roots_lib_missing); a root re-activated mid-clean REFUSES (reason_code reactivated_during_clean). An operator `--force` (explicit ack) may override an unavailable/lib-missing/fail-safe-active gate — never a genuine live-session active.",
+    "receipt_write_failure_rule": "A receipt-write failure is NOT swallowed: the kernel emits a stderr breadcrumb and, on an otherwise-successful clean, surfaces a non-zero AUDIT status (exit 3) so a removal with no durable record is never reported as a clean success.",
+    "storage": "clean-<receipt_id>.json under ${XDG_STATE_HOME:-~/.local/state}/awa/receipts (dir 700, file 600), local disk. NEVER read from any router artifact.",
+    "k2_todo": "DEFERRED (K2 observability, not a safety gap): receipts/ grows unbounded — add a prune/TTL + size cap. The safety-relevant record escape (`forget` / --force) already ships.",
+    "note": "Additive-within v1 (a new OPTIONAL top-level schema block, 2026-07-08; fail-closed hardening + audit-status fields added 2026-07-08). Existing awa-contract v1 consumers stay valid; NO v2."
+  },
+  "active_root": {
+    "schema": "active_root/v1",
+    "emitted_by_role": "sessionStart hook (worktree-session.sh) refreshes a per-root heartbeat when the session is in a linked worktree (Safe Workspace); the guard hot-path (worktree-guard.sh) ALSO refreshes it (THROTTLED) on any command run in a linked worktree, so an actively-used session cannot lapse to STALE at the raw TTL (and a session where sessionStart never fired still becomes protected on its first command). A long-lived owner MAY also refresh WITH its pid for strong liveness.",
+    "required_keys": [
+      "schema", "root_path", "git_common_dir", "boot_id", "first_seen",
+      "last_heartbeat", "last_heartbeat_epoch"
+    ],
+    "disposition_values": ["active", "stale", "dead", "untracked", "absent"],
+    "canonical_disposition": "A root's disposition is computed by ONE source of truth (awa_roots.disposition): active | stale | dead | untracked | absent. The clean gate AND sessionStart guidance both consult it — there is no second definition.",
+    "removal_rule": "An ACTIVE root BLOCKS removal (clean refuses, reason_code active_root). A STALE heartbeat (TTL-expired, or an owning process proven gone on the SAME boot) ALLOWS removal. A DEAD root (recorded path no longer exists) gets sessionStart guidance to recover from archives. The gate RE-READS the canonical disposition IMMEDIATELY before `git worktree remove` (TOCTOU shrink, no OS lock): a root re-activated mid-clean REFUSES (reason_code reactivated_during_clean).",
+    "identity_rule": "Keyed by the CANONICAL (realpath) root path so the heartbeat writer and the clean gate agree regardless of a symlinked prefix (e.g. macOS /tmp -> /private/tmp). pid is recorded ONLY by a long-lived owner; an ephemeral hook OMITS pid and relies on the TTL, so a would-be-instantly-dead pid never reads as stale.",
+    "unknown_evidence_blocks": "UNKNOWN evidence (an unreadable record, an unparseable heartbeat time) resolves to `active` (blocks removal) — never silently treated as safe.",
+    "fail_closed_rule": "Every UNCERTAIN gate outcome fails CLOSED (refuse), never open: canonical disposition unavailable -> reason_code disposition_unavailable; kernel lib missing -> reason_code roots_lib_missing; re-activation during clean -> reason_code reactivated_during_clean.",
+    "operator_override": "An operator `--force` (the explicit ack) overrides ONLY a FAIL-SAFE active (unknown evidence — a corrupt/unparseable record — NOT backed by a live pid) or an unavailable/lib-missing gate; a GENUINE fresh-heartbeat or live-pid active is NEVER force-removable. `awa_roots.py forget --root <path>` clears a stuck record (agent-invoked on the operator's behalf; touches only kernel state, never git/worktrees).",
+    "lease_status_note": "The removal gate consults ONLY this active_root heartbeat. The .awa/lease.json status:\"active\" field is NOT a removal-blocking signal — do not assume editing a lease changes removability.",
+    "no_os_lock": "Active worktrees are NOT protected by any OS lock or macOS immutable (uchg) flag — disposition is advisory kernel state only. Archive-only hardening is out of scope here (K2).",
+    "ttl_env": "AWA_HEARTBEAT_TTL_SECONDS overrides the default TTL (43200s / 12h), but is CLAMPED: <=0 / non-integer is treated as 'use default' and a positive value is floored at 300s, so a stray env export can never DISABLE protection. AWA_HEARTBEAT_REFRESH_THROTTLE (default 180s) bounds the guard hot-path refresh cost.",
+    "storage": "<slug>-<hash>.json under ${XDG_STATE_HOME:-~/.local/state}/awa/roots (dir 700, file 600), local disk.",
+    "k2_todo": "DEFERRED (K2 observability, not a safety gap): dead-root records + roots/ grow unbounded — add a prune/TTL + size cap. The safety-relevant record escape (`forget` / --force) already ships.",
+    "note": "Additive-within v1 (a new OPTIONAL top-level schema block, 2026-07-08; fail-closed hardening + hot-path-refresh + TTL-clamp + operator-override fields added 2026-07-08); NO v2."
   }
 }
