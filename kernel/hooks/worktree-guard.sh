@@ -436,30 +436,45 @@ maybe_refresh_active_heartbeat() {
   [ "$event" = "shell" ] || return 0
   [ -f "$AWA_ROOTS_LIB" ] || return 0
   [ -n "$cwd" ] && [ -d "$cwd" ] || return 0
-  local throttle="${AWA_HEARTBEAT_REFRESH_THROTTLE:-180}" now stamp_dir key stamp mtime top gd common
-  stamp_dir="${XDG_STATE_HOME:-$HOME/.local/state}/awa/roots"
-  key="$(printf '%s' "$cwd" | cksum 2>/dev/null | awk '{print $1"_"$2}')"
-  [ -n "$key" ] || return 0
-  stamp="$stamp_dir/.hb-hot-$key"
-  now="$(date +%s 2>/dev/null || echo 0)"
-  if [ -f "$stamp" ]; then
-    mtime="$(stat -f %m "$stamp" 2>/dev/null || stat -c %Y "$stamp" 2>/dev/null || echo 0)"
-    [ "$((now - mtime))" -lt "$throttle" ] && return 0
-  fi
-  # Throttle elapsed (or first command in this cwd): only NOW pay for git + python.
-  top="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || { mkdir -p "$stamp_dir" 2>/dev/null && : >"$stamp" 2>/dev/null; return 0; }
-  [ -n "$top" ] || return 0
-  gd="$(git -C "$cwd" rev-parse --path-format=absolute --git-dir 2>/dev/null)" || return 0
-  common="$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
-  [ -n "$gd" ] && [ -n "$common" ] || return 0
-  mkdir -p "$stamp_dir" 2>/dev/null || true
-  chmod 700 "$stamp_dir" 2>/dev/null || true
-  : >"$stamp" 2>/dev/null || true
-  # Only a LINKED worktree (Safe Workspace) is heart-beaten; the primary checkout is never a
-  # removal target and must not acquire a removal-blocking heartbeat (git-dir == git-common-dir).
-  [ "$gd" != "$common" ] || return 0
-  python3 "$AWA_ROOTS_LIB" heartbeat --root "$top" --common-dir "$common" \
-    --session-id "${DEV_SESSION_ID:-}" >/dev/null 2>&1 || true
+  # FULLY ISOLATED + best-effort. The entire body runs in a subshell whose stdout/stderr are
+  # discarded and whose non-zero exit is swallowed, so it can NEVER (a) pollute the guard's JSON
+  # stdout, (b) change the gate decision, or (c) fire the parent ERR trap (a subshell does not
+  # inherit ERR without errtrace, which the guard does not set). This is why an internal fault —
+  # a missing tool, an arithmetic slip, a git error — stays contained and the guard still emits
+  # valid JSON. (Regression: a non-numeric stat() result on the 2nd+ command for a cwd once
+  # corrupted the guard's stdout in CI.)
+  (
+    stamp_dir="${XDG_STATE_HOME:-$HOME/.local/state}/awa/roots"
+    key="$(printf '%s' "$cwd" | cksum | awk '{print $1"_"$2}')"
+    [ -n "$key" ] || exit 0
+    stamp="$stamp_dir/.hb-hot-$key"
+    throttle="${AWA_HEARTBEAT_REFRESH_THROTTLE:-180}"
+    if [ -f "$stamp" ]; then
+      now="$(date +%s)"
+      # GNU (`-c %Y`) FIRST, then BSD/macOS (`-f %m`). Order matters: on Linux `stat -f` means
+      # --file-system and SUCCEEDS with a non-numeric value, so a BSD-first probe would never fall
+      # through to the GNU form. Any non-numeric result is forced to 0 (=> treat as expired).
+      mtime="$(stat -c %Y "$stamp" 2>/dev/null || stat -f %m "$stamp" 2>/dev/null || echo 0)"
+      case "$mtime" in ''|*[!0-9]*) mtime=0 ;; esac
+      case "$now" in ''|*[!0-9]*) now=0 ;; esac
+      [ "$now" -gt 0 ] && [ "$mtime" -gt 0 ] && [ "$((now - mtime))" -lt "$throttle" ] && exit 0
+    fi
+    # Throttle elapsed (or first command in this cwd): only NOW pay for git + python.
+    top="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || { mkdir -p "$stamp_dir" 2>/dev/null && : >"$stamp" 2>/dev/null; exit 0; }
+    [ -n "$top" ] || exit 0
+    gd="$(git -C "$cwd" rev-parse --path-format=absolute --git-dir 2>/dev/null)" || exit 0
+    common="$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || exit 0
+    [ -n "$gd" ] && [ -n "$common" ] || exit 0
+    mkdir -p "$stamp_dir" 2>/dev/null || true
+    chmod 700 "$stamp_dir" 2>/dev/null || true
+    : >"$stamp" 2>/dev/null || true
+    # Only a LINKED worktree (Safe Workspace) is heart-beaten; the primary checkout is never a
+    # removal target and must not acquire a removal-blocking heartbeat (git-dir == git-common-dir).
+    [ "$gd" != "$common" ] || exit 0
+    python3 "$AWA_ROOTS_LIB" heartbeat --root "$top" --common-dir "$common" \
+      --session-id "${DEV_SESSION_ID:-}" >/dev/null 2>&1 || true
+    exit 0
+  ) >/dev/null 2>&1 || true
   return 0
 }
 maybe_refresh_active_heartbeat
