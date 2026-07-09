@@ -76,6 +76,20 @@ class TestRouterSeam(unittest.TestCase):
         ok, errors = catalog.verify_catalog_file(CATALOG_PATH)
         self.assertTrue(ok, "router catalog-verify rejected AWA's catalog:\n" + "\n".join(errors))
 
+    def test_constitution_egress_check_active_if_declared(self):
+        """Cross-repo flip enforcement: once the system-wide operator egress gate is active (AWA side
+        declared in consumer/egress-gate.v1.json), the router constitution's `egress` machine-check
+        must read `active`, not `spec`. Defensive: if the router constitution does not (yet) carry a
+        machine_checks map, this is a no-op — so it never fails for an unrelated shape, but it turns
+        the co-installed seam job RED if the router still declares egress as `spec`."""
+        c = json.loads((self.contracts / "intent-constitution.v1.json").read_text(encoding="utf-8"))
+        checks = c.get("machine_checks") or c.get("checks") or {}
+        if isinstance(checks, dict) and "egress" in checks:
+            want = self.pin.get("expected_constitution_checks", {}).get("egress", "active")
+            self.assertEqual(str(checks["egress"]).lower(), want,
+                             "router constitution `egress` machine-check must be flipped spec->active "
+                             "(consumer/egress-gate.v1.json + router-pin.json expect 'active')")
+
     def test_awa_egress_snapshot_is_superset_of_router_tiers(self):
         """Drift guard: AWA's local egress snapshot must contain every shared Tier A + Tier B term the
         router constitution declares. If the router ADDS a shared banned term, AWA's snapshot must be

@@ -136,8 +136,8 @@ type RefreshUi = {
 };
 
 // >>> PM_COPY_START — every string here is PM-facing and MUST be jargon-free (Tier A/B/C).
-// The egress gate (engine/tests/test_egress_surfaces.py) reads this block verbatim and fails on
-// any banned term. If you add a PM-facing string to the canvas, add it HERE — never inline.
+// The system-wide operator egress test reads this block verbatim and fails on any banned term.
+// If you add a PM-facing string to the dashboard, add it HERE — never inline.
 const PM_COPY = {
   title: "AWA — is your work safe?",
   subtitle:
