@@ -20,6 +20,10 @@ SELF_NAME="$(basename "${BASH_SOURCE[0]:-$0}")"
 # generic default template. The classifier is the single kernel-layer policy resolver.
 POLICY="${AWA_POLICY:-$KERNEL_DIR/policy/default-worktree-policy.yml}"
 AWA_POLICY_LIB="$KERNEL_DIR/lib/awa_policy.py"
+# K1: canonical per-root disposition + heartbeat + clean-receipt writer (kernel-owned, stdlib
+# only; holds engine/router-off). The SINGLE SOURCE OF TRUTH for a root's disposition and for
+# the clean_receipt/v1 written on EVERY terminal `clean` path.
+AWA_ROOTS_LIB="$KERNEL_DIR/lib/awa_roots.py"
 
 # X3: agent-created worktrees live on a DURABLE root, not ~/.cursor/worktrees (which Cursor
 # subjects to its own count/size cleanup — conflicting with the no-lost-work guarantee). The
@@ -519,7 +523,84 @@ if skipped_symlink:
 PY
 }
 
+# --- K1 clean receipts + active-root disposition (kernel-owned; holds engine/router-off) ---
+# A durable clean_receipt/v1 is written on EVERY terminal `clean` path (removed / refused /
+# error). The receipt context is defaulted to a FAIL-SAFE REFUSAL, so ANY unclassified exit
+# (a new path a future edit forgets to classify, an unexpected error) records a refusal —
+# never a silent success. An EXIT trap armed for the clean verb guarantees exactly one receipt
+# is emitted regardless of how clean_worktree returns/dies.
+_CLEAN_RECEIPT_WRITTEN=0
+_CLEAN_DISPOSITION="refused"
+_CLEAN_REASON="unattributed_exit"
+_CLEAN_MESSAGE="clean exited without classifying a disposition (fail-safe refusal receipt)"
+_CLEAN_PATH=""
+_CLEAN_BRANCH=""
+_CLEAN_HEAD=""
+_CLEAN_COMMON_DIR=""
+_CLEAN_BUNDLE=0
+_CLEAN_FORCE=0
+_CLEAN_DELETE_BRANCH=0
+_CLEAN_IGNORED_PRESENT=0
+_CLEAN_IGNORED_COUNT=0
+_CLEAN_SAFE_REASON=""
+_CLEAN_ARCHIVE=""
+_CLEAN_ROOT_DISPOSITION=""
+_CLEAN_ROOT_DISPOSITION_REASON=""
+
+clean_set_disposition() {
+  _CLEAN_DISPOSITION="$1"; _CLEAN_REASON="$2"; _CLEAN_MESSAGE="$3"
+}
+
+emit_clean_receipt() {
+  [ "$_CLEAN_RECEIPT_WRITTEN" = "1" ] && return 0
+  _CLEAN_RECEIPT_WRITTEN=1
+  [ -f "$AWA_ROOTS_LIB" ] || return 0
+  python3 "$AWA_ROOTS_LIB" write-receipt \
+    --disposition "$_CLEAN_DISPOSITION" --reason "$_CLEAN_REASON" --message "$_CLEAN_MESSAGE" \
+    --path "$_CLEAN_PATH" --branch "$_CLEAN_BRANCH" --head "$_CLEAN_HEAD" \
+    --common-dir "$_CLEAN_COMMON_DIR" --bundle "$_CLEAN_BUNDLE" --force "$_CLEAN_FORCE" \
+    --delete-branch "$_CLEAN_DELETE_BRANCH" --ignored-present "$_CLEAN_IGNORED_PRESENT" \
+    --ignored-count "$_CLEAN_IGNORED_COUNT" --safe-reason "$_CLEAN_SAFE_REASON" \
+    --archive "$_CLEAN_ARCHIVE" --root-disposition "$_CLEAN_ROOT_DISPOSITION" \
+    --root-disposition-reason "$_CLEAN_ROOT_DISPOSITION_REASON" >/dev/null 2>&1 || true
+}
+
+# EXIT-trap backstop: fires on `die` (exit), `return`, or normal completion. Preserves the
+# original exit status. This is what makes "a receipt on every terminal clean path" structural
+# rather than a per-path discipline a future edit can forget.
+_clean_exit_trap() {
+  local rc=$?
+  emit_clean_receipt
+  exit "$rc"
+}
+
+# K1: per-root active_root/v1 disposition gate (canonical disposition = kernel/lib/awa_roots.py).
+# An ACTIVE root (a live session's Safe Workspace) BLOCKS removal; STALE/UNTRACKED/etc. do not
+# block (they proceed to the existing content-safety checks). Returns non-zero to block.
+clean_active_root_gate() {
+  local path="$1" disp="" reason=""
+  [ -f "$AWA_ROOTS_LIB" ] || return 0
+  IFS=$'\t' read -r disp reason < <(python3 "$AWA_ROOTS_LIB" disposition --root "$path" --format tsv 2>/dev/null || true) || true
+  [ -n "$disp" ] || return 0
+  _CLEAN_ROOT_DISPOSITION="$disp"
+  _CLEAN_ROOT_DISPOSITION_REASON="$reason"
+  if [ "$disp" = "active" ]; then
+    clean_set_disposition refused active_root "refusing to remove an ACTIVE Safe Workspace: $reason"
+    {
+      printf '%s: refusing to remove an active Safe Workspace (a live session is using it)\n' "$SELF_NAME"
+      printf '  path:   %s\n' "$path"
+      printf '  reason: %s\n' "$reason"
+      printf '\nA live session is using this workspace. Close/park that session first; once its\n'
+      printf 'heartbeat expires (TTL) or its owning process exits, the workspace becomes removable.\n'
+    } >&2
+    return 1
+  fi
+  return 0
+}
+
 clean_worktree() {
+  # Arm the receipt backstop FIRST so even an early arg-parse exit records a receipt.
+  trap '_clean_exit_trap' EXIT
   local path="" force=0 delete_branch=0 bundle=0
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -527,45 +608,103 @@ clean_worktree() {
       --force) force=1 ;;
       --bundle) bundle=1 ;;
       --delete-branch) delete_branch=1 ;;
-      *) die "unknown clean option: $1" ;;
+      *) clean_set_disposition refused unknown_option "unknown clean option: $1"; die "unknown clean option: $1" ;;
     esac
     shift
   done
-  [ -n "$path" ] || die "clean requires --path"
+  _CLEAN_PATH="$path"; _CLEAN_BUNDLE="$bundle"; _CLEAN_FORCE="$force"; _CLEAN_DELETE_BRANCH="$delete_branch"
+  if [ -z "$path" ]; then
+    clean_set_disposition refused missing_path "clean requires --path"
+    die "clean requires --path"
+  fi
   # S2 (symlink-traversal guard): reject a symlinked worktree path, then canonicalize.
   if [ -L "$path" ]; then
+    clean_set_disposition refused symlinked_path "refusing symlinked worktree path (S2 symlink-traversal guard): $path"
     die "refusing symlinked worktree path (S2 symlink-traversal guard): $path"
   fi
-  [ -d "$path" ] || die "not a directory: $path"
-  path="$(cd "$path" 2>/dev/null && pwd -P)" || die "cannot canonicalize worktree path: $path"
-  local dirty branch head git_dir common_dir safe_reason ignored
+  if [ ! -d "$path" ]; then
+    clean_set_disposition refused not_a_directory "not a directory: $path"
+    die "not a directory: $path"
+  fi
+  path="$(cd "$path" 2>/dev/null && pwd -P)" || {
+    clean_set_disposition error canonicalize_failed "cannot canonicalize worktree path"
+    die "cannot canonicalize worktree path: $path"
+  }
+  _CLEAN_PATH="$path"
+  local dirty branch head git_dir common_dir safe_reason ignored ignored_rc
   dirty="$(git -C "$path" status --porcelain 2>/dev/null || true)"
-  [ -z "$dirty" ] || die "refusing to remove dirty worktree: $path"
+  if [ -n "$dirty" ]; then
+    clean_set_disposition refused dirty "refusing to remove dirty worktree: $path"
+    die "refusing to remove dirty worktree: $path"
+  fi
   branch="$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  [ -n "$branch" ] || die "cannot determine worktree branch: $path"
-  [ "$branch" != "HEAD" ] || die "refusing to remove detached-HEAD worktree: $path"
-  head="$(git -C "$path" rev-parse HEAD 2>/dev/null)" || die "cannot determine HEAD for $path"
-  git_dir="$(git -C "$path" rev-parse --path-format=absolute --git-dir 2>/dev/null)" || die "cannot determine git-dir for $path"
-  common_dir="$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || die "cannot determine git common-dir for $path"
+  if [ -z "$branch" ]; then
+    clean_set_disposition error no_branch "cannot determine worktree branch: $path"
+    die "cannot determine worktree branch: $path"
+  fi
+  _CLEAN_BRANCH="$branch"
+  if [ "$branch" = "HEAD" ]; then
+    clean_set_disposition refused detached_head "refusing to remove detached-HEAD worktree: $path"
+    die "refusing to remove detached-HEAD worktree: $path"
+  fi
+  head="$(git -C "$path" rev-parse HEAD 2>/dev/null)" || {
+    clean_set_disposition error no_head "cannot determine HEAD for $path"
+    die "cannot determine HEAD for $path"
+  }
+  _CLEAN_HEAD="$head"
+  git_dir="$(git -C "$path" rev-parse --path-format=absolute --git-dir 2>/dev/null)" || {
+    clean_set_disposition error no_git_dir "cannot determine git-dir for $path"
+    die "cannot determine git-dir for $path"
+  }
+  common_dir="$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || {
+    clean_set_disposition error no_common_dir "cannot determine git common-dir for $path"
+    die "cannot determine git common-dir for $path"
+  }
+  _CLEAN_COMMON_DIR="$common_dir"
+
+  # K1: an ACTIVE root (a live session's Safe Workspace) blocks removal (canonical disposition).
+  clean_active_root_gate "$path" || return 1
+
   safe_reason="$(branch_is_cleanup_safe "$path" "$branch" "$head" || true)"
   if [ -z "$safe_reason" ]; then
+    clean_set_disposition refused local_only_commits "local-only commits (not merged/pushed) — preserve first"
     print_clean_recovery "$path" "$branch" "$head"
     return 1
   fi
+  _CLEAN_SAFE_REASON="$safe_reason"
 
-  # X3: `git status --porcelain` does NOT list git-ignored files, so `git worktree remove` would
-  # delete local .env / *.db / build output with no recovery. Bundle-or-refuse before removal.
+  # X3 + "ignored-files-are-child-state" + "unknown-evidence-blocks": `git status --porcelain`
+  # does NOT list git-ignored files, so `git worktree remove` would delete local .env / *.db /
+  # build output with no recovery. Git-ignored files are CHILD STATE (not safe-to-delete):
+  # bundle-or-refuse before removal. If the ignored-file scan itself FAILS, that is UNKNOWN
+  # evidence about child state -> REFUSE (never proceed to remove on an unclassifiable tree).
+  set +e
   ignored="$(git -C "$path" -c core.untrackedCache=false -c core.fsmonitor=false \
-    status --porcelain --ignored=matching --untracked-files=all 2>/dev/null | sed -n 's/^!! //p' || true)"
+    status --porcelain --ignored=matching --untracked-files=all 2>/dev/null)"
+  ignored_rc=$?
+  set -e
+  if [ "$ignored_rc" -ne 0 ]; then
+    clean_set_disposition refused ignored_scan_failed "git-ignored-file scan failed (rc=$ignored_rc) — refusing on unknown child-state evidence"
+    printf '%s: refusing to remove worktree — could not scan for git-ignored child state (rc=%s)\n' "$SELF_NAME" "$ignored_rc" >&2
+    return 1
+  fi
+  ignored="$(printf '%s\n' "$ignored" | sed -n 's/^!! //p' || true)"
   if [ -n "$ignored" ]; then
+    _CLEAN_IGNORED_PRESENT=1
+    _CLEAN_IGNORED_COUNT="$(printf '%s\n' "$ignored" | grep -c . || true)"
     if [ "$bundle" -eq 1 ]; then
       local archive
-      archive="$(awa_bundle_ignored "$path" "$ignored")" || return 1
+      archive="$(awa_bundle_ignored "$path" "$ignored")" || {
+        clean_set_disposition error bundle_failed "bundling git-ignored child state failed"
+        return 1
+      }
+      _CLEAN_ARCHIVE="$archive"
       note "bundled git-ignored files to recovery archive before removal: $archive"
     elif [ "$force" -eq 1 ]; then
       note "WARNING: --force discarding git-ignored files without a recovery bundle:" >&2
       printf '    %s\n' $ignored >&2
     else
+      clean_set_disposition refused ignored_present "git-ignored local files present (child state) — bundle-or-refuse before removal"
       {
         printf '%s: refusing to remove worktree with git-ignored local files\n' "$SELF_NAME"
         printf '  path: %s\n' "$path"
@@ -584,13 +723,19 @@ clean_worktree() {
   else
     git --git-dir="$common_dir" worktree remove "$path"
   fi
+  # The worktree is now gone; drop any active_root heartbeat record so a removed root never
+  # lingers as a phantom 'dead' record (best-effort; never fails the clean).
+  [ -f "$AWA_ROOTS_LIB" ] && python3 "$AWA_ROOTS_LIB" remove-root --root "$path" >/dev/null 2>&1 || true
   if [ "$delete_branch" -eq 1 ]; then
     if git --git-dir="$common_dir" update-ref -d "refs/heads/$branch" "$head" 2>/dev/null; then
+      clean_set_disposition removed removed_with_branch "removed worktree and deleted branch '$branch' at ${head:0:12} (safe: $safe_reason)"
       note "deleted branch '$branch' at $head (atomic update-ref)"
     else
+      clean_set_disposition error branch_moved "branch $branch no longer points at captured HEAD $head; leaving branch in place"
       die "branch $branch no longer points at captured HEAD $head; leaving branch in place"
     fi
   else
+    clean_set_disposition removed removed_kept_branch "removed worktree; left branch '$branch' in place (safe: $safe_reason)"
     note "removed worktree; left branch '$branch' in place (rerun with --delete-branch to delete after safety checks)"
   fi
 }

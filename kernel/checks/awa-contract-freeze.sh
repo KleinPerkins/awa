@@ -232,6 +232,121 @@ else
   bad "fail-safe broken: a legacy/unknown mode value did not protect the repo (must deny)"
 fi
 
+ROOTS_LIB="$AWA_HOME/kernel/lib/awa_roots.py"
+
+# 6) clean_receipt/v1 shape (additive-within-v1): the contract must DECLARE the receipt schema,
+#    `clean --bundle` must stay v1-compatible, and a LIVE terminal clean (a refusal that needs no
+#    git repo) must emit a schema-valid receipt. Exercised under a TEMP XDG_STATE_HOME so the
+#    operator's real receipts dir is never touched.
+crat="$(mktemp -d)"
+receipt_ls=""
+if [ -f "$ROOTS_LIB" ]; then
+  # not_a_directory refusal -> a terminal clean path that emits a receipt with no git needed.
+  XDG_STATE_HOME="$crat/state" "$DEV_WORKTREE" clean --path "$crat/nope" >/dev/null 2>&1 || true
+  receipt_ls="$(XDG_STATE_HOME="$crat/state" python3 "$ROOTS_LIB" list-receipts --limit 5 2>/dev/null || true)"
+fi
+if CONTRACT="$CONTRACT" DEV_SRC="$(cat "$DEV_WORKTREE" 2>/dev/null || true)" RECEIPTS="$receipt_ls" \
+   ROOTS_OK="$([ -f "$ROOTS_LIB" ] && echo 1 || echo 0)" python3 - <<'PY'
+import json, os, sys
+c = json.load(open(os.environ["CONTRACT"]))
+errs = []
+cr = c.get("clean_receipt")
+if not isinstance(cr, dict):
+    errs.append("contract missing clean_receipt block")
+else:
+    if cr.get("schema") != "clean_receipt/v1":
+        errs.append(f'clean_receipt.schema={cr.get("schema")!r} != clean_receipt/v1')
+    for k in ("required_keys", "disposition_values", "flags_keys"):
+        if not isinstance(cr.get(k), list) or not cr.get(k):
+            errs.append(f"clean_receipt.{k} missing/empty")
+    if set(cr.get("disposition_values", [])) != {"removed", "refused", "error"}:
+        errs.append(f'clean_receipt.disposition_values={cr.get("disposition_values")}')
+    if "WITHIN v1" not in (cr.get("bundle_rule") or ""):
+        errs.append("clean_receipt.bundle_rule must state --bundle stays WITHIN v1")
+# --bundle honored: still a frozen `clean` flag (the v7 resolution, contract-compatible in v1).
+if "bundle" not in [f.lstrip("-") for f in c["cli"]["flags"].get("clean", [])]:
+    errs.append("--bundle missing from frozen clean flags (bundle-compat rule broken)")
+# LIVE: the refusal terminal path emitted a schema-valid receipt (only when the kernel lib ships).
+if os.environ.get("ROOTS_OK") == "1":
+    try:
+        receipts = json.loads(os.environ.get("RECEIPTS") or "[]")
+    except Exception as exc:
+        receipts = []; errs.append(f"live receipts not JSON: {exc}")
+    if not receipts:
+        errs.append("no clean_receipt emitted on a live terminal clean refusal path")
+    else:
+        r = receipts[0]
+        for k in cr.get("required_keys", []):
+            if k not in r:
+                errs.append(f"live receipt missing required key: {k}")
+        if r.get("schema") != "clean_receipt/v1":
+            errs.append(f'live receipt schema={r.get("schema")!r}')
+        if r.get("disposition") not in cr.get("disposition_values", []):
+            errs.append(f'live receipt disposition={r.get("disposition")!r} not in vocabulary')
+        if not isinstance(r.get("flags"), dict):
+            errs.append("live receipt flags not an object")
+if errs:
+    print("CLEAN_RECEIPT DRIFT: " + "; ".join(errs), file=sys.stderr); sys.exit(1)
+sys.exit(0)
+PY
+then
+  pass "clean_receipt/v1 declared + --bundle v1-compatible + live terminal clean emits schema-valid receipt"
+else
+  bad "clean_receipt/v1 shape drifted (contract, --bundle compat, or live receipt emission)"
+fi
+rm -rf "$crat" 2>/dev/null || true
+
+# 7) active_root/v1 shape (additive-within-v1): the contract must DECLARE the heartbeat schema +
+#    the 5-state canonical disposition vocabulary, and a LIVE heartbeat/disposition round-trip
+#    must classify a fresh root ACTIVE (blocks removal). TEMP XDG_STATE_HOME.
+arat="$(mktemp -d)"
+disp_json=""; rec_present="0"
+if [ -f "$ROOTS_LIB" ]; then
+  XDG_STATE_HOME="$arat/state" python3 "$ROOTS_LIB" heartbeat --root "$arat" >/dev/null 2>&1 || true
+  disp_json="$(XDG_STATE_HOME="$arat/state" python3 "$ROOTS_LIB" disposition --root "$arat" 2>/dev/null || true)"
+  rec_present=1
+fi
+if CONTRACT="$CONTRACT" DISP="$disp_json" ROOTS_OK="$rec_present" python3 - <<'PY'
+import json, os, sys
+c = json.load(open(os.environ["CONTRACT"]))
+errs = []
+ar = c.get("active_root")
+if not isinstance(ar, dict):
+    errs.append("contract missing active_root block")
+else:
+    if ar.get("schema") != "active_root/v1":
+        errs.append(f'active_root.schema={ar.get("schema")!r} != active_root/v1')
+    if not isinstance(ar.get("required_keys"), list) or not ar.get("required_keys"):
+        errs.append("active_root.required_keys missing/empty")
+    if set(ar.get("disposition_values", [])) != {"active", "stale", "dead", "untracked", "absent"}:
+        errs.append(f'active_root.disposition_values={ar.get("disposition_values")}')
+    if "source of truth" not in (ar.get("canonical_disposition") or "").lower():
+        errs.append("active_root.canonical_disposition must name the single source of truth")
+# LIVE: a fresh heartbeat -> disposition active + blocks_removal, record carries required keys.
+if os.environ.get("ROOTS_OK") == "1":
+    try:
+        d = json.loads(os.environ.get("DISP") or "{}")
+    except Exception as exc:
+        d = {}; errs.append(f"live disposition not JSON: {exc}")
+    if d.get("disposition") != "active":
+        errs.append(f'fresh heartbeat disposition={d.get("disposition")!r} != active')
+    if d.get("blocks_removal") is not True:
+        errs.append("fresh active root must block removal")
+    rec = d.get("record") or {}
+    for k in ar.get("required_keys", []):
+        if k not in rec:
+            errs.append(f"live active_root record missing required key: {k}")
+if errs:
+    print("ACTIVE_ROOT DRIFT: " + "; ".join(errs), file=sys.stderr); sys.exit(1)
+sys.exit(0)
+PY
+then
+  pass "active_root/v1 declared + 5-state canonical disposition + live fresh heartbeat blocks removal"
+else
+  bad "active_root/v1 shape drifted (contract or live heartbeat/disposition round-trip)"
+fi
+rm -rf "$arat" 2>/dev/null || true
+
 if [ "$fail" -eq 0 ]; then
   echo "awa-contract-freeze: OK"
 else
