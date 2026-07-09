@@ -52,3 +52,53 @@ jobs:
         run: make verify
       - name: Verify full install lifecycle (throwaway HOME)
         run: make verify-install
+
+  # Dedicated router<->AWA SEAM job. `make verify` above SKIPS the router-dependent seam tests when
+  # the router is not installed (the kernel-first / off-switch property). That is correct for the
+  # main gate, but it means a future router contract drift (v1->v2 / unfreeze / rename) would keep
+  # AWA CI silently green. THIS job closes that hole: it co-installs the router at the PINNED ref
+  # (consumer/router-pin.json) and runs the seam NON-SKIPPED (AWA_SEAM_REQUIRE_ROUTER=1 makes a
+  # missing/broken router a HARD FAILURE), so drift turns AWA CI red.
+  #
+  # KleinPerkins/intent-router is PRIVATE, so cloning it needs a read credential the default
+  # GITHUB_TOKEN does not carry. The job self-activates when the repo secret ROUTER_SEAM_TOKEN
+  # (a fine-grained PAT, Contents: read on KleinPerkins/intent-router) is present, and skips GREEN
+  # with an actionable notice until then — so it never falsely reds the PR before the credential
+  # exists, and needs no code change to turn on.
+  router-seam:
+    name: router-seam (pinned, non-skipped)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Detect router-seam credential
+        id: gate
+        env:
+          ROUTER_SEAM_TOKEN: ${{ secrets.ROUTER_SEAM_TOKEN }}
+        run: |
+          if [ -n "${ROUTER_SEAM_TOKEN:-}" ]; then
+            echo "have_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_token=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=router-seam inactive::ROUTER_SEAM_TOKEN not set. KleinPerkins/intent-router is PRIVATE, so co-installing it needs a read credential. Add a fine-grained PAT repo secret ROUTER_SEAM_TOKEN (Contents: read on KleinPerkins/intent-router) to activate the non-skipped seam run. Skipping (green) until then."
+          fi
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        if: steps.gate.outputs.have_token == 'true'
+        with:
+          python-version: '3.12'
+      - name: Co-install the pinned router + run the seam NON-SKIPPED
+        if: steps.gate.outputs.have_token == 'true'
+        env:
+          ROUTER_SEAM_TOKEN: ${{ secrets.ROUTER_SEAM_TOKEN }}
+        run: |
+          set -euo pipefail
+          ref="$(python3 -c "import json;print(json.load(open('consumer/router-pin.json'))['router']['ref'])")"
+          echo "Co-installing KleinPerkins/intent-router @ ${ref} (pinned in consumer/router-pin.json)"
+          git clone --quiet --depth 1 --branch "$ref" \
+            "https://x-access-token:${ROUTER_SEAM_TOKEN}@github.com/KleinPerkins/intent-router.git" \
+            "$RUNNER_TEMP/intent-router"
+          export PYTHONPATH="$PWD:$RUNNER_TEMP/intent-router"
+          python3 -c "import intent_router; print('router importable at', intent_router.__file__)"
+          # AWA_SEAM_REQUIRE_ROUTER=1 => a missing/broken router is a HARD FAILURE, never a silent
+          # skip; the seam assertions then bite on any pinned-contract drift.
+          AWA_SEAM_REQUIRE_ROUTER=1 python3 -m unittest -v \
+            engine.tests.test_consumer_seam engine.tests.test_consumer_golden

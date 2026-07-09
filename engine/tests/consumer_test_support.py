@@ -4,10 +4,50 @@ from __future__ import annotations
 
 import importlib.util as _ilu
 import json
+import re as _re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONSUMER = REPO_ROOT / "consumer"
+
+# Router-artifact USAGE patterns (import/from/artifact-file/env/state-path) — matched as USAGE, NOT
+# the bare word "router", so a module's own "router-OFF" / "no router installed" documentation prose
+# stays legal. This is the ONE comprehensive list, reused by BOTH the structural contamination guard
+# (kernel + engine) and the kernel-off matrix, so neither drifts into a narrow hardcoded file list.
+ROUTER_USAGE_PATTERNS = [
+    _re.compile(r"\bimport\s+\w*router", _re.I),
+    _re.compile(r"\bfrom\s+\w*router\b", _re.I),
+    _re.compile(r"\bimport\s+intent_router", _re.I),
+    _re.compile(r"intent[_-]router", _re.I),
+    _re.compile(r"intent-(proposal|catalog|map|feedback|constitution)", _re.I),
+    _re.compile(r"\bintent_router\b", _re.I),
+    _re.compile(r"router[\w-]*\.(json|db|state|ya?ml)", _re.I),
+    _re.compile(r"/(intent-)?router/", _re.I),
+    _re.compile(r"AWA_ROUTER|INTENT_ROUTER", _re.I),
+    _re.compile(r"router_(state|dir|home|path)", _re.I),
+]
+
+
+def scan_tree_for_router_usage(root: Path, *, suffixes=(".py", ".sh"),
+                               skip_dir_parts=()) -> list[str]:
+    """Comprehensive rglob scan: every source file under `root` scanned for a router-artifact USAGE.
+    Returns 'relpath: pattern matched text' offenders (empty = clean). ONE scan reused by the
+    structural contamination guard and the kernel-off matrix (no divergent hardcoded file lists)."""
+    skip = {"__pycache__", ".git", *skip_dir_parts}
+    offenders: list[str] = []
+    for p in sorted(root.rglob("*")):
+        if not (p.is_file() and p.suffix in suffixes and not (skip & set(p.parts))):
+            continue
+        text = p.read_text(encoding="utf-8", errors="replace")
+        for rx in ROUTER_USAGE_PATTERNS:
+            m = rx.search(text)
+            if m is not None:
+                try:
+                    rel = p.relative_to(REPO_ROOT)
+                except ValueError:
+                    rel = p
+                offenders.append(f"{rel}: {rx.pattern!r} matched {m.group(0)!r}")
+    return offenders
 CATALOG_PATH = CONSUMER / "intent-catalog.v1.json"
 GOLDEN_PATH = CONSUMER / "golden" / "awa-consumer.golden.json"
 EGRESS_PATH = CONSUMER / "egress-terms.json"

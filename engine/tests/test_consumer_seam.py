@@ -11,12 +11,29 @@ A router contract-version bump (v1 -> v2), a rename, or unfreezing the proposal 
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from pathlib import Path
 
 from consumer import egress
 
 from .consumer_test_support import CATALOG_PATH, load_router_pin, router_engine
+
+
+class TestSeamRouterPresence(unittest.TestCase):
+    """Always-present guard (NOT skipped). The dedicated CI seam job co-installs the pinned router
+    and sets AWA_SEAM_REQUIRE_ROUTER=1; in that mode a NON-importable router is a HARD FAILURE — never
+    a silent skip — so a broken co-install (or a router that drifted so far it won't import) turns
+    AWA CI red. In normal `make verify` (router uninstalled, env unset) this passes while the
+    router-dependent seam class below skips, preserving the kernel-first / off-switch property
+    (SHOULD-FIX 5)."""
+
+    def test_router_present_when_required(self):
+        if os.environ.get("AWA_SEAM_REQUIRE_ROUTER") == "1":
+            self.assertIsNotNone(
+                router_engine(),
+                "AWA_SEAM_REQUIRE_ROUTER=1 but the router is not importable — the CI seam co-install "
+                "failed or the pinned router drifted. The seam must run NON-skipped in that job.")
 
 
 def _router_repo_root():
