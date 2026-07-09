@@ -170,6 +170,46 @@ def render_block(block: dict) -> dict:
     }
 
 
+# Plain, jargon-free line per known event/receipt KIND (surface: detection receipts / timeline).
+# The raw event `note`/`message` (which carries mechanism words like "bundle", "lease", "worktree")
+# is NEVER echoed; the timeline is rendered by KIND, so no mechanism text can reach the PM.
+_TIMELINE_PLAIN = {
+    "primary-file-edit-detected": ("A change was made straight to your original files. I noticed it "
+                                   "right afterward, but I could only notice it — I was not able to "
+                                   "stop it in advance."),
+    "recovery_bundle": "I tucked away a safety copy of your loose files before tidying up, so nothing is lost.",
+    "recovery_saved": "I made a safety copy of your in-progress work, so nothing is lost.",
+    "worktree_archive": "I kept a full, read-only safety copy of this work before removing it.",
+    "protected_created": "I set up a fresh safe copy for you to work in.",
+    "protected_opened": "I reopened your safe copy so you can keep working.",
+    "progress_saved": "I saved your progress.",
+    "copy_removed": "I removed a safe copy you no longer needed.",
+    "blocked_change": "I stopped a change to your original files to keep them safe.",
+}
+_TIMELINE_FALLBACK = "Something happened here that I looked after for you; your work is safe."
+
+
+def render_timeline(events: list[dict] | None) -> dict:
+    """Plain-language PM timeline from raw detection/recovery event + receipt records. Each event is
+    rendered by its KIND to a jargon-free line; a pre-vetted `plain` field on the event is preferred
+    (still re-scanned), and an unknown kind or any mechanism-bearing text falls back to a safe
+    generic line — so no raw `note`/`message` can leak. Honest: it narrates only what happened."""
+    items: list[dict] = []
+    for ev in events or []:
+        if not isinstance(ev, dict):
+            continue
+        kind = str(ev.get("kind") or ev.get("event") or "").strip()
+        when = str(ev.get("time") or ev.get("ts") or ev.get("created_at") or "")
+        candidate = ev.get("plain") if isinstance(ev.get("plain"), str) else None
+        text = candidate or _TIMELINE_PLAIN.get(kind) or _TIMELINE_FALLBACK
+        items.append({"when": when, "plain": _pm_safe(text, _TIMELINE_FALLBACK)})
+    return {
+        "headline": "Here is what I have done to keep your work safe",
+        "events": items,
+        "note": "This is a running list of the moments I stepped in or made a safety copy.",
+    }
+
+
 def render_outcome(ok: bool, *, did: str, detail: str = "") -> dict:
     """Plain-language narration of the REAL outcome after an AWA verb ran (verify-real-outcome ->
     narrate). Honest: reports what actually happened, not what was intended."""

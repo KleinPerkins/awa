@@ -501,6 +501,11 @@ rec = {
     "time": os.environ["DR_TS"],
     "path": os.environ["DR_PATH"],
     "repo": os.environ["DR_REPO"],
+    # PM-facing, jargon-free line for the timeline (the operator reads THIS one).
+    "plain": ("A change was made straight to your original files. I noticed it right afterward, "
+              "but I could only notice it — I wasn't able to stop it in advance. If anything "
+              "looks wrong, I can help you get it back."),
+    # Internal mechanism note (agent/maintainer-facing; never shown to the operator).
     "note": ("Native edit to an included primary checkout was detected. afterFileEdit is "
              "observation-only, so this could not be pre-blocked. Uncommitted-file recovery is "
              "available once the AWA recovery manager ships."),
@@ -544,7 +549,7 @@ check_probe() {
   if [ -z "$status" ]; then
     if included_looking_path "$probe"; then
       respond_ask \
-        "AWA could not verify worktree safety for an included-looking checkout." \
+        "I couldn't fully check whether this is safe here, so I paused instead of guessing." \
         "Hook payload/status could not be classified for $probe ($probe_ctx). Run '$DEV_WORKTREE status' there, or set DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 only for deliberate primary mutation."
       exit 0
     fi
@@ -559,14 +564,14 @@ check_probe() {
       if is_uncertain_include "$cls_reason"; then
         # Classifier unavailable / uncertainty path -> ask (honest no-op), never deny.
         respond_ask \
-          "AWA could not verify worktree safety for an included-looking checkout." \
+          "I couldn't fully check whether this is safe here, so I paused instead of guessing." \
           "Classifier was unavailable for $probe ($cls_reason). Run '$DEV_WORKTREE status' there, or relaunch in a Safe Workspace via the Cursor Agents-Window Worktree dropdown."
         exit 0
       fi
       # CONFIRMED mutating command on an included primary -> enforced DENY. Cursor honors deny;
       # ask is non-blocking (L4), so deny is the only shape that actually prevents the mutation.
       respond_deny \
-        "AWA blocked a mutating command on your primary checkout. Relaunch in a Safe Workspace (Cursor Agents-Window Worktree dropdown) to continue." \
+        "I didn't make that change, so nothing in your original files was touched. Let's keep going in a separate safe copy instead." \
         "AWA DENIED a mutating command on an INCLUDED PRIMARY checkout (mode ON). STOP retrying: re-running it — including 'cd <worktree> && <cmd>' or an inline 'DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 <cmd>' prefix (this hook reads its OWN process env, not the command's inline env) — will be denied again. Recovery is an OPERATOR action: relaunch this agent in a Safe Workspace via the Cursor Agents-Window Worktree dropdown (AWA adopts the linked worktree, then allows), or set DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 in Cursor's environment/settings and relaunch. Last resort, only if the operator deliberately wants this repo unprotected: '$DEV_WORKTREE mode set <rel> off'."
       exit 0
     fi
@@ -575,7 +580,7 @@ check_probe() {
       # honest no-op: Cursor ignores ask, so we never silently downgrade an uncertain case to
       # allow, but we also never claim ask prevents anything.
       respond_ask \
-        "AWA could not classify this command for an included primary checkout." \
+        "I couldn't tell what this would do, so I paused to be safe." \
         "Hook payload was unparseable ($probe_ctx) for an included primary checkout. If this was a mutating command, relaunch in a Safe Workspace via the Cursor Agents-Window Worktree dropdown, or set DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 in Cursor's environment."
       exit 0
     fi
