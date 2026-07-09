@@ -55,6 +55,36 @@ class TestOperatorLoop(unittest.TestCase):
         self.assertEqual(calls, [("cleanup", "/tmp/x")], "executes AWA's OWN verb, once, after confirm")
         self.assertTrue(r["narration"]["ok"])
 
+    def test_confirmation_replay_is_bound_to_shown_verb_target_and_consequence(self):
+        calls = []
+        m = {"clean up": make_proposal(
+            verb="cleanup", safety_class="destructive", verdict="strong",
+            missing_params=["confirm", "which_work"], requires_confirmation=True)}
+        loop = self._loop(m, executor=_record_executor(calls))
+        shown = loop.handle("clean up", target="/tmp/x", facts=F_UNSHARED)
+        fingerprint = shown["_internal"]["confirmation_fingerprint"]
+        self.assertEqual(len(fingerprint), 64)
+        drifted = loop.handle(
+            "clean up",
+            target="/tmp/y",
+            facts={**F_UNSHARED, "target": "/tmp/y"},
+            confirm=True,
+            expected_confirmation_fingerprint=fingerprint,
+        )
+        self.assertEqual(drifted["decision"], L.AWAITING_CONFIRMATION)
+        self.assertFalse(drifted["_internal"]["confirmation_replay_valid"])
+        self.assertEqual(calls, [])
+        accepted = loop.handle(
+            "clean up",
+            target="/tmp/x",
+            facts=F_UNSHARED,
+            confirm=True,
+            expected_confirmation_fingerprint=fingerprint,
+        )
+        self.assertEqual(accepted["decision"], L.EXECUTE)
+        self.assertTrue(accepted["_internal"]["confirmation_replay_valid"])
+        self.assertEqual(calls, [("cleanup", "/tmp/x")])
+
     def test_benign_strong_write_does_not_nag(self):
         calls = []
         m = {"save my progress": make_proposal(verb="save", safety_class="write", verdict="strong",
@@ -63,6 +93,10 @@ class TestOperatorLoop(unittest.TestCase):
             "save my progress", target="/tmp/x", facts=F_SAVED)
         self.assertEqual(r["decision"], L.EXECUTE, "a benign strong write must run without a nag")
         self.assertEqual(calls, [("save", "/tmp/x")])
+        self.assertNotIn(
+            "if you're happy",
+            json.dumps(r["understanding"], ensure_ascii=False).lower(),
+        )
 
     def test_cleanup_saved_elsewhere_still_confirms_via_cr9(self):
         """Even when the kernel says a removal is benign (work saved elsewhere), the destructive
@@ -127,6 +161,28 @@ class TestOperatorLoop(unittest.TestCase):
                                       missing_params=["which_work"], requires_confirmation=True)}
         r = self._loop(m).handle("go back", target=None, facts=F_SAVED)
         self.assertEqual(r["decision"], L.NEED_MORE_INFO)
+
+    def test_resolved_target_and_confirmation_slots_do_not_render_as_missing(self):
+        m = {"clean up": make_proposal(
+            verb="cleanup", safety_class="destructive", verdict="strong",
+            missing_params=["confirm", "which_work"], requires_confirmation=True)}
+        loop = self._loop(m)
+        shown = loop.handle("clean up", target="/tmp/x", facts=F_UNSHARED)
+        shown_text = json.dumps(shown["understanding"], ensure_ascii=False).lower()
+        self.assertNotIn("which protected work", shown_text)
+        replayed = loop.handle(
+            "clean up",
+            target="/tmp/x",
+            facts=F_UNSHARED,
+            confirm=True,
+            expected_confirmation_fingerprint=shown["_internal"][
+                "confirmation_fingerprint"
+            ],
+        )
+        replayed_text = json.dumps(replayed["understanding"], ensure_ascii=False).lower()
+        self.assertNotIn("say yes", replayed_text)
+        self.assertNotIn("which protected work", replayed_text)
+        self.assertNotIn("if you're happy", replayed_text)
 
     def test_none_verdict_offers_options_never_guesses(self):
         m = {"do the thing": make_proposal(verb="", verdict="none", safety_class="destructive",

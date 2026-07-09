@@ -26,7 +26,9 @@ passes with the router uninstalled because this module imports and runs without 
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util as _ilu
+import json
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -68,6 +70,42 @@ _SECONDARY_EXPLICIT_PATH = {
         {"say": "clean up an old copy", "means": "Remove an old safe copy"},
     ],
 }
+
+_TARGET_PARAMS = {"which_work", "project"}
+
+
+def _resolved_missing_params(missing: list[str], target: str | None,
+                             confirm: bool | None) -> list[str]:
+    """Remove slots already resolved by trusted loop inputs before PM rendering."""
+    return [
+        name for name in missing
+        if not (name in _TARGET_PARAMS and target)
+        # The loop's dedicated confirmation gate owns this slot; proposal rendering never should.
+        and name != "confirm"
+    ]
+
+
+def _confirmation_fingerprint(verb: str, target: str | None, consequence: dict) -> str:
+    """Bind a confirmation replay to the exact verb, target, and kernel consequence shown."""
+    payload = {
+        "verb": verb,
+        "target": consequence.get("target") or target or "",
+        "consequence": {
+            key: consequence.get(key)
+            for key in (
+                "action",
+                "destroys_unshared_work",
+                "irreversible",
+                "affects_shared_ref",
+                "requires_confirmation",
+                "risk",
+                "undo",
+                "irreversible_step",
+            )
+        },
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _import_router():
@@ -142,7 +180,8 @@ class OperatorLoop:
 
     # -- the whole turn ----------------------------------------------------------------
     def handle(self, utterance: str, *, target: str | None = None, facts: dict | None = None,
-               confirm: bool | None = None) -> dict:
+               confirm: bool | None = None,
+               expected_confirmation_fingerprint: str | None = None) -> dict:
         """Run one operator turn. `confirm` is the operator's answer to a consequence question
         (None = not yet asked/answered). `facts`/`target` let a caller (and tests) supply the
         kernel target facts deterministically; in real use the kernel probes them."""
@@ -162,7 +201,11 @@ class OperatorLoop:
             # (tool_path/why[]/safety_class/start_point) that must never be shown to the operator; it
             # lives here (and in the feedback record), and an agent serializes the PM subset via
             # pm_view() (SHOULD-FIX 8). The rendered `understanding` is the PM-facing version.
-            "_internal": {"proposal": None},
+            "_internal": {
+                "proposal": None,
+                "confirmation_fingerprint": None,
+                "confirmation_replay_valid": None,
+            },
         }
 
         proposal = self.map(utterance)
@@ -191,10 +234,13 @@ class OperatorLoop:
         verb = proposal.get("verb") or None
         entry = _catalog_entry(self.catalog, verb) if verb else None
         result["verb"] = verb
-        result["understanding"] = translators.render_proposal(proposal, entry)
 
         verdict = proposal.get("verdict")
         missing = list(proposal.get("missing_params", []) or [])
+        unresolved = _resolved_missing_params(missing, target, confirm)
+        proposal_for_render = dict(proposal)
+        proposal_for_render["missing_params"] = unresolved
+        result["understanding"] = translators.render_proposal(proposal_for_render, entry)
 
         # NOT UNDERSTOOD: no confident verb -> ask, offer options. Never guess.
         if verdict == "none" or not verb or not entry:
@@ -215,6 +261,18 @@ class OperatorLoop:
         result["consequence"] = consequence
         confirmation = translators.render_confirmation(consequence, entry)
         result["confirmation"] = confirmation
+        fingerprint = _confirmation_fingerprint(verb, target, consequence)
+        result["_internal"]["confirmation_fingerprint"] = fingerprint
+        if confirmation.get("needs_confirmation") and isinstance(
+            result.get("understanding"), dict
+        ):
+            # The exact consequence question below owns the prompt. Do not render a second generic
+            # "say yes" prompt from the proposal beside it.
+            result["understanding"] = dict(result["understanding"])
+            result["understanding"]["next"] = None
+            confidence = dict(result["understanding"].get("confidence") or {})
+            confidence["not_checked"] = None
+            result["understanding"]["confidence"] = confidence
 
         # The confirmation gate — THREE precise triggers, so a destructive consequence ALWAYS
         # confirms while a benign verb NEVER nags (deliverable: "a safe-looking verb with a
@@ -240,15 +298,28 @@ class OperatorLoop:
         # confirmation gate below handles, and (b) the target slot (`which_work`/`project`), which
         # a provided/resolved `target` satisfies (R-core's router reports it missing because it does
         # no param extraction; the loop resolves the target and passes it here).
-        _TARGET_PARAMS = {"which_work", "project"}
         info_missing = [
-            m for m in missing
+            m for m in unresolved
             if m != "confirm" and not (m in _TARGET_PARAMS and target)
         ]
         if info_missing:
             result["decision"] = NEED_MORE_INFO
             result["feedback"] = self._feedback(utterance, proposal, CHOICE_CLARIFY, "noop")
             return result
+
+        # CONFIRMATION REPLAY BINDING. A caller that supplies a fingerprint must match the exact
+        # verb/target/consequence previously shown; drift re-opens the gate and never executes.
+        if confirm is True and expected_confirmation_fingerprint is not None:
+            replay_valid = (
+                isinstance(expected_confirmation_fingerprint, str)
+                and expected_confirmation_fingerprint == fingerprint
+            )
+            result["_internal"]["confirmation_replay_valid"] = replay_valid
+            if not replay_valid:
+                result["decision"] = AWAITING_CONFIRMATION
+                result["feedback"] = self._feedback(
+                    utterance, proposal, CHOICE_CLARIFY, "noop")
+                return result
 
         # CONFIRMATION GATE.
         if must_confirm and confirm is not True:
@@ -258,6 +329,14 @@ class OperatorLoop:
 
         # EXECUTE — AWA's OWN verb, never the router. Only reached once the gate is satisfied.
         result["decision"] = EXECUTE
+        # Resolved/executed turns must not carry a stale "say yes" or missing-input prompt.
+        if isinstance(result.get("understanding"), dict):
+            result["understanding"] = dict(result["understanding"])
+            result["understanding"]["needs"] = []
+            result["understanding"]["next"] = None
+            confidence = dict(result["understanding"].get("confidence") or {})
+            confidence["not_checked"] = None
+            result["understanding"]["confidence"] = confidence
         if self.executor is None:
             # Dry-run (tests / rehearsal without real mutation): report what WOULD run.
             result["outcome"] = {"ok": None, "dry_run": True, "verb": verb, "target": target}

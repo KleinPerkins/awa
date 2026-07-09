@@ -8,6 +8,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,7 +16,7 @@ from unittest import mock
 
 from consumer import operator_loop as loop_mod
 from consumer import trial_runner as runner
-from consumer.trial_fixture import OWNER_FILE, TrialFixture
+from consumer.trial_fixture import NOTES_FILE, OWNER_FILE, FixtureError, TrialFixture
 
 from .consumer_test_support import FakeRouter, load_catalog, make_proposal
 
@@ -153,10 +154,12 @@ class TestInteractionAndRendering(unittest.TestCase):
                     utterance="clean up this old copy",
                     target="/tmp/target",
                     confirm=True,
+                    confirmation_fingerprint="abc123",
                 )
             sent = json.loads(call.call_args.kwargs["input"])
             self.assertEqual(sent["utterance"], "clean up this old copy")
             self.assertIs(sent["confirm"], True)
+            self.assertEqual(sent["confirmation_fingerprint"], "abc123")
             self.assertNotEqual(sent["utterance"], "yes")
 
     def test_renderer_uses_only_pm_view_leaves_and_suppresses_done(self):
@@ -197,6 +200,51 @@ class TestInteractionAndRendering(unittest.TestCase):
         )
         self.assertEqual(clean_banned, [])
         self.assertEqual(clean_leaks, [])
+        _, value_leaks = runner._scan_assistant_lines(
+            ["The hidden route was __private_route_91__."],
+            ["__private_route_91__"],
+        )
+        self.assertEqual(value_leaks, ["value:__private_route_91__"])
+
+    def test_scripted_request_is_actual_input_and_singleton_answer_is_resolved(self):
+        scenario = runner.SCENARIOS[4]
+        with mock.patch("sys.stdin", io.StringIO("my exact entered wording\n")):
+            actual = runner._scripted_request(
+                scenario, scenario["turns"][0], auto=False
+            )
+        self.assertEqual(actual, "my exact entered wording")
+        fixture = mock.Mock()
+        fixture.worktree = Path("/tmp/practice-safe-copy")
+        target, evidence = runner._resolve_singleton_target("that practice copy", fixture)
+        self.assertEqual(target, "/tmp/practice-safe-copy")
+        self.assertEqual(
+            evidence, "that practice copy -> the practice safe copy"
+        )
+
+    def test_warning_fidelity_includes_exact_confirmation_question(self):
+        run = runner._new_run(runner.SCENARIOS[3])
+        confirmation = {
+            "needs_confirmation": True,
+            "plain": runner.EXACT_RISK,
+            "undo": runner.EXACT_UNDO,
+            "point_of_no_return": runner.EXACT_POINT,
+            "ask": "different question",
+        }
+        payload = {
+            "pm": {"decision": "awaiting_confirmation", "confirmation": confirmation},
+            "internal": {
+                "decision": "awaiting_confirmation",
+                "leak_markers": [],
+            },
+        }
+        with mock.patch("sys.stdout", new_callable=io.StringIO):
+            runner._record_turn(run, payload)
+        self.assertFalse(run["warning_exact"])
+        confirmation["ask"] = runner.EXACT_ASK
+        run = runner._new_run(runner.SCENARIOS[3])
+        with mock.patch("sys.stdout", new_callable=io.StringIO):
+            runner._record_turn(run, payload)
+        self.assertTrue(run["warning_exact"])
 
     def test_all_applicable_checkboxes_are_prompted(self):
         expected_counts = {
@@ -229,6 +277,22 @@ class TestResultsAndExitSemantics(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             with self.assertRaises(FileExistsError):
                 runner.ResultsLog(str(path), auto=True)
+            result.close()
+
+    def test_results_retained_descriptor_rejects_path_swap_without_touching_victim(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "result.md"
+            victim = root / "victim.txt"
+            victim.write_text("untouched\n", encoding="utf-8")
+            result = runner.ResultsLog(str(path), auto=True)
+            reserved = root / "reserved-inode"
+            path.rename(reserved)
+            path.symlink_to(victim)
+            with self.assertRaises(runner.TrialFailure):
+                result.write()
+            self.assertEqual(victim.read_text(encoding="utf-8"), "untouched\n")
+            result.close()
 
     def test_human_failure_is_nonzero_and_auto_is_never_pass(self):
         self.assertEqual(runner.trial_exit_code("PASS"), 0)
@@ -239,6 +303,11 @@ class TestResultsAndExitSemantics(unittest.TestCase):
             runner._score_final(result, auto=True)
             self.assertEqual(result.status, "NOT SCORED")
             self.assertNotIn("proven", result.status.lower())
+            result.write()
+            text = result.path.read_text(encoding="utf-8")
+            self.assertIn('"human_gate_passed": false', text)
+            self.assertIn('"status": "not_scored"', text)
+            result.close()
 
     def test_interruption_restores_router_and_tears_down_fixture(self):
         with tempfile.TemporaryDirectory() as td:
@@ -254,6 +323,7 @@ class TestResultsAndExitSemantics(unittest.TestCase):
             sandbox.root = Path(td) / "sandbox"
             sandbox.state_preserved = True
             sandbox.restored = False
+            sandbox.close_if_restored.return_value = None
 
             def restore():
                 sandbox.restored = True
@@ -284,6 +354,86 @@ class TestResultsAndExitSemantics(unittest.TestCase):
             host_cls.return_value.check_after.assert_called_once()
             text = Path(args.out).read_text(encoding="utf-8")
             self.assertIn("partial findings preserved", text)
+            self.assertIn('"status": "aborted"', text)
+            self.assertIn("### Step 1 — Is everything okay?", text)
+
+    def test_results_persist_wording_every_check_answer_and_observed_question_total(self):
+        with tempfile.TemporaryDirectory() as td:
+            result = runner.ResultsLog(str(Path(td) / "human.md"), auto=False)
+            run = runner._new_run(runner.SCENARIOS[2])
+            run["actual_requests"] = ["my exact request"]
+            run["assistant_lines"] = ["Exact safe assistant wording."]
+            run["clarification_questions"] = 1
+            run["checklist"] = {
+                "plain_english": True,
+                "honest_confidence": True,
+                "understood_without_help": True,
+                "one_question": False,
+                "never_guessed": True,
+            }
+            result.runs = [run]
+            result.final_checks = {"zero_technical": True}
+            result.status = "FAIL"
+            result.write()
+            text = result.path.read_text(encoding="utf-8")
+            self.assertIn("Exact safe assistant wording.", text)
+            self.assertIn("one_question: N", text)
+            self.assertIn("zero_technical: Y", text)
+            self.assertIn(
+                "Times an unclear request cost more than one question (should be 0):** 1",
+                text,
+            )
+            result.close()
+
+    def test_worker_timeout_is_translated(self):
+        sandbox = mock.Mock()
+        sandbox.worker_env.return_value = {}
+        with mock.patch(
+            "consumer.trial_runner.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(["python"], 30),
+        ):
+            with self.assertRaisesRegex(runner.TrialFailure, "timed out"):
+                runner.WorkerClient(sandbox).turn(
+                    on=True, utterance="save my progress", target="/tmp/x"
+                )
+
+    def test_sandbox_cleanup_failure_overrides_aborted_status(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture = mock.Mock()
+            fixture.created_paths = []
+            fixture.commands = []
+            fixture.worktree = Path(td) / "worktree"
+            fixture.facts = {"exists": True}
+            fixture.create.return_value = fixture
+            fixture.teardown.return_value = True
+            sandbox = mock.Mock()
+            sandbox.root = Path(td) / "sandbox"
+            sandbox.state_preserved = True
+            sandbox.restored = True
+            sandbox.close_if_restored.return_value = "sandbox cleanup failed: injected"
+            worker = mock.Mock()
+            worker.turn.side_effect = KeyboardInterrupt
+            args = argparse.Namespace(
+                auto=True,
+                out=str(Path(td) / "cleanup-error.md"),
+                router_source=str(Path(td) / "router"),
+                governed_root=None,
+                personal_root=None,
+                awa_cli=None,
+                managed_root=None,
+            )
+            with mock.patch("consumer.trial_runner.HostRouterGuard"), mock.patch(
+                "consumer.trial_runner.TrialFixture", return_value=fixture
+            ), mock.patch(
+                "consumer.trial_runner.RouterSandbox", return_value=sandbox
+            ), mock.patch(
+                "consumer.trial_runner.WorkerClient", return_value=worker
+            ):
+                rc = runner._run_trial(args)
+            self.assertEqual(rc, 2)
+            text = Path(args.out).read_text(encoding="utf-8")
+            self.assertIn('"status": "error"', text)
+            self.assertIn("sandbox cleanup failed: injected", text)
 
 
 class TestRealFixture(unittest.TestCase):
@@ -311,6 +461,23 @@ class TestRealFixture(unittest.TestCase):
             root = Path(td)
             personal = root / "personal"
             personal.mkdir()
+            hostile_hooks = root / "hostile-hooks"
+            hostile_hooks.mkdir()
+            pre_commit = hostile_hooks / "pre-commit"
+            pre_commit.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+            pre_commit.chmod(0o755)
+            hostile_global = root / "hostile-gitconfig"
+            origin = personal / ".awa-trial-origin-bounded-fixture.git"
+            hostile_global.write_text(
+                "[core]\n\thooksPath = {0}\n"
+                "[commit]\n\tgpgSign = true\n"
+                '[url "file:///definitely-missing/"]\n\tinsteadOf = {1}\n'.format(
+                    hostile_hooks, origin
+                ),
+                encoding="utf-8",
+            )
+            env = self._env(root)
+            env["GIT_CONFIG_GLOBAL"] = str(hostile_global)
             fixture = TrialFixture(
                 awa_repo_root=REPO_ROOT,
                 governed_root=root,
@@ -318,11 +485,23 @@ class TestRealFixture(unittest.TestCase):
                 awa_cli=REPO_ROOT / "kernel" / "bin" / "dev-worktree.sh",
                 managed_root=root / "managed",
                 nonce="bounded-fixture",
-                env=self._env(root),
+                env=env,
             ).create()
             self.assertTrue(fixture.facts["has_uncommitted_changes"])
             self.assertTrue(fixture.consequence["destroys_unshared_work"])
             self.assertIn("linked-worktree: yes", fixture.status_output)
+            self.assertEqual(fixture.env["GIT_CONFIG_GLOBAL"], os.devnull)
+            self.assertEqual(fixture.env["GIT_CONFIG_VALUE_0"], os.devnull)
+            self.assertEqual(fixture.env["GIT_CONFIG_VALUE_1"], "false")
+            self.assertEqual(
+                set(fixture.directory_identities),
+                {
+                    str(fixture.origin),
+                    str(fixture.primary),
+                    str(fixture.fixture_root),
+                    str(fixture.worktree),
+                },
+            )
 
             marker = fixture.worktree / OWNER_FILE
             original = marker.read_text(encoding="utf-8")
@@ -335,6 +514,91 @@ class TestRealFixture(unittest.TestCase):
             self.assertFalse(fixture.worktree.exists())
             self.assertFalse(fixture.primary.exists())
             self.assertFalse(fixture.origin.exists())
+
+    def test_supplied_env_drives_defaults_and_command_timeout_is_bounded(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            env = self._env(root)
+            personal = root / "personal"
+            personal.mkdir()
+            fixture = TrialFixture(
+                awa_repo_root=REPO_ROOT,
+                governed_root=root,
+                personal_root=personal,
+                awa_cli=REPO_ROOT / "kernel" / "bin" / "dev-worktree.sh",
+                nonce="env-defaults",
+                env=env,
+            )
+            self.assertEqual(
+                fixture.managed_root, (root / "data" / "awa" / "trial-fixtures").resolve()
+            )
+            with mock.patch(
+                "consumer.trial_fixture.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["git"], 60),
+            ):
+                with self.assertRaisesRegex(FixtureError, "timed out"):
+                    fixture._run(["git", "--version"])
+
+    def test_notes_symlink_swap_fails_closed_and_preserves_victim(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            personal = root / "personal"
+            personal.mkdir()
+            fixture = TrialFixture(
+                awa_repo_root=REPO_ROOT,
+                governed_root=root,
+                personal_root=personal,
+                awa_cli=REPO_ROOT / "kernel" / "bin" / "dev-worktree.sh",
+                managed_root=root / "managed",
+                nonce="notes-symlink",
+                env=self._env(root),
+            ).create()
+            victim = root / "victim.txt"
+            victim.write_text("do not touch\n", encoding="utf-8")
+            notes = fixture.worktree / NOTES_FILE
+            notes.unlink()
+            notes.symlink_to(victim)
+            self.assertFalse(fixture.teardown())
+            self.assertIn("read-only command:", fixture.recovery_guidance)
+            self.assertIn(str(fixture.worktree), fixture.recovery_guidance)
+            self.assertEqual(victim.read_text(encoding="utf-8"), "do not touch\n")
+
+    def test_active_root_blocks_teardown_before_known_edit_is_restored(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            personal = root / "personal"
+            personal.mkdir()
+            fixture = TrialFixture(
+                awa_repo_root=REPO_ROOT,
+                governed_root=root,
+                personal_root=personal,
+                awa_cli=REPO_ROOT / "kernel" / "bin" / "dev-worktree.sh",
+                managed_root=root / "managed",
+                nonce="active-root",
+                env=self._env(root),
+            ).create()
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    str(REPO_ROOT / "kernel" / "lib" / "awa_roots.py"),
+                    "heartbeat",
+                    "--root",
+                    str(fixture.worktree),
+                    "--pid",
+                    str(os.getpid()),
+                ],
+                env=fixture.env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            before = (fixture.worktree / NOTES_FILE).read_text(encoding="utf-8")
+            self.assertFalse(fixture.teardown())
+            after = (fixture.worktree / NOTES_FILE).read_text(encoding="utf-8")
+            self.assertEqual(after, before, "active-root refusal must happen before teardown writes")
+            self.assertIn("active", fixture.preserved_reason)
 
 
 @unittest.skipUnless(
@@ -366,6 +630,39 @@ class TestRouterLifecycleSeam(unittest.TestCase):
             if not sandbox.restored and sandbox.state_marker.is_file():
                 sandbox.restore()
             sandbox.close_if_restored()
+
+    def test_real_post_uninstall_failure_and_interrupt_restore(self):
+        source = Path(os.environ["AWA_TRIAL_ROUTER_SOURCE"])
+        for raised in (runner.TrialFailure("post-uninstall failure"), KeyboardInterrupt()):
+            with self.subTest(raised=type(raised).__name__):
+                sandbox = runner.RouterSandbox(source)
+                observed = None
+                try:
+                    sandbox.install_and_doctor()
+                    sandbox.uninstall_keep_state()
+                    try:
+                        raise raised
+                    except (runner.TrialFailure, KeyboardInterrupt) as exc:
+                        observed = type(exc)
+                    finally:
+                        sandbox.restore()
+                    self.assertIs(observed, type(raised))
+                    self.assertTrue(sandbox.state_preserved)
+                    self.assertTrue(sandbox.restored)
+                finally:
+                    if not sandbox.restored and sandbox.state_marker.is_file():
+                        sandbox.restore()
+                    self.assertIsNone(sandbox.close_if_restored())
+
+
+class TestCIConfiguration(unittest.TestCase):
+    def test_router_seam_fails_closed_without_credentials(self):
+        workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("ROUTER_SEAM_TOKEN is required", workflow)
+        self.assertIn("exit 1", workflow)
+        self.assertNotIn("Skipping (green)", workflow)
 
 
 if __name__ == "__main__":
