@@ -6,6 +6,9 @@
 - Large AWA builds and pre-merge work: use multitask mode with parallel subagents; monitor and close subagents actively, not passively.
 - Before merge, run code-review and hardening swarms; iterate when the operator requests another pass.
 - Verify reported failures are true positives before acting or reporting; confirm built-vs-gaps against disk and gates.
+- Prefer the simplest root-bound, proof-checked AWA mechanism; reject identity or lineage designs that depend on unstable Cursor chat IDs or complex actor/session control planes.
+- Prefer the simplest root-bound, proof-checked AWA mechanism; reject identity or lineage designs that depend on unstable Cursor chat IDs or complex actor/session control planes.
+- Prefer the simplest root-bound, proof-checked AWA mechanism; reject identity or lineage designs that depend on unstable Cursor chat IDs or complex actor/session control planes.
 
 ## Learned Workspace Facts
 
