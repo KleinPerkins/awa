@@ -14,9 +14,10 @@ Headless contract tests (`engine/tests/test_mcp.py`) prove the protocol; this ru
   `env.AWA_GOVERNED_ROOT` → `~/dev` (re-run overlay install or local `install.sh --repair` with
   those env vars if missing).
 - Hook-probe UAT repo (captures `beforeMCPExecution` payloads)
+- Run these commands from the root of an AWA source checkout.
 
 ```bash
-bash ~/dev/capabilities/awa/live-verify/bootstrap-hook-probe-uat.sh ~/awa-mcp-uat
+bash live-verify/bootstrap-hook-probe-uat.sh ~/awa-mcp-uat
 rm -f "${XDG_STATE_HOME:-$HOME/.local/state}/awa/hook-probe/events.jsonl"
 ```
 
@@ -41,7 +42,7 @@ Paste into the agent chat (extends 2026-07-05 probe with mode write tools):
 ## Analyze
 
 ```bash
-python3 ~/dev/capabilities/awa/hook-probe/analyze.py
+python3 hook-probe/analyze.py
 ```
 
 **Pass criteria:**
