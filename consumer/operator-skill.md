@@ -17,7 +17,7 @@ command yourself.
 2. **map** — `OperatorLoop.map(utterance)` asks the router to PROPOSE (read-only). The router never
    executes and never authorizes.
    - If the router is not installed, `map` returns `None` and the loop DEGRADES to ask + the
-     secondary explicit path (the five plain options). Never guess a destructive action.
+     secondary explicit path (the six plain options). Never guess a destructive action.
 3. **confirm-consequence** — the confirmation is sourced from the KERNEL consequence descriptor
    `{destroys_unshared_work, irreversible, affects_shared_ref}`, computed from the LIVE target, never
    from the router and never from a static verb list. A safe-looking verb with a destructive

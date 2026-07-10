@@ -19,7 +19,7 @@ The loop is the ONLY place the pieces meet, and it enforces the constitutional s
     deliberately NOT a trigger — it is True for every write and would nag benign writes.
 
 KERNEL-FIRST / OFF-SWITCH (KI1 + CR6): the router is OPTIONAL. If it is not installed/importable,
-`map` returns nothing and the loop DEGRADES to ask + a secondary explicit path (the five plain
+`map` returns nothing and the loop DEGRADES to ask + a secondary explicit path (the six plain
 options). It never guesses, and it never auto-runs a destructive action. AWA's own `make verify`
 passes with the router uninstalled because this module imports and runs without it.
 """
