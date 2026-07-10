@@ -603,10 +603,13 @@ class TestMcpModeTools(ModesTestCase):
         self.assertEqual(modes.list_modes(self.path)["modes"], {})
 
     def test_set_invalid_returns_error_no_write(self):
-        result, out = self._call("awa_mode_set", {"rel": "proj", "mode": "bogus"})
-        self.assertTrue(result.get("isError"))
-        self.assertFalse(out.get("ok", True))
-        self.assertIn("invalid mode", out["error"])
+        resp = _drive([{
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": {"name": "awa_mode_set", "arguments": {"rel": "proj", "mode": "bogus"}},
+        }])
+        self.assertEqual(
+            resp[0]["error"], {"code": -32602, "message": "Invalid params"}
+        )
         self.assertFalse(self.path.exists())
 
     def test_broad_off_via_mcp_returns_is_error(self):

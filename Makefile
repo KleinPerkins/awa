@@ -53,9 +53,9 @@ verify-install: ## Exercise the full install lifecycle in a throwaway HOME (neve
 	  env HOME=$$tmp XDG_DATA_HOME=$$tmp/.local/share XDG_CONFIG_HOME=$$tmp/.config XDG_STATE_HOME=$$tmp/.local/state ./install.sh --doctor; \
 	  version=$$(PYTHONPATH=. python3 -c 'import engine; print(engine.__version__)'); \
 	  env HOME=$$tmp XDG_DATA_HOME=$$tmp/.local/share XDG_CONFIG_HOME=$$tmp/.config XDG_STATE_HOME=$$tmp/.local/state \
-	    python3 engine/tests/install_mcp_smoke.py \
+	    PYTHONPATH=. python3 engine/tests/install_mcp_smoke.py \
 	      $$tmp/.local/share/awa/current/bin/awa-engine.sh $$version; \
-	  echo "  installed MCP initialize/initialized/list/read OK"; \
+	  echo "  installed MCP initialize/initialized/list/read/tools.list OK"; \
 	  env HOME=$$tmp XDG_DATA_HOME=$$tmp/.local/share XDG_CONFIG_HOME=$$tmp/.config XDG_STATE_HOME=$$tmp/.local/state ./install.sh --uninstall >/dev/null; \
 	  trap - EXIT; \
 	  rm -rf $$tmp; \
