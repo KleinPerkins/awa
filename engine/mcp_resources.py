@@ -49,9 +49,10 @@ def render_guidance(tools: Mapping[str, Mapping[str, Any]]) -> str:
         "## CLI boundary",
         (
             "`dev-worktree.sh`: `status` reports current-repo classification/root/worktree state; "
-            "`ensure` creates/selects a Safe Workspace; `doctor` checks policy/worktree health; "
-            "`clean` performs bundle-or-refuse removal. Use `awa-engine` for adopt, attest, "
-            "apply-back, publish, retire, or recovery. MCP performs none of these actions."
+            "`list` lists git worktrees for the current repo; `ensure` creates/selects a Safe "
+            "Workspace; `doctor` checks policy/worktree health; `clean` performs bundle-or-refuse "
+            "removal. Use `awa-engine` for adopt, attest, apply-back, publish, retire, or "
+            "recovery. MCP performs none of these actions."
         ),
         "",
         "## Safety interpretation",

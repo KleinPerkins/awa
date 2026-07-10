@@ -83,6 +83,7 @@ class TestMcpContract(EngineTestCase):
             "merges inline policy and referenced-file modes",
             "`default_mode` applies only at the final eligibility step",
             "sync can seed `off` only for a missing or invalid file default",
+            "`list` lists git worktrees",
         ):
             self.assertIn(phrase, instructions)
 
@@ -329,6 +330,45 @@ class TestMcpContract(EngineTestCase):
         self.assertTrue(payload["found"])
         self.assertTrue(payload["valid"])
 
+    def test_tools_call_rejects_missing_required_arguments(self):
+        resp = _drive([{
+            "jsonrpc": "2.0",
+            "id": 35,
+            "method": "tools/call",
+            "params": {"name": "awa_lease_read", "arguments": {}},
+        }])
+        self.assertEqual(
+            resp[0]["error"], {"code": -32602, "message": "Invalid params"}
+        )
+
+    def test_tools_call_rejects_invalid_enum_arguments(self):
+        resp = _drive([{
+            "jsonrpc": "2.0",
+            "id": 36,
+            "method": "tools/call",
+            "params": {
+                "name": "awa_mode_set",
+                "arguments": {"rel": "personal/repo", "mode": "maybe"},
+            },
+        }])
+        self.assertEqual(
+            resp[0]["error"], {"code": -32602, "message": "Invalid params"}
+        )
+
+    def test_status_tool_failure_sets_is_error_without_leaking_exception(self):
+        with mock.patch.object(mcp_server.state_mod, "State", side_effect=OSError("/secret/path")):
+            resp = _drive([{
+                "jsonrpc": "2.0",
+                "id": 37,
+                "method": "tools/call",
+                "params": {"name": "awa_status", "arguments": {}},
+            }])
+        result = resp[0]["result"]
+        self.assertTrue(result["isError"])
+        payload = json.loads(result["content"][0]["text"])
+        self.assertEqual(payload, {"ok": False, "error": "Engine status unavailable"})
+        self.assertNotIn("/secret/path", json.dumps(resp[0]))
+
     def test_unknown_tool_errors(self):
         resp = _drive([{"jsonrpc": "2.0", "id": 5, "method": "tools/call",
                         "params": {"name": "secret-tool-name", "arguments": {}}}])
@@ -488,6 +528,7 @@ class TestMcpContract(EngineTestCase):
                 })
                 self.assertEqual(resp[-1]["error"]["code"], -32002)
                 self.assertEqual(resp[-1]["error"]["message"], "Resource not found")
+                self.assertEqual(resp[-1]["error"]["data"], {"uri": uri})
 
     def test_invalid_requests_and_params_use_standard_sanitized_errors(self):
         invalid = mcp_server.handle([])
@@ -631,6 +672,17 @@ class TestMcpContract(EngineTestCase):
         responses = [json.loads(line) for line in stdout.getvalue().splitlines()]
         self.assertEqual(responses[0]["error"]["code"], -32700)
         self.assertEqual(responses[1], {"jsonrpc": "2.0", "id": 30, "result": {}})
+
+
+    def test_operator_guide_word_limit_is_enforced(self):
+        inflated = {
+            "awa_status": {
+                "description": " ".join(["routing"] * 600),
+                "inputSchema": {"type": "object", "properties": {}},
+            }
+        }
+        with self.assertRaises(ValueError):
+            mcp_resources.render_operator_guide(inflated)
 
 
 if __name__ == "__main__":

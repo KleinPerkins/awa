@@ -35,6 +35,7 @@ from . import (
     lease as lease_mod,
     mcp_resources,
     modes as modes_mod,
+    redact,
     state as state_mod,
 )
 
@@ -56,13 +57,18 @@ def _policy_path() -> str:
 
 
 # ---- tool implementations (all read-only) -----------------------------------
+def _tool_failure(message: str) -> dict:
+    """Return a tool-originated error payload (redacted; sets MCP isError)."""
+    return {"ok": False, "error": redact.redact(message)}
+
+
 def _tool_status(args: dict) -> dict:
     try:
         with state_mod.State(assert_local=False) as st:
             return {"wal": st.wal_mode(), "active_leases": st.list_leases("active"),
                     "detections": st.detections(limit=10)}
-    except Exception as exc:  # noqa: BLE001
-        return {"error": str(exc)}
+    except Exception:  # noqa: BLE001
+        return _tool_failure("Engine status unavailable")
 
 
 def _tool_lease_read(args: dict) -> dict:
@@ -98,42 +104,42 @@ def _tool_mode_list(args: dict) -> dict:
     try:
         return modes_mod.list_modes(_resolve_modes_path())
     except modes_mod.ModesError as exc:
-        return {"ok": False, "error": str(exc)}
+        return _tool_failure(str(exc))
 
 
 def _tool_mode_get(args: dict) -> dict:
     try:
         return modes_mod.get_mode(_resolve_modes_path(), args.get("rel", ""))
     except modes_mod.ModesError as exc:
-        return {"ok": False, "error": str(exc)}
+        return _tool_failure(str(exc))
 
 
 def _tool_mode_set(args: dict) -> dict:
     try:
         return modes_mod.set_mode(_resolve_modes_path(), args.get("rel", ""), args.get("mode"))
     except modes_mod.ModesError as exc:
-        return {"ok": False, "error": str(exc)}
+        return _tool_failure(str(exc))
 
 
 def _tool_mode_remove(args: dict) -> dict:
     try:
         return modes_mod.remove_mode(_resolve_modes_path(), args.get("rel", ""))
     except modes_mod.ModesError as exc:
-        return {"ok": False, "error": str(exc)}
+        return _tool_failure(str(exc))
 
 
 def _tool_mode_repair(args: dict) -> dict:
     try:
         return modes_mod.repair(_resolve_modes_path())
     except modes_mod.ModesError as exc:
-        return {"ok": False, "error": str(exc)}
+        return _tool_failure(str(exc))
 
 
 def _tool_mode_sync(args: dict) -> dict:
     try:
         return modes_mod.sync(_resolve_modes_path(), default_mode=args.get("default_mode"))
     except modes_mod.ModesError as exc:
-        return {"ok": False, "error": str(exc)}
+        return _tool_failure(str(exc))
 
 
 _TOOLS: dict[str, dict[str, Any]] = {
@@ -313,8 +319,45 @@ def _result(rid: Any, result: dict) -> dict:
     return {"jsonrpc": "2.0", "id": rid, "result": result}
 
 
-def _error(rid: Any, code: int, message: str) -> dict:
-    return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
+def _error(rid: Any, code: int, message: str, *, data: dict | None = None) -> dict:
+    err: dict[str, Any] = {"code": code, "message": message}
+    if data is not None:
+        err["data"] = data
+    return {"jsonrpc": "2.0", "id": rid, "error": err}
+
+
+def _tool_result_is_error(out: Any) -> bool:
+    if not isinstance(out, dict):
+        return False
+    if out.get("ok") is False:
+        return True
+    return "error" in out and out.get("ok") is not True
+
+
+def _validate_tool_arguments(schema: dict, arguments: dict) -> str | None:
+    """Validate tools/call arguments against the advertised inputSchema."""
+    if schema.get("type", "object") != "object":
+        return "invalid tool schema"
+    props = schema.get("properties", {})
+    if not isinstance(props, dict):
+        return "invalid tool schema"
+    required = schema.get("required", [])
+    if not isinstance(required, list):
+        return "invalid tool schema"
+    for key in required:
+        if key not in arguments:
+            return f"missing required argument: {key}"
+    for key, value in arguments.items():
+        prop = props.get(key)
+        if not isinstance(prop, dict):
+            continue
+        expected_type = prop.get("type")
+        if expected_type == "string" and not isinstance(value, str):
+            return f"argument {key} must be a string"
+        enum_vals = prop.get("enum")
+        if isinstance(enum_vals, list) and value not in enum_vals:
+            return f"argument {key} has invalid value"
+    return None
 
 
 def _params(msg: dict) -> dict | None:
@@ -470,12 +513,15 @@ def handle(msg: Any) -> dict | None:
         spec = _TOOLS.get(name)
         if not spec:
             return _error(rid, -32602, "Invalid tool name")
+        schema_err = _validate_tool_arguments(spec["inputSchema"], arguments)
+        if schema_err is not None:
+            return _error(rid, -32602, "Invalid params")
         fn: Callable[[dict], dict] = spec["fn"]
         try:
             out = fn(arguments)
         except Exception:  # noqa: BLE001
             return _error(rid, -32603, "Tool execution failed")
-        is_error = isinstance(out, dict) and out.get("ok") is False
+        is_error = _tool_result_is_error(out)
         try:
             text = json.dumps(out, allow_nan=False)
         except (TypeError, ValueError, RecursionError):
@@ -492,7 +538,7 @@ def handle(msg: Any) -> dict | None:
             return _error(rid, -32602, "Invalid params")
         content = mcp_resources.read_resource(uri, _TOOLS)
         if content is None:
-            return _error(rid, -32002, "Resource not found")
+            return _error(rid, -32002, "Resource not found", data={"uri": uri})
         return _result(rid, {"contents": [content]})
     if method == "ping":
         return _result(rid, {})
