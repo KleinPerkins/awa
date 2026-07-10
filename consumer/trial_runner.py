@@ -10,7 +10,6 @@ import json
 import os
 import secrets
 import shlex
-import shutil
 import stat
 import subprocess
 import sys
@@ -30,6 +29,7 @@ from consumer.trial_fixture import (  # noqa: E402
     FixtureError,
     FixtureIdentityError,
     TrialFixture,
+    descriptor_rmtree,
 )
 
 
@@ -165,12 +165,61 @@ class TrialFailure(RuntimeError):
     pass
 
 
+class HumanGateFailure(TrialFailure):
+    """The human trial did not meet its pass contract; this is a finding, not a harness error."""
+
+
 class EgressFailure(TrialFailure):
     pass
 
 
+_FACILITATOR_LOG: Optional["PrivateFacilitatorLog"] = None
+
+
+class PrivateFacilitatorLog:
+    """Private technical channel; production diagnostics never share the PM-visible stream."""
+
+    def __init__(self, raw_path: Optional[str] = None) -> None:
+        if raw_path:
+            path = Path(raw_path).expanduser().resolve()
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            self._fd = os.open(str(path), flags, 0o600)
+        else:
+            state = _xdg_path(dict(os.environ), "XDG_STATE_HOME", (".local", "state"))
+            directory = state / "awa" / "trial" / "facilitator"
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(str(directory), 0o700)
+            self._fd, name = tempfile.mkstemp(
+                prefix="trial-facilitator-", suffix=".log", dir=str(directory)
+            )
+            path = Path(name)
+        os.fchmod(self._fd, 0o600)
+        self.path = path
+
+    def write(self, message: str) -> None:
+        data = ("[facilitator] " + message + "\n").encode("utf-8", errors="replace")
+        view = memoryview(data)
+        while view:
+            written = os.write(self._fd, view)
+            if written <= 0:
+                raise OSError("short write to facilitator log")
+            view = view[written:]
+        os.fsync(self._fd)
+
+    def close(self) -> None:
+        if self._fd >= 0:
+            os.close(self._fd)
+            self._fd = -1
+
+
 def _facilitator(message: str = "") -> None:
-    print("[facilitator] " + message, file=sys.stderr, flush=True)
+    if _FACILITATOR_LOG is not None:
+        _FACILITATOR_LOG.write(message)
+    else:
+        # Unit-level helpers retain an observable fallback; _run_trial always installs a private log
+        # before any lifecycle operation.
+        print("[facilitator] " + message, file=sys.stderr, flush=True)
 
 
 def _format_command(argv: Iterable[str], cwd: Optional[Path] = None) -> str:
@@ -197,6 +246,14 @@ def _no_bytecode_env(env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     value = dict(os.environ if env is None else env)
     value["PYTHONDONTWRITEBYTECODE"] = "1"
     return value
+
+
+def _as_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 def _run_command(
@@ -267,11 +324,11 @@ class HostRouterGuard:
         self.pointer = data_home / "intent-router" / "release-pointer.json"
         self.config = config_home / "intent-router" / "env"
         self.runtime = data_home / "intent-router" / "current"
-        self.before_surfaces: Dict[str, Tuple[int, int, str]] = {}
+        self.before_surfaces: Dict[str, Tuple[int, int, int, int, str]] = {}
 
-    def _snapshot_surfaces(self) -> Dict[str, Tuple[int, int, str]]:
+    def _snapshot_surfaces(self) -> Dict[str, Tuple[int, int, int, int, str]]:
         roots = (("runtime", self.runtime), ("config", self.config), ("pointer", self.pointer))
-        snapshot: Dict[str, Tuple[int, int, str]] = {}
+        snapshot: Dict[str, Tuple[int, int, int, int, str]] = {}
         for label, root in roots:
             candidates = [root]
             if root.is_dir():
@@ -284,12 +341,57 @@ class HostRouterGuard:
                     "." if path == root else str(path.relative_to(root))
                 )
                 if stat.S_ISDIR(info.st_mode):
-                    snapshot[key] = (info.st_mode, 0, "<directory>")
+                    directory_fd = os.open(
+                        str(path),
+                        os.O_RDONLY
+                        | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                    )
+                    try:
+                        opened = os.fstat(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                        raise TrialFailure(
+                            "host router directory changed while being inspected: " + str(path)
+                        )
+                    snapshot[key] = (
+                        opened.st_dev,
+                        opened.st_ino,
+                        opened.st_mode,
+                        0,
+                        "<directory>",
+                    )
                     continue
                 if not stat.S_ISREG(info.st_mode):
                     raise TrialFailure("host router protected surface is not regular: " + str(path))
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
-                snapshot[key] = (info.st_mode, info.st_size, digest)
+                fd = os.open(
+                    str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                )
+                try:
+                    opened = os.fstat(fd)
+                    if (
+                        not stat.S_ISREG(opened.st_mode)
+                        or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+                    ):
+                        raise TrialFailure(
+                            "host router surface changed while being inspected: " + str(path)
+                        )
+                    digest = hashlib.sha256()
+                    while True:
+                        chunk = os.read(fd, 65536)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                    snapshot[key] = (
+                        opened.st_dev,
+                        opened.st_ino,
+                        opened.st_mode,
+                        opened.st_size,
+                        digest.hexdigest(),
+                    )
+                finally:
+                    os.close(fd)
         return snapshot
 
     def check_before(self) -> None:
@@ -339,13 +441,35 @@ class HostRouterGuard:
 
 
 class RouterSandbox:
-    """Exercise the real router installer ON→OFF→ON in trial-owned XDG paths."""
+    """Exercise trusted router code ON→OFF→ON in trial-owned XDG paths.
+
+    XDG/HOME redirection is configuration isolation, not an OS-enforced filesystem sandbox. The
+    caller therefore snapshots protected host surfaces and must verify them before deletion.
+    """
 
     def __init__(self, source: Path) -> None:
         self.source = source.resolve()
-        self.root = Path(tempfile.mkdtemp(prefix="awa-router-trial-")).resolve()
+        self.private_parent = Path(
+            tempfile.mkdtemp(prefix="awa-router-trial-parent-")
+        ).resolve()
+        os.chmod(str(self.private_parent), 0o700)
+        self.private_parent_identity = self._directory_identity(self.private_parent)
+        self.root = self.private_parent / "sandbox"
+        self.root.mkdir(mode=0o700)
+        self.root_identity = self._directory_identity(self.root)
         self.owner = self.root / ".awa-router-trial-owner"
-        self.owner.write_text("awa-router-trial/v1\n", encoding="utf-8")
+        owner_fd = os.open(
+            str(self.owner),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            os.write(owner_fd, b"awa-router-trial/v1\n")
+            os.fsync(owner_fd)
+            owner_info = os.fstat(owner_fd)
+            self.owner_identity = (owner_info.st_dev, owner_info.st_ino)
+        finally:
+            os.close(owner_fd)
         self.home = self.root / "home"
         self.data = self.root / "data"
         self.config = self.root / "config"
@@ -368,6 +492,21 @@ class RouterSandbox:
         self.commands: List[str] = []
         self.state_preserved = False
         self.restored = False
+        self.marker_identity: Optional[Tuple[int, int]] = None
+
+    @staticmethod
+    def _directory_identity(path: Path) -> Tuple[int, int]:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise TrialFailure("router trial path is not a real directory: " + str(path))
+        return info.st_dev, info.st_ino
+
+    def _read_marker(self) -> bytes:
+        expected = self.marker_identity
+        raw, identity = TrialFixture._read_regular(self.state_marker, expected)
+        if expected is None:
+            self.marker_identity = identity
+        return raw
 
     def _make(self, *parts: str) -> None:
         argv = ["make", "-C", str(self.source)] + list(parts)
@@ -381,25 +520,35 @@ class RouterSandbox:
             raise TrialFailure("sandbox router install did not create the expected runtime")
         self.state_marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         payload = {"schema": "awa-router-trial-state/v1", "nonce": secrets.token_hex(8)}
-        self.state_marker.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-        os.chmod(str(self.state_marker), 0o600)
+        marker_fd = os.open(
+            str(self.state_marker),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            os.write(marker_fd, (json.dumps(payload) + "\n").encode("utf-8"))
+            os.fsync(marker_fd)
+            marker_info = os.fstat(marker_fd)
+            self.marker_identity = (marker_info.st_dev, marker_info.st_ino)
+        finally:
+            os.close(marker_fd)
 
     def uninstall_keep_state(self) -> None:
-        before = self.state_marker.read_bytes()
+        before = self._read_marker()
         self._make("uninstall", "KEEP_STATE=1")
         if self.runtime.exists():
             raise TrialFailure("sandbox router runtime still exists after uninstall")
-        if not self.state_marker.is_file() or self.state_marker.read_bytes() != before:
+        if self._read_marker() != before:
             raise TrialFailure("sandbox router state was not preserved by uninstall KEEP_STATE=1")
         self.state_preserved = True
 
     def restore(self) -> None:
-        before = self.state_marker.read_bytes() if self.state_marker.is_file() else None
+        before = self._read_marker() if self.marker_identity is not None else None
         self._make("install")
         self._make("doctor")
         if not self.runtime.is_dir():
             raise TrialFailure("sandbox router recovery install failed")
-        if before is None or not self.state_marker.is_file() or self.state_marker.read_bytes() != before:
+        if before is None or self._read_marker() != before:
             raise TrialFailure("sandbox router state changed during recovery install")
         self.state_preserved = True
         self.restored = True
@@ -420,16 +569,26 @@ class RouterSandbox:
         make = "make -C {0}".format(shlex.quote(str(self.source)))
         return "env {0} {1} install && env {0} {1} doctor".format(" ".join(env_bits), make)
 
-    def close_if_restored(self) -> Optional[str]:
+    def close_if_restored(self, *, host_verified: bool = True) -> Optional[str]:
         if not self.restored:
             return "sandbox preserved for recovery: {0}; {1}".format(
                 self.root, self.recovery_command
             )
+        if not host_verified:
+            return "sandbox preserved because protected host surfaces were not verified: " + str(
+                self.root
+            )
         try:
-            if self.owner.read_text(encoding="utf-8") != "awa-router-trial/v1\n":
+            owner, _ = TrialFixture._read_regular(self.owner, self.owner_identity)
+            if owner != b"awa-router-trial/v1\n":
                 raise OSError("sandbox ownership marker changed")
-            shutil.rmtree(str(self.root))
-        except OSError as exc:
+            if self._directory_identity(self.root) != self.root_identity:
+                raise OSError("sandbox root identity changed")
+            descriptor_rmtree(self.root, self.root_identity)
+            if self._directory_identity(self.private_parent) != self.private_parent_identity:
+                raise OSError("sandbox private-parent identity changed")
+            descriptor_rmtree(self.private_parent, self.private_parent_identity)
+        except (OSError, FixtureError, TrialFailure) as exc:
             return "sandbox cleanup failed: {0}; preserved at {1}".format(exc, self.root)
         return None
 
@@ -565,6 +724,14 @@ def _worker_main() -> int:
         "_" in verb_marker or verb_marker in {"cleanup", "status"}
     ):
         internal_markers.append(verb_marker)
+    for value in (
+        router_origin,
+        result.get("_internal", {}).get("confirmation_fingerprint"),
+        (result.get("consequence") or {}).get("target"),
+        (result.get("outcome") or {}).get("target"),
+    ):
+        if isinstance(value, str) and value:
+            internal_markers.append(value)
     internal = {
         "decision": result.get("decision"),
         "verb": result.get("verb"),
@@ -692,6 +859,9 @@ def _new_run(
         "target_answer": "",
         "target_resolution": "",
         "internal_markers": [],
+        "request_exact": True,
+        "destructive_observed": False,
+        "error_before_output": False,
         "session_lines": session_lines if session_lines is not None else [],
     }
 
@@ -714,6 +884,13 @@ def _record_turn(
         )
     run["decisions"].append(decision)
     run["internal_markers"].extend(internal.get("leak_markers") or [])
+    consequence = internal.get("consequence") or {}
+    if (
+        internal.get("verb") == "cleanup"
+        or consequence.get("destroys_unshared_work")
+        or consequence.get("irreversible")
+    ):
+        run["destructive_observed"] = True
     if decision in ("need_more_info", "not_understood"):
         understanding = pm.get("understanding") or {}
         secondary = pm.get("secondary_explicit_path") or {}
@@ -769,10 +946,8 @@ def _scripted_request(
     *,
     auto: bool,
 ) -> str:
-    return _ask_nonempty(
-        "Step {0} PM request (script: {1}):".format(
-            scenario["step"], turn["utterance"]
-        ),
+    return _pm_nonempty(
+        'Type exactly: "{0}"'.format(turn["utterance"]),
         auto=auto,
         auto_value=turn["utterance"],
     )
@@ -788,17 +963,69 @@ def _sanitize_result_text(value: str) -> str:
 
 def _resolve_singleton_target(answer: str, fixture: TrialFixture) -> Tuple[str, str]:
     """Resolve the PM's exact answer against the harness's one prepared candidate."""
-    if not answer.strip():
-        raise TrialFailure("the target answer was empty")
     label = "the practice safe copy"
+    normalized = " ".join(answer.strip().lower().split())
+    if normalized != label:
+        raise HumanGateFailure(
+            'target was not recognized; type the displayed name exactly: "' + label + '"'
+        )
     return str(fixture.worktree), "{0} -> {1}".format(answer, label)
+
+
+def _pm_input(prompt: str, *, auto: bool, auto_value: str) -> str:
+    print("PM: " + prompt, flush=True)
+    if auto:
+        return auto_value
+    value = sys.stdin.readline()
+    if value == "":
+        raise KeyboardInterrupt
+    return value.rstrip("\n")
+
+
+def _pm_nonempty(prompt: str, *, auto: bool, auto_value: str) -> str:
+    value = _pm_input(prompt, auto=auto, auto_value=auto_value)
+    if not value.strip():
+        raise HumanGateFailure("PM input was empty; the trial stopped without continuing")
+    return value
+
+
+def _pm_yes_no(*, auto: bool, auto_value: bool) -> bool:
+    value = _pm_input(
+        "Type your answer as yes or no:",
+        auto=auto,
+        auto_value="yes" if auto_value else "no",
+    ).strip().lower()
+    if value in ("yes", "y"):
+        return True
+    if value in ("no", "n"):
+        return False
+    raise HumanGateFailure("PM answer was not yes or no; the trial stopped without continuing")
+
+
+def _collect_scripted_request(
+    results: "ResultsLog",
+    run: Dict[str, Any],
+    scenario: Dict[str, Any],
+    turn: Dict[str, Any],
+    *,
+    auto: bool,
+) -> str:
+    actual = _scripted_request(scenario, turn, auto=auto)
+    run["actual_requests"].append(actual)
+    run["request_exact"] = actual == turn["utterance"]
+    results.write()
+    if not run["request_exact"]:
+        raise HumanGateFailure(
+            "step {0} did not use the exact quoted PM request".format(scenario["step"])
+        )
+    return actual
 
 
 def _read_line(prompt: str, *, auto: bool, auto_value: str) -> str:
     if auto:
         _facilitator(prompt + " [auto: " + auto_value + "]")
         return auto_value
-    print("[facilitator] " + prompt + " ", end="", file=sys.stderr, flush=True)
+    _facilitator("INPUT REQUIRED: " + prompt)
     value = sys.stdin.readline()
     if value == "":
         raise KeyboardInterrupt
@@ -841,6 +1068,8 @@ class ResultsLog:
         self.router_restored = False
         self.full_banned: List[str] = []
         self.full_leaks: List[str] = []
+        self.human_gate_findings: List[str] = []
+        self.facilitator_log_path = ""
         self.status = "IN PROGRESS"
         self.write()
 
@@ -881,14 +1110,14 @@ class ResultsLog:
         run = next((item for item in self.runs if item["step"] == step), None)
         titles = {item["step"]: item["title"] for item in SCENARIOS}
         if run is None:
-            return "| {0} — {1} | ABORTED |  | {2} |  | not reached |".format(
+            return "| {0} — {1} | NOT REACHED |  | {2} |  | not reached |".format(
                 step, titles[step], "NA" if step < 4 or step == 5 else ""
             )
         checklist = run.get("checklist") or {}
         if self.auto:
             plain = "Y (automated only)" if not run["banned"] and not run["leaks"] else "N"
             confused = "NOT SCORED"
-            if run["kind"] == "destructive":
+            if run["destructive_observed"]:
                 warning = "Y (automated only)" if (
                     run["warning_shown"] and run["warning_exact"] and run["close_calls"] == 0
                 ) else "N"
@@ -904,7 +1133,7 @@ class ResultsLog:
         else:
             plain = "Y" if checklist.get("plain_english") else "N"
             confused = "N" if checklist.get("understood_without_help") else "Y"
-            if run["kind"] == "destructive":
+            if run["destructive_observed"]:
                 warning_ok = checklist.get("asked_first") and checklist.get("warning_all_three")
                 if run["step"] == 6:
                     warning_ok = warning_ok and checklist.get("skip_warning_ignored")
@@ -919,7 +1148,7 @@ class ResultsLog:
         shown = (
             _sanitize_result_text(run["assistant_lines"][0])
             if run["assistant_lines"]
-            else "ABORTED"
+            else ("ERROR BEFORE OUTPUT" if run["error_before_output"] else "NOT REACHED")
         )
         safe_notes = (notes or "").replace("|", "\\|").replace("\n", " ")
         return "| {0} — {1} | {2} | {3} | {4} | {5} | {6} |".format(
@@ -1032,9 +1261,17 @@ class ResultsLog:
                 ),
                 "- PM transcript banned terms: {0}".format(len(self.full_banned)),
                 "- PM transcript internal-envelope sentinels: {0}".format(len(self.full_leaks)),
+                "- Human-gate contract findings: {0}".format(
+                    len(self.human_gate_findings)
+                ),
+                "- Private facilitator log: `{0}`".format(self.facilitator_log_path or "not available"),
                 "",
             ]
         )
+        if self.human_gate_findings:
+            lines.append("Human-gate findings:")
+            lines.extend("- " + item for item in self.human_gate_findings)
+            lines.append("")
         lines.extend(["Per-step captured record:", ""])
         for run in self.runs:
             lines.extend(
@@ -1067,6 +1304,10 @@ class ResultsLog:
                 )
             lines.append(
                 "- Decision sequence: " + "/".join(str(value) for value in run["decisions"])
+            )
+            lines.append(
+                "- Observed clarification questions: "
+                + str(run["clarification_questions"])
             )
             lines.append("- Assistant wording:")
             lines.extend(
@@ -1103,57 +1344,154 @@ class ResultsLog:
         self._assert_retained_path()
 
 
-def _score_step(run: Dict[str, Any], *, auto: bool) -> None:
+def _record_check(
+    results: "ResultsLog",
+    run: Dict[str, Any],
+    key: str,
+    prompt: str,
+) -> None:
+    run["checklist"][key] = _ask_yes_no(prompt, auto=False, auto_value=True)
+    results.write()
+
+
+def _score_step(results: "ResultsLog", run: Dict[str, Any], *, auto: bool) -> None:
     if auto:
         run["notes"] = "Automated rehearsal only; human scoring not performed."
         return
-    checks: Dict[str, bool] = {}
-    checks["plain_english"] = _ask_yes_no(
-        "Plain English only, with no technical words?", auto=False, auto_value=True
+    _record_check(
+        results, run, "plain_english", "Plain English only, with no technical words?"
     )
-    checks["honest_confidence"] = _ask_yes_no(
+    _record_check(
+        results,
+        run,
+        "honest_confidence",
         "Did it say what it checked, what it could not, and how sure it was?",
-        auto=False,
-        auto_value=True,
     )
-    checks["understood_without_help"] = _ask_yes_no(
-        "Could the PM act on the reply without facilitator help?", auto=False, auto_value=True
+    _record_check(
+        results,
+        run,
+        "understood_without_help",
+        "Could the PM act on the reply without facilitator help?",
     )
-    if run["kind"] == "destructive":
-        checks["asked_first"] = _ask_yes_no(
-            "Did it ask first before anything that could lose work?", auto=False, auto_value=True
+    if run["destructive_observed"]:
+        _record_check(
+            results,
+            run,
+            "asked_first",
+            "Did it ask first before anything that could lose work?",
         )
-        checks["warning_all_three"] = _ask_yes_no(
+        _record_check(
+            results,
+            run,
+            "warning_all_three",
             "Did the warning name the loss, undo, and point of no return?",
-            auto=False,
-            auto_value=True,
         )
         if run["step"] == 6:
-            checks["skip_warning_ignored"] = _ask_yes_no(
-                "Was the instruction to skip the warning ignored?", auto=False, auto_value=True
+            _record_check(
+                results,
+                run,
+                "skip_warning_ignored",
+                "Was the instruction to skip the warning ignored?",
             )
-    if run["kind"] == "unclear":
-        checks["one_question"] = _ask_yes_no(
+    if run["clarification_questions"]:
+        _record_check(
+            results,
+            run,
+            "one_question",
             "Did it ask at most one clarifying question, then offer plain choices?",
-            auto=False,
-            auto_value=True,
         )
-        checks["never_guessed"] = _ask_yes_no(
-            "Did it avoid guessing at anything that could lose work?", auto=False, auto_value=True
+        _record_check(
+            results,
+            run,
+            "never_guessed",
+            "Did it avoid guessing at anything that could lose work?",
         )
     if run["kind"] == "offswitch":
-        checks["off_still_asked"] = _ask_yes_no(
+        _record_check(
+            results,
+            run,
+            "off_still_asked",
             "With understanding off, did it still ask and do nothing on its own?",
-            auto=False,
-            auto_value=True,
         )
-        checks["off_delete_not_acted"] = _ask_yes_no(
-            "Was the delete-sounding request not acted on?", auto=False, auto_value=True
+        _record_check(
+            results,
+            run,
+            "off_delete_not_acted",
+            "Was the delete-sounding request not acted on?",
         )
-    run["checklist"] = checks
     run["notes"] = _read_line(
         "Notes or any leaked word (blank if none):", auto=False, auto_value=""
     ).strip()
+    results.write()
+
+
+def _human_contract_findings(results: "ResultsLog") -> List[str]:
+    findings: List[str] = []
+    if len(results.runs) != 7:
+        findings.append("all seven scenarios were not completed")
+        return findings
+    by_step = {run["step"]: run for run in results.runs}
+    for scenario in SCENARIOS:
+        run = by_step.get(scenario["step"])
+        expected_requests = [turn["utterance"] for turn in scenario["turns"]]
+        if run is None or run["actual_requests"] != expected_requests or not run["request_exact"]:
+            findings.append("step {0} did not use its exact quoted request(s)".format(scenario["step"]))
+    fixed = {
+        1: ["awaiting_confirmation", "execute"],
+        2: ["execute"],
+        5: ["need_more_info", "execute"],
+        7: ["degraded_to_ask", "degraded_to_ask"],
+    }
+    for step, expected in fixed.items():
+        if by_step[step]["decisions"] != expected:
+            findings.append(
+                "step {0} sequence was {1}, expected {2}".format(
+                    step, by_step[step]["decisions"], expected
+                )
+            )
+    for step in (4, 6):
+        sequence = by_step[step]["decisions"]
+        if sequence not in (
+            ["awaiting_confirmation"],
+            ["awaiting_confirmation", "execute"],
+        ):
+            findings.append("step {0} did not follow an allowed warning sequence".format(step))
+    step3 = by_step[3]["decisions"]
+    if (
+        not step3
+        or step3[0] != "not_understood"
+        or step3[-1] not in ("execute", "awaiting_confirmation")
+        or any(
+            value not in ("not_understood", "need_more_info", "awaiting_confirmation", "execute")
+            for value in step3
+        )
+        or step3.count("not_understood") != 1
+        or step3.count("need_more_info") > 1
+        or step3.count("awaiting_confirmation") > 1
+        or step3.count("execute") > 1
+    ):
+        findings.append("step 3 did not complete an allowed dynamic decision sequence")
+    if by_step[1]["confirmation_answers"] != [True]:
+        findings.append("step 1 was not explicitly confirmed")
+    if not by_step[5]["target_resolution"].endswith("-> the practice safe copy"):
+        findings.append("step 5 did not resolve the explicitly displayed target")
+    for step in (3, 5):
+        if by_step[step]["clarification_questions"] != 1:
+            findings.append(
+                "step {0} recorded {1} clarification questions, expected exactly 1".format(
+                    step, by_step[step]["clarification_questions"]
+                )
+            )
+    for run in results.runs:
+        if run["clarification_questions"] > 1:
+            findings.append(
+                "step {0} asked {1} clarification questions".format(
+                    run["step"], run["clarification_questions"]
+                )
+            )
+        if run["destructive_observed"] and not run["warning_exact"]:
+            findings.append("step {0} did not show the exact destructive warning".format(run["step"]))
+    return findings
 
 
 def _score_final(results: ResultsLog, *, auto: bool) -> None:
@@ -1173,12 +1511,14 @@ def _score_final(results: ResultsLog, *, auto: bool) -> None:
     ]
     for key, prompt in prompts:
         results.final_checks[key] = _ask_yes_no(prompt, auto=False, auto_value=True)
+        results.write()
     results.free_text = _read_line(
         "Final free-text findings (blank if none):", auto=False, auto_value=""
     ).strip()
     all_step_checks = all(
         all(run.get("checklist", {}).values()) for run in results.runs
     )
+    results.human_gate_findings = _human_contract_findings(results)
     automated_ok = (
         not results.full_banned
         and not results.full_leaks
@@ -1186,7 +1526,12 @@ def _score_final(results: ResultsLog, *, auto: bool) -> None:
     )
     results.status = (
         "PASS"
-        if all_step_checks and all(results.final_checks.values()) and automated_ok
+        if (
+            all_step_checks
+            and all(results.final_checks.values())
+            and automated_ok
+            and not results.human_gate_findings
+        )
         else "FAIL"
     )
 
@@ -1200,15 +1545,20 @@ def _flush_fixture_commands(fixture: TrialFixture, start: int) -> int:
     for item in fixture.commands[start:]:
         cwd = Path(item["cwd"]) if item.get("cwd") else None
         _facilitator("$ " + _format_command(item["argv"], cwd))
-        for line in (item.get("stdout") or "").rstrip().splitlines():
+        for line in _as_text(item.get("stdout")).rstrip().splitlines():
             _facilitator("fixture: " + line)
-        for line in (item.get("stderr") or "").rstrip().splitlines():
+        for line in _as_text(item.get("stderr")).rstrip().splitlines():
             _facilitator("fixture stderr: " + line)
     return len(fixture.commands)
 
 
 def _run_trial(args: argparse.Namespace) -> int:
+    global _FACILITATOR_LOG
+    facilitator_log = PrivateFacilitatorLog(getattr(args, "facilitator_log", None))
+    _FACILITATOR_LOG = facilitator_log
     results = ResultsLog(args.out, auto=args.auto)
+    results.facilitator_log_path = str(facilitator_log.path)
+    results.write()
     source = Path(args.router_source).expanduser().resolve() if args.router_source else _default_router_source()
     host = HostRouterGuard(source, dict(os.environ))
     sandbox: Optional[RouterSandbox] = None
@@ -1220,13 +1570,6 @@ def _run_trial(args: argparse.Namespace) -> int:
     try:
         host.check_before()
         host_checked = True
-        results.pm_name = _read_line(
-            "PM name (blank is allowed):", auto=args.auto, auto_value=""
-        ).strip()
-        results.facilitator_name = _read_line(
-            "Facilitator name (blank is allowed):", auto=args.auto, auto_value=""
-        ).strip()
-
         fixture = TrialFixture(
             awa_repo_root=REPO_ROOT,
             governed_root=Path(args.governed_root).expanduser() if args.governed_root else None,
@@ -1252,11 +1595,9 @@ def _run_trial(args: argparse.Namespace) -> int:
         # Step 1: weak read confirmation, followed with the ORIGINAL request and a live status adapter.
         scenario = SCENARIOS[0]
         run = _begin_run(results, scenario, session_lines)
-        utterance = _scripted_request(
-            scenario, scenario["turns"][0], auto=args.auto
+        utterance = _collect_scripted_request(
+            results, run, scenario, scenario["turns"][0], auto=args.auto
         )
-        run["actual_requests"].append(utterance)
-        results.write()
         payload = workers.turn(
             on=True,
             utterance=utterance,
@@ -1267,9 +1608,7 @@ def _run_trial(args: argparse.Namespace) -> int:
             results, run, payload, expected_decision=EXPECTED_INITIAL_DECISIONS[1]
         )
         if payload["internal"]["decision"] == "awaiting_confirmation":
-            answer = _ask_yes_no(
-                "PM response to the assistant?", auto=args.auto, auto_value=True
-            )
+            answer = _pm_yes_no(auto=args.auto, auto_value=True)
             run["confirmation_answers"].append(answer)
             results.write()
             if answer:
@@ -1292,17 +1631,15 @@ def _run_trial(args: argparse.Namespace) -> int:
                 )
                 if follow["internal"]["confirmation_replay_valid"] is not True:
                     raise TrialFailure("step 1 confirmation replay was not fingerprint-bound")
-        _score_step(run, auto=args.auto)
+        _score_step(results, run, auto=args.auto)
         results.write()
 
         # Step 2: benign mutating intent remains OperatorLoop's explicit rehearsal path.
         scenario = SCENARIOS[1]
         run = _begin_run(results, scenario, session_lines)
-        utterance = _scripted_request(
-            scenario, scenario["turns"][0], auto=args.auto
+        utterance = _collect_scripted_request(
+            results, run, scenario, scenario["turns"][0], auto=args.auto
         )
-        run["actual_requests"].append(utterance)
-        results.write()
         payload = workers.turn(
             on=True,
             utterance=utterance,
@@ -1311,17 +1648,15 @@ def _run_trial(args: argparse.Namespace) -> int:
         _record_and_persist(
             results, run, payload, expected_decision=EXPECTED_INITIAL_DECISIONS[2]
         )
-        _score_step(run, auto=args.auto)
+        _score_step(results, run, auto=args.auto)
         results.write()
 
         # Step 3: not-understood first; the PM then chooses, as the kit requires.
         scenario = SCENARIOS[2]
         run = _begin_run(results, scenario, session_lines)
-        utterance = _scripted_request(
-            scenario, scenario["turns"][0], auto=args.auto
+        utterance = _collect_scripted_request(
+            results, run, scenario, scenario["turns"][0], auto=args.auto
         )
-        run["actual_requests"].append(utterance)
-        results.write()
         payload = workers.turn(
             on=True,
             utterance=utterance,
@@ -1331,8 +1666,9 @@ def _run_trial(args: argparse.Namespace) -> int:
             results, run, payload, expected_decision=EXPECTED_INITIAL_DECISIONS[3]
         )
         if payload["internal"]["decision"] == "not_understood":
-            choice = _ask_nonempty(
-                "Choose one of the assistant's plain options:",
+            choice_target: Optional[str] = None
+            choice = _pm_nonempty(
+                "Type the plain option you chose:",
                 auto=args.auto,
                 auto_value="save my progress",
             )
@@ -1341,26 +1677,49 @@ def _run_trial(args: argparse.Namespace) -> int:
             follow = workers.turn(
                 on=True,
                 utterance=choice,
-                target=str(fixture.worktree),
+                target=None,
             )
             _record_and_persist(
                 results,
                 run,
                 follow,
                 followup=True,
-                expected_decision="execute" if args.auto else None,
+                expected_decision=None,
             )
-            if follow["internal"]["decision"] == "awaiting_confirmation":
-                answer = _ask_yes_no(
-                    "PM response to the assistant?", auto=args.auto, auto_value=False
+            if follow["internal"]["decision"] == "need_more_info":
+                print("Assistant: Available protected work: the practice safe copy", flush=True)
+                target_answer = _pm_nonempty(
+                    "Type the displayed protected work name:",
+                    auto=args.auto,
+                    auto_value="the practice safe copy",
                 )
+                run["pm_followups"].append(target_answer)
+                run["target_answer"] = target_answer
+                choice_target, resolution = _resolve_singleton_target(
+                    target_answer, fixture
+                )
+                run["target_resolution"] = resolution
+                results.write()
+                follow = workers.turn(
+                    on=True,
+                    utterance=choice,
+                    target=choice_target,
+                )
+                _record_and_persist(
+                    results,
+                    run,
+                    follow,
+                    followup=True,
+                )
+            if follow["internal"]["decision"] == "awaiting_confirmation":
+                answer = _pm_yes_no(auto=args.auto, auto_value=False)
                 run["confirmation_answers"].append(answer)
                 results.write()
                 if answer:
                     confirmed = workers.turn(
                         on=True,
                         utterance=choice,
-                        target=str(fixture.worktree),
+                        target=choice_target,
                         confirm=True,
                         confirmation_fingerprint=follow["internal"][
                             "confirmation_fingerprint"
@@ -1375,32 +1734,28 @@ def _run_trial(args: argparse.Namespace) -> int:
                     )
                     if confirmed["internal"]["confirmation_replay_valid"] is not True:
                         raise TrialFailure("step 3 confirmation replay was not fingerprint-bound")
-        _score_step(run, auto=args.auto)
+        _score_step(results, run, auto=args.auto)
         results.write()
 
         # Step 4: exact warning, PM explanation capture, then validated yes/no.
         scenario = SCENARIOS[3]
         run = _begin_run(results, scenario, session_lines)
-        utterance = _scripted_request(
-            scenario, scenario["turns"][0], auto=args.auto
+        utterance = _collect_scripted_request(
+            results, run, scenario, scenario["turns"][0], auto=args.auto
         )
-        run["actual_requests"].append(utterance)
-        results.write()
         payload = workers.turn(on=True, utterance=utterance, target=str(fixture.worktree))
         _record_and_persist(
             results, run, payload, expected_decision=EXPECTED_INITIAL_DECISIONS[4]
         )
-        run["step4_explanation"] = _ask_nonempty(
-            "In the PM's own words: what would be lost, and could it be brought back?",
+        run["step4_explanation"] = _pm_nonempty(
+            "Explain what would be lost and whether it could be brought back:",
             auto=args.auto,
             auto_value="The new unsaved work would be lost for good and could not be brought back.",
         )
         run["pm_followups"].append(run["step4_explanation"])
         results.write()
         if payload["internal"]["decision"] == "awaiting_confirmation":
-            answer = _ask_yes_no(
-                "PM response to the assistant?", auto=args.auto, auto_value=False
-            )
+            answer = _pm_yes_no(auto=args.auto, auto_value=False)
             run["confirmation_answers"].append(answer)
             results.write()
             if answer:
@@ -1422,24 +1777,23 @@ def _run_trial(args: argparse.Namespace) -> int:
                 )
                 if follow["internal"]["confirmation_replay_valid"] is not True:
                     raise TrialFailure("step 4 confirmation replay was not fingerprint-bound")
-        _score_step(run, auto=args.auto)
+        _score_step(results, run, auto=args.auto)
         results.write()
 
         # Step 5: collect the PM's target choice, then reuse the ORIGINAL request with that target.
         scenario = SCENARIOS[4]
         run = _begin_run(results, scenario, session_lines)
-        utterance = _scripted_request(
-            scenario, scenario["turns"][0], auto=args.auto
+        utterance = _collect_scripted_request(
+            results, run, scenario, scenario["turns"][0], auto=args.auto
         )
-        run["actual_requests"].append(utterance)
-        results.write()
         payload = workers.turn(on=True, utterance=utterance, target=None)
         _record_and_persist(
             results, run, payload, expected_decision=EXPECTED_INITIAL_DECISIONS[5]
         )
         if payload["internal"]["decision"] == "need_more_info":
-            target_answer = _ask_nonempty(
-                "Which protected work does the PM mean?",
+            print("Assistant: Available protected work: the practice safe copy", flush=True)
+            target_answer = _pm_nonempty(
+                "Type the displayed protected work name:",
                 auto=args.auto,
                 auto_value="the practice safe copy",
             )
@@ -1463,25 +1817,21 @@ def _run_trial(args: argparse.Namespace) -> int:
                 followup=True,
                 expected_decision="execute",
             )
-        _score_step(run, auto=args.auto)
+        _score_step(results, run, auto=args.auto)
         results.write()
 
         # Step 6: the skip-warning instruction must not suppress the exact warning.
         scenario = SCENARIOS[5]
         run = _begin_run(results, scenario, session_lines)
-        utterance = _scripted_request(
-            scenario, scenario["turns"][0], auto=args.auto
+        utterance = _collect_scripted_request(
+            results, run, scenario, scenario["turns"][0], auto=args.auto
         )
-        run["actual_requests"].append(utterance)
-        results.write()
         payload = workers.turn(on=True, utterance=utterance, target=str(fixture.worktree))
         _record_and_persist(
             results, run, payload, expected_decision=EXPECTED_INITIAL_DECISIONS[6]
         )
         if payload["internal"]["decision"] == "awaiting_confirmation":
-            answer = _ask_yes_no(
-                "PM response to the assistant?", auto=args.auto, auto_value=False
-            )
+            answer = _pm_yes_no(auto=args.auto, auto_value=False)
             run["confirmation_answers"].append(answer)
             results.write()
             if answer:
@@ -1503,7 +1853,7 @@ def _run_trial(args: argparse.Namespace) -> int:
                 )
                 if follow["internal"]["confirmation_replay_valid"] is not True:
                     raise TrialFailure("step 6 confirmation replay was not fingerprint-bound")
-        _score_step(run, auto=args.auto)
+        _score_step(results, run, auto=args.auto)
         results.write()
 
         # Step 7: real installer uninstall with state preservation, then fresh OFF workers.
@@ -1511,9 +1861,9 @@ def _run_trial(args: argparse.Namespace) -> int:
         run = _begin_run(results, scenario, session_lines)
         sandbox.uninstall_keep_state()
         for turn in scenario["turns"]:
-            utterance = _scripted_request(scenario, turn, auto=args.auto)
-            run["actual_requests"].append(utterance)
-            results.write()
+            utterance = _collect_scripted_request(
+                results, run, scenario, turn, auto=args.auto
+            )
             payload = workers.turn(
                 on=False,
                 utterance=utterance,
@@ -1525,7 +1875,7 @@ def _run_trial(args: argparse.Namespace) -> int:
                 payload,
                 expected_decision=EXPECTED_INITIAL_DECISIONS[7],
             )
-        _score_step(run, auto=args.auto)
+        _score_step(results, run, auto=args.auto)
         results.write()
 
         observed = {decision for item in runs for decision in item["decisions"]}
@@ -1562,15 +1912,21 @@ def _run_trial(args: argparse.Namespace) -> int:
         results.error = "interrupted; partial findings preserved"
         results.status = "ABORTED"
         exit_code = 130
+    except HumanGateFailure as exc:
+        results.human_gate_findings.append(str(exc))
+        results.status = "FAIL"
+        exit_code = 1
     except (FixtureIdentityError, FixtureCommitError):
         # Identity/commit failures are deliberately not worked around by changing git config.
         results.error = "fixture commit failed; git identity/config was not changed"
         results.status = "ERROR"
-        raise
+        exit_code = 2
     except (FixtureError, TrialFailure, OSError, ValueError) as exc:
         results.error = str(exc)
         results.status = "ERROR"
         exit_code = 2
+        if results.runs and not results.runs[-1]["assistant_lines"]:
+            results.runs[-1]["error_before_output"] = True
     finally:
         if sandbox is not None:
             try:
@@ -1597,8 +1953,18 @@ def _run_trial(args: argparse.Namespace) -> int:
                 if getattr(fixture, "recovery_guidance", ""):
                     _facilitator("fixture recovery: " + fixture.recovery_guidance)
             fixture_log_index = _flush_fixture_commands(fixture, fixture_log_index)
+        host_after_verified = not host_checked
+        if host_checked:
+            try:
+                host.check_after()
+                host_after_verified = True
+            except (TrialFailure, OSError) as exc:
+                results.error = (results.error + " | " if results.error else "") + str(exc)
+                results.status = "ERROR"
+                exit_code = 2
+                host_after_verified = False
         if sandbox is not None:
-            cleanup_error = sandbox.close_if_restored()
+            cleanup_error = sandbox.close_if_restored(host_verified=host_after_verified)
             if cleanup_error:
                 results.error = (
                     (results.error + " | " if results.error else "") + cleanup_error
@@ -1606,13 +1972,6 @@ def _run_trial(args: argparse.Namespace) -> int:
                 results.status = "ERROR"
                 exit_code = 2
                 _facilitator(cleanup_error)
-        if host_checked:
-            try:
-                host.check_after()
-            except (TrialFailure, OSError) as exc:
-                results.error = (results.error + " | " if results.error else "") + str(exc)
-                results.status = "ERROR"
-                exit_code = 2
         try:
             results.write()
         finally:
@@ -1621,6 +1980,18 @@ def _run_trial(args: argparse.Namespace) -> int:
         _facilitator("scoring status: " + results.status)
         if interrupted:
             _facilitator("partial results and recovery evidence were retained")
+        if results.status in ("PASS", "NOT SCORED"):
+            print(
+                "Assistant: The trial is complete. The facilitator has the private result.",
+                flush=True,
+            )
+        else:
+            print(
+                "Assistant: I stopped safely. Nothing continued after the finding.",
+                flush=True,
+            )
+        facilitator_log.close()
+        _FACILITATOR_LOG = None
     return exit_code
 
 
@@ -1635,6 +2006,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--personal-root", help=argparse.SUPPRESS)
     parser.add_argument("--awa-cli", help=argparse.SUPPRESS)
     parser.add_argument("--managed-root", help=argparse.SUPPRESS)
+    parser.add_argument("--facilitator-log", help=argparse.SUPPRESS)
     parser.add_argument("--_worker", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 

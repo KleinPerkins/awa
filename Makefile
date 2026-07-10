@@ -34,7 +34,8 @@ test: ## Run the engine (kernel + engine core) test suite
 	@bash engine/tests/run-tests.sh
 
 trial: ## Run the exact real-PM facilitator workflow (TRIAL_ARGS=--auto for rehearsal)
-	@python3 consumer/trial_runner.py $(TRIAL_ARGS)
+	@PYTHONDONTWRITEBYTECODE=1 python3 -B consumer/trial_runner.py \
+	  $(if $(TRIAL_FACILITATOR_LOG),--facilitator-log "$(TRIAL_FACILITATOR_LOG)",) $(TRIAL_ARGS)
 
 verify: ## Full local verification: tests + freeze + zero-link + install --check
 	@bash engine/tests/run-tests.sh

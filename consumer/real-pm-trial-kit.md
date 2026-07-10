@@ -37,11 +37,22 @@ reports honestly what actually happened. The PM just talks; the assistant does t
 
 Run `make trial` from the AWA checkout. The command owns the complete target and understanding-toggle
 lifecycle: it creates one unique, marked practice safe copy with a known unsaved edit; keeps all
-technical diagnostics, paths, and commands in the facilitator channel; switches understanding off
+technical diagnostics, paths, commands, and checklist prompts in a private `0600` facilitator log;
+shows the PM only neutral input prompts plus assistant replies; switches understanding off
 inside an isolated command-owned area for step 7; restores it; and removes only the generated target
 after bounded validation. If ownership, restoration, or cleanup cannot be proved, the run is **ERROR**
-(not "not scored"), preserves the exact uncertain paths, and prints a read-only recovery command.
+(not "not scored"), preserves the exact uncertain paths, and records a read-only recovery command.
 Run that command to inspect the preserved paths; do not delete them by hand.
+
+Before the PM sits down, choose a private log path and open it only in the facilitator's view:
+
+```sh
+make trial TRIAL_FACILITATOR_LOG="$HOME/awa-trial-facilitator.log"
+```
+
+The PM-facing standard output contains only lines beginning `PM:` or `Assistant:`. The facilitator
+follows the private log for setup evidence and scoring prompts and types those answers without
+showing that log to the PM.
 
 1. Verify the command says the command-owned practice safe copy and isolated understanding area are
    ready. Do not substitute a PM's real work or an existing directory.
@@ -51,6 +62,19 @@ Run that command to inspect the preserved paths; do not delete them by hand.
    assistant receives; facilitator diagnostics never share the PM-visible output stream.
 4. For step 7, do not uninstall or toggle anything on the host. The command performs and restores the
    isolated off-switch lifecycle itself.
+
+**Isolation trust boundary.** The trial redirects `HOME` and all XDG paths and verifies hashes/modes
+of the protected host install before and after the run, with the host check completed before sandbox
+deletion. This detects accidental host writes by the pinned router installer; it is not an
+OS-enforced filesystem sandbox. Python's standard library has no portable filesystem-containment
+primitive, macOS `sandbox-exec` is platform-specific, and typical Linux runners do not provide
+`bwrap`. The pinned router source is therefore trusted code for this rehearsal; do not point
+`--router-source` at untrusted code.
+
+If cleanup preserves fixture paths, the logged `ls -ld -- ...` command is **read-only inspection**.
+If router restoration itself fails, the separate logged `env ... make install && ... make doctor`
+command is a **mutating recovery operation inside the command-owned sandbox**. Run it only when that
+specific recovery instruction appears; it does not repair or alter the host router.
 
 **Ground rules for an honest result:**
 
@@ -126,7 +150,7 @@ exercised — for grounding only; do not read it to the PM.
 - **Should visibly happen:** the assistant understands the PM wants to return to earlier protected
   work, but needs to know **which** work. It asks **one** plain question — *"First tell me which
   protected work you mean."* It does **not** pick one on its own.
-- **PM decides:** name the prepared work as `the practice safe copy` (or point at it). The command
+- **PM decides:** name the prepared work exactly as the displayed `the practice safe copy`. The command
   records that exact answer and its resolution. Confirm the assistant only continued once it knew
   which work the PM meant.
 

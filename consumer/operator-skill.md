@@ -57,6 +57,12 @@ pm = pm_view(result)   # PM-FACING subset ONLY. The raw router envelope (tool_pa
                        # (under result["_internal"] / result["feedback"]) — never render them to the PM.
 ```
 
+`confirm=True` is a trusted caller attestation by this API's compatibility contract. A stateless or
+untrusted UI must replay the original utterance and pass the previously returned internal
+`confirmation_fingerprint` as `expected_confirmation_fingerprint`; a mismatch re-opens the gate.
+Trusted in-process callers that already own the confirmation ceremony may continue to use
+`confirm=True` directly.
+
 ## A0 fix-pass hardening (review-swarm close-out)
 
 A0 is **implemented** but **not yet "proven"** — the single remaining gate is a real non-technical

@@ -52,6 +52,10 @@ class TestOperatorLoop(unittest.TestCase):
         r = self._loop(m, executor=_record_executor(calls)).handle(
             "clean up", target="/tmp/x", facts=F_UNSHARED, confirm=True)
         self.assertEqual(r["decision"], L.EXECUTE)
+        self.assertIsNone(
+            r["_internal"]["confirmation_replay_valid"],
+            "direct confirm remains the documented trusted-caller compatibility path",
+        )
         self.assertEqual(calls, [("cleanup", "/tmp/x")], "executes AWA's OWN verb, once, after confirm")
         self.assertTrue(r["narration"]["ok"])
 

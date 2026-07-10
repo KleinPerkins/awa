@@ -9,7 +9,6 @@ import os
 import re
 import secrets
 import shlex
-import shutil
 import stat
 import subprocess
 import sys
@@ -39,6 +38,51 @@ class FixtureCommitError(FixtureError):
 
 def _canonical(path: Path) -> Path:
     return Path(os.path.realpath(str(path)))
+
+
+def _as_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def descriptor_rmtree(path: Path, expected: tuple[int, int]) -> None:
+    """Delete one proven directory through anchored descriptors without following symlinks."""
+    parent_fd = os.open(
+        str(path.parent),
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    root_fd = -1
+    try:
+        root_fd = os.open(
+            path.name,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        info = os.fstat(root_fd)
+        if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != expected:
+            raise FixtureError("refusing descriptor deletion after root identity changed: " + str(path))
+        for _, dirnames, filenames, directory_fd in os.fwalk(
+            ".", topdown=False, follow_symlinks=False, dir_fd=root_fd
+        ):
+            for name in filenames:
+                os.unlink(name, dir_fd=directory_fd)
+            for name in dirnames:
+                child = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if stat.S_ISDIR(child.st_mode):
+                    os.rmdir(name, dir_fd=directory_fd)
+                else:
+                    os.unlink(name, dir_fd=directory_fd)
+        current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != expected:
+            raise FixtureError("refusing final deletion after root entry changed: " + str(path))
+        os.rmdir(path.name, dir_fd=parent_fd)
+    finally:
+        if root_fd >= 0:
+            os.close(root_fd)
+        os.close(parent_fd)
 
 
 class TrialFixture:
@@ -88,8 +132,12 @@ class TrialFixture:
         self.cleaned = False
         self.preserved_reason: Optional[str] = None
         self.directory_identities: Dict[str, tuple[int, int]] = {}
+        self.file_identities: Dict[str, tuple[int, int]] = {}
         self.notes_identity: Optional[tuple[int, int]] = None
         self.quarantine_paths: List[str] = []
+        self.quarantine_parent = self.personal_root / (
+            ".awa-trial-quarantine-" + self.nonce
+        )
 
     @staticmethod
     def _identity_from_git(env: Dict[str, str], variable: str) -> tuple[str, str]:
@@ -114,11 +162,33 @@ class TrialFixture:
 
     @classmethod
     def _isolated_git_env(cls, base_env: Dict[str, str]) -> Dict[str, str]:
-        author_name, author_email = cls._identity_from_git(base_env, "GIT_AUTHOR_IDENT")
-        committer_name, committer_email = cls._identity_from_git(
-            base_env, "GIT_COMMITTER_IDENT"
+        identity_keys = {
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+        }
+        identity_env = {
+            key: value
+            for key, value in base_env.items()
+            if not key.startswith("GIT_")
+            or key in identity_keys
+            or key.startswith("GIT_CONFIG_KEY_")
+            or key.startswith("GIT_CONFIG_VALUE_")
+            or key == "GIT_CONFIG_COUNT"
+        }
+        author_name, author_email = cls._identity_from_git(
+            identity_env, "GIT_AUTHOR_IDENT"
         )
-        env = dict(base_env)
+        committer_name, committer_email = cls._identity_from_git(
+            identity_env, "GIT_COMMITTER_IDENT"
+        )
+        # Resolve identity first, then remove every inherited Git routing/configuration variable.
+        # The generated fixture receives only this explicit allowlist.
+        env = {key: value for key, value in base_env.items() if not key.startswith("GIT_")}
         env.update(
             {
                 "GIT_AUTHOR_NAME": author_name,
@@ -127,13 +197,16 @@ class TrialFixture:
                 "GIT_COMMITTER_EMAIL": committer_email,
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_CONFIG_GLOBAL": os.devnull,
-                "GIT_CONFIG_COUNT": "3",
+                "GIT_CONFIG_COUNT": "4",
                 "GIT_CONFIG_KEY_0": "core.hooksPath",
                 "GIT_CONFIG_VALUE_0": os.devnull,
                 "GIT_CONFIG_KEY_1": "commit.gpgSign",
                 "GIT_CONFIG_VALUE_1": "false",
                 "GIT_CONFIG_KEY_2": "tag.gpgSign",
                 "GIT_CONFIG_VALUE_2": "false",
+                "GIT_CONFIG_KEY_3": "protocol.file.allow",
+                "GIT_CONFIG_VALUE_3": "always",
+                "GIT_TERMINAL_PROMPT": "0",
                 "PYTHONDONTWRITEBYTECODE": "1",
             }
         )
@@ -150,9 +223,18 @@ class TrialFixture:
 
     @property
     def recovery_guidance(self) -> str:
-        paths = self.quarantine_paths or [
-            path for path in self.created_paths if os.path.lexists(path)
-        ]
+        paths = sorted(
+            {
+                path
+                for path in self.created_paths + self.quarantine_paths
+                if os.path.lexists(path)
+            }
+            | (
+                {str(self.quarantine_parent)}
+                if os.path.lexists(str(self.quarantine_parent))
+                else set()
+            )
+        )
         command = "ls -ld -- " + " ".join(shlex.quote(path) for path in paths)
         return (
             "inspect only these preserved paths; do not recursively delete until ownership is "
@@ -239,8 +321,8 @@ class TrialFixture:
                     "argv": list(argv),
                     "cwd": str(cwd) if cwd else None,
                     "returncode": None,
-                    "stdout": exc.stdout or "",
-                    "stderr": exc.stderr or "",
+                    "stdout": _as_text(exc.stdout),
+                    "stderr": _as_text(exc.stderr),
                 }
             )
             raise FixtureError(
@@ -287,12 +369,18 @@ class TrialFixture:
         try:
             os.write(fd, content)
             os.fsync(fd)
+            info = os.fstat(fd)
+            self.file_identities[str(path)] = (info.st_dev, info.st_ino)
         finally:
             os.close(fd)
 
     def _read_owner(self, root: Path) -> Optional[Dict[str, str]]:
         try:
-            raw, _ = self._read_regular(root / OWNER_FILE)
+            path = root / OWNER_FILE
+            raw, identity = self._read_regular(
+                path, self.file_identities.get(str(path))
+            )
+            self.file_identities.setdefault(str(path), identity)
             value = json.loads(raw.decode("utf-8"))
         except (OSError, ValueError, TypeError):
             return None
@@ -351,7 +439,13 @@ class TrialFixture:
             raise FixtureError("AWA worktree CLI is unavailable: " + str(self.awa_cli))
         if not self.personal_root.is_dir():
             raise FixtureError("personal fixture parent is unavailable: " + str(self.personal_root))
-        for path in (self.primary, self.origin, self.fixture_root, self.worktree):
+        for path in (
+            self.primary,
+            self.origin,
+            self.fixture_root,
+            self.worktree,
+            self.quarantine_parent,
+        ):
             if os.path.lexists(str(path)):
                 raise FixtureError("refusing to reuse an existing fixture path: " + str(path))
 
@@ -403,9 +497,11 @@ class TrialFixture:
             payload = json.loads(ensure.stdout)
         except ValueError as exc:
             raise FixtureError("AWA ensure returned invalid JSON") from exc
-        if payload.get("action") != "created" or _canonical(
-            Path(payload.get("rootPath", ""))
-        ) != _canonical(self.worktree):
+        if (
+            payload.get("action") != "created"
+            or payload.get("branch") != self.branch
+            or _canonical(Path(payload.get("rootPath", ""))) != _canonical(self.worktree)
+        ):
             raise FixtureError("AWA did not create the requested linked worktree")
 
         self._record_directory(self.fixture_root)
@@ -447,6 +543,19 @@ class TrialFixture:
             or _canonical(worktree_git.parent.parent) != worktree_common
         ):
             raise FixtureError("fixture is not a linked worktree of the generated primary")
+        for path in (primary_common, worktree_git):
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise FixtureError("fixture git administration path changed type: " + str(path))
+            identity = (info.st_dev, info.st_ino)
+            expected = self.directory_identities.setdefault(str(path), identity)
+            if identity != expected:
+                raise FixtureError("fixture git administration identity changed: " + str(path))
+        gitfile = self.worktree / ".git"
+        _, gitfile_identity = self._read_regular(
+            gitfile, self.file_identities.get(str(gitfile))
+        )
+        self.file_identities.setdefault(str(gitfile), gitfile_identity)
         primary_branch = self._run(
             ["git", "-C", str(self.primary), "symbolic-ref", "--short", "HEAD"]
         ).stdout.strip()
@@ -463,6 +572,11 @@ class TrialFixture:
         ).stdout.strip()
         if primary_head != worktree_head:
             raise FixtureError("fixture linked worktree HEAD drifted from its requested base")
+        branch_head = self._run(
+            ["git", "-C", str(self.primary), "rev-parse", "--verify", "refs/heads/" + self.branch]
+        ).stdout.strip()
+        if branch_head != worktree_head:
+            raise FixtureError("requested branch ref does not point at the worktree HEAD")
         registry = self._run(
             ["git", "-C", str(self.primary), "worktree", "list", "--porcelain"]
         ).stdout
@@ -473,8 +587,17 @@ class TrialFixture:
             if "worktree " + str(_canonical(self.worktree)) in block
         ]
         expected_branch = "branch refs/heads/" + self.branch
+        primary_matches = [
+            block
+            for block in blocks
+            if "worktree " + str(_canonical(self.primary)) in block
+        ]
         if (
-            len(matches) != 1
+            len(blocks) != 2
+            or len(primary_matches) != 1
+            or "HEAD " + primary_head not in primary_matches[0]
+            or "branch refs/heads/main" not in primary_matches[0]
+            or len(matches) != 1
             or "HEAD " + worktree_head not in matches[0]
             or expected_branch not in matches[0]
         ):
@@ -513,16 +636,108 @@ class TrialFixture:
         if "linked-worktree: yes" not in self.status_output:
             raise FixtureError("AWA status did not recognize the generated linked worktree")
 
+    def _seal_generated_edit(self) -> None:
+        """Commit the exact generated edit without rewriting the working file.
+
+        If anything races the staging operation, the cached-content check or final dirty check
+        refuses cleanup and preserves the fixture.
+        """
+        notes = self.worktree / NOTES_FILE
+        if self.notes_identity is None:
+            raise FixtureError("fixture notes identity was not recorded")
+        content, _ = self._read_regular(notes, self.notes_identity)
+        if content.decode("utf-8") != INITIAL_NOTES + DIRTY_LINE:
+            raise FixtureError("known generated edit changed before sealing; preserving fixture")
+        self._run(["git", "-C", str(self.worktree), "add", "--", NOTES_FILE])
+        cached = self._run(
+            ["git", "-C", str(self.worktree), "show", ":" + NOTES_FILE]
+        ).stdout
+        if cached != INITIAL_NOTES + DIRTY_LINE:
+            raise FixtureError("staged fixture content changed during sealing; preserving fixture")
+        commit = self._run(
+            [
+                "git",
+                "-C",
+                str(self.worktree),
+                "commit",
+                "-m",
+                "Finalize generated AWA PM trial edit",
+            ],
+            check=False,
+        )
+        if commit.returncode:
+            detail = (commit.stderr or commit.stdout).strip()
+            lowered = detail.lower()
+            if "identity" in lowered or "who you are" in lowered or "user.email" in lowered:
+                raise FixtureIdentityError(
+                    "fixture finalization commit stopped: " + detail
+                )
+            raise FixtureCommitError("fixture finalization commit failed: " + detail)
+        head = self._run(
+            ["git", "-C", str(self.worktree), "rev-parse", "HEAD"]
+        ).stdout.strip()
+        self._run(
+            [
+                "git",
+                "-C",
+                str(self.worktree),
+                "push",
+                "origin",
+                "HEAD:refs/heads/" + self.branch,
+            ]
+        )
+        remote_head = self._run(
+            [
+                "git",
+                "-C",
+                str(self.worktree),
+                "ls-remote",
+                "--heads",
+                "origin",
+                "refs/heads/" + self.branch,
+            ]
+        ).stdout.split()
+        if not remote_head or remote_head[0] != head:
+            raise FixtureError("sealed fixture head was not preserved on its generated origin")
+        status = self._run(
+            ["git", "-C", str(self.worktree), "status", "--porcelain"]
+        ).stdout.strip()
+        if status:
+            raise FixtureError("fixture changed while sealing; preserving the dirty worktree")
+
+    def _ensure_quarantine_parent(self) -> None:
+        if not os.path.lexists(str(self.quarantine_parent)):
+            os.mkdir(str(self.quarantine_parent), 0o700)
+            self._record_directory(self.quarantine_parent)
+        else:
+            self._assert_directory(self.quarantine_parent)
+
     def _quarantine(self, path: Path, label: str) -> Path:
         self._assert_directory(path)
         if self._read_owner(path) is None:
             raise FixtureError("ownership marker changed before quarantine: " + str(path))
-        destination = path.parent / (
-            ".awa-trial-quarantine-{0}-{1}".format(self.nonce, label)
-        )
+        self._ensure_quarantine_parent()
+        destination = self.quarantine_parent / label
         if os.path.lexists(str(destination)):
             raise FixtureError("quarantine destination already exists: " + str(destination))
-        os.rename(str(path), str(destination))
+        source_fd = os.open(
+            str(path.parent),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        quarantine_fd = os.open(
+            str(self.quarantine_parent),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            os.rename(
+                path.name,
+                label,
+                src_dir_fd=source_fd,
+                dst_dir_fd=quarantine_fd,
+            )
+        finally:
+            os.close(quarantine_fd)
+            os.close(source_fd)
         self._assert_directory(destination, original=path)
         if self._read_owner(destination) is None:
             raise FixtureError("ownership marker changed during quarantine: " + str(destination))
@@ -536,22 +751,9 @@ class TrialFixture:
         try:
             self._assert_root_not_active()
             self._validate_live_relationships()
-            notes = self.worktree / NOTES_FILE
-            if self.notes_identity is None:
-                raise FixtureError("fixture notes identity was not recorded")
-            content, _ = self._read_regular(notes, self.notes_identity)
-            if content.decode("utf-8") != INITIAL_NOTES + DIRTY_LINE:
-                raise FixtureError("known generated edit changed; preserving fixture")
             self._assert_root_not_active()
             self._validate_live_relationships()
-            self._write_existing_regular(
-                notes, INITIAL_NOTES.encode("utf-8"), self.notes_identity
-            )
-            status = self._run(
-                ["git", "-C", str(self.worktree), "status", "--porcelain"]
-            ).stdout.strip()
-            if status:
-                raise FixtureError("fixture did not become clean after restoring its known edit")
+            self._seal_generated_edit()
 
             # Validate every destructive boundary before asking AWA's normal, non-force clean path.
             if self._read_owner(self.origin) is None:
@@ -584,11 +786,23 @@ class TrialFixture:
                     raise FixtureError(
                         "quarantined ownership marker changed: " + str(quarantined)
                     )
-            shutil.rmtree(str(quarantined_primary))
-            shutil.rmtree(str(quarantined_origin))
+            descriptor_rmtree(
+                quarantined_primary,
+                self.directory_identities[str(self.primary)],
+            )
+            descriptor_rmtree(
+                quarantined_origin,
+                self.directory_identities[str(self.origin)],
+            )
             self.quarantine_paths = []
-            self._assert_directory(self.fixture_root)
-            self.fixture_root.rmdir()
+            descriptor_rmtree(
+                self.quarantine_parent,
+                self.directory_identities[str(self.quarantine_parent)],
+            )
+            descriptor_rmtree(
+                self.fixture_root,
+                self.directory_identities[str(self.fixture_root)],
+            )
             self.cleaned = True
             return True
         except (FixtureError, OSError, ValueError) as exc:

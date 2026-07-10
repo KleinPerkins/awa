@@ -65,8 +65,12 @@ jobs:
   # KleinPerkins/intent-router) is therefore a required external prerequisite. Absence is a hard,
   # actionable failure: this seam must never report green without running.
   router-seam:
-    name: router-seam (pinned, non-skipped)
+    name: router-seam (pinned, py${{ matrix.python }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.9', '3.12']
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - name: Detect router-seam credential
@@ -84,7 +88,7 @@ jobs:
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
         if: steps.gate.outputs.have_token == 'true'
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python }}
       - name: Co-install the pinned router + run the seam NON-SKIPPED
         if: steps.gate.outputs.have_token == 'true'
         env:

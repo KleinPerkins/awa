@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import io
 import json
 import os
@@ -206,6 +207,26 @@ class TestInteractionAndRendering(unittest.TestCase):
         )
         self.assertEqual(value_leaks, ["value:__private_route_91__"])
 
+    def test_actual_worker_payload_origin_leak_is_blocked_before_display(self):
+        origin = "/private/router/runtime/intent_router/__init__.py"
+        run = runner._new_run(runner.SCENARIOS[1])
+        payload = {
+            "pm": {
+                "decision": "execute",
+                "narration": {"plain": "Loaded from " + origin},
+            },
+            "internal": {
+                "decision": "execute",
+                "verb": "save",
+                "router_origin": origin,
+                "leak_markers": [origin],
+            },
+        }
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as visible:
+            with self.assertRaises(runner.EgressFailure):
+                runner._record_turn(run, payload)
+        self.assertEqual(visible.getvalue(), "")
+
     def test_scripted_request_is_actual_input_and_singleton_answer_is_resolved(self):
         scenario = runner.SCENARIOS[4]
         with mock.patch("sys.stdin", io.StringIO("my exact entered wording\n")):
@@ -213,13 +234,53 @@ class TestInteractionAndRendering(unittest.TestCase):
                 scenario, scenario["turns"][0], auto=False
             )
         self.assertEqual(actual, "my exact entered wording")
+        run = runner._new_run(scenario)
+        results = mock.Mock()
+        with mock.patch(
+            "sys.stdin", io.StringIO(scenario["turns"][0]["utterance"] + " \n")
+        ), self.assertRaises(runner.HumanGateFailure):
+            runner._collect_scripted_request(
+                results, run, scenario, scenario["turns"][0], auto=False
+            )
+        self.assertEqual(
+            run["actual_requests"], [scenario["turns"][0]["utterance"] + " "]
+        )
+        results.write.assert_called_once()
         fixture = mock.Mock()
         fixture.worktree = Path("/tmp/practice-safe-copy")
-        target, evidence = runner._resolve_singleton_target("that practice copy", fixture)
+        target, evidence = runner._resolve_singleton_target(
+            "the practice safe copy", fixture
+        )
         self.assertEqual(target, "/tmp/practice-safe-copy")
         self.assertEqual(
-            evidence, "that practice copy -> the practice safe copy"
+            evidence, "the practice safe copy -> the practice safe copy"
         )
+        with self.assertRaises(runner.HumanGateFailure):
+            runner._resolve_singleton_target("some other copy", fixture)
+
+    def test_private_facilitator_channel_never_shares_pm_stdout(self):
+        with tempfile.TemporaryDirectory() as td:
+            log = runner.PrivateFacilitatorLog(str(Path(td) / "facilitator.log"))
+            previous = runner._FACILITATOR_LOG
+            runner._FACILITATOR_LOG = log
+            try:
+                with mock.patch("sys.stdout", new_callable=io.StringIO) as visible, mock.patch(
+                    "sys.stderr", new_callable=io.StringIO
+                ) as err:
+                    runner._facilitator("$ hidden technical command")
+                    value = runner._pm_input(
+                        "Type your answer as yes or no:", auto=True, auto_value="yes"
+                    )
+                self.assertEqual(value, "yes")
+                self.assertEqual(
+                    visible.getvalue(), "PM: Type your answer as yes or no:\n"
+                )
+                self.assertEqual(err.getvalue(), "")
+            finally:
+                log.close()
+                runner._FACILITATOR_LOG = previous
+            private = (Path(td) / "facilitator.log").read_text(encoding="utf-8")
+            self.assertIn("$ hidden technical command", private)
 
     def test_warning_fidelity_includes_exact_confirmation_question(self):
         run = runner._new_run(runner.SCENARIOS[3])
@@ -256,6 +317,8 @@ class TestInteractionAndRendering(unittest.TestCase):
         }
         for scenario in runner.SCENARIOS:
             run = runner._new_run(scenario)
+            run["destructive_observed"] = scenario["kind"] == "destructive"
+            run["clarification_questions"] = 1 if scenario["kind"] == "unclear" else 0
             count = expected_counts[scenario["kind"]]
             if scenario["step"] == 6:
                 count = 6
@@ -264,11 +327,38 @@ class TestInteractionAndRendering(unittest.TestCase):
             ) as ask, mock.patch(
                 "consumer.trial_runner._read_line", return_value=""
             ):
-                runner._score_step(run, auto=False)
+                results = mock.Mock()
+                runner._score_step(results, run, auto=False)
                 self.assertEqual(ask.call_count, count)
+                self.assertEqual(results.write.call_count, count + 1)
 
 
 class TestResultsAndExitSemantics(unittest.TestCase):
+    def test_human_contract_requires_exact_requests_sequences_and_question_limit(self):
+        results = mock.Mock()
+        results.runs = []
+        for scenario in runner.SCENARIOS:
+            run = runner._new_run(scenario)
+            run["actual_requests"] = [turn["utterance"] for turn in scenario["turns"]]
+            run["decisions"] = list(runner.EXPECTED_AUTO_SEQUENCES[scenario["step"]])
+            run["confirmation_answers"] = [True] if scenario["step"] == 1 else []
+            if scenario["step"] == 5:
+                run["target_resolution"] = (
+                    "the practice safe copy -> the practice safe copy"
+                )
+            if scenario["step"] in (3, 5):
+                run["clarification_questions"] = 1
+            if scenario["step"] in (4, 6):
+                run["destructive_observed"] = True
+                run["warning_exact"] = True
+            results.runs.append(run)
+        self.assertEqual(runner._human_contract_findings(results), [])
+        results.runs[2]["clarification_questions"] = 2
+        results.runs[4]["actual_requests"] = ["different words"]
+        findings = runner._human_contract_findings(results)
+        self.assertTrue(any("step 3 asked 2" in item for item in findings))
+        self.assertTrue(any("step 5 did not use" in item for item in findings))
+
     def test_results_creation_is_exclusive_and_private(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "result.md"
@@ -340,6 +430,10 @@ class TestResultsAndExitSemantics(unittest.TestCase):
                 awa_cli=None,
                 managed_root=None,
             )
+            order = []
+            sandbox.close_if_restored.side_effect = (
+                lambda **_: order.append("sandbox-delete") or None
+            )
             with mock.patch("consumer.trial_runner.HostRouterGuard") as host_cls, mock.patch(
                 "consumer.trial_runner.TrialFixture", return_value=fixture
             ), mock.patch(
@@ -347,15 +441,20 @@ class TestResultsAndExitSemantics(unittest.TestCase):
             ), mock.patch(
                 "consumer.trial_runner.WorkerClient", return_value=worker
             ):
+                host_cls.return_value.check_after.side_effect = lambda: order.append(
+                    "host-check"
+                )
                 rc = runner._run_trial(args)
             self.assertEqual(rc, 130)
             sandbox.restore.assert_called_once()
             fixture.teardown.assert_called_once()
             host_cls.return_value.check_after.assert_called_once()
+            self.assertEqual(order, ["host-check", "sandbox-delete"])
             text = Path(args.out).read_text(encoding="utf-8")
             self.assertIn("partial findings preserved", text)
             self.assertIn('"status": "aborted"', text)
             self.assertIn("### Step 1 — Is everything okay?", text)
+            self.assertIn("| 1 — Is everything okay? | NOT REACHED", text)
 
     def test_results_persist_wording_every_check_answer_and_observed_question_total(self):
         with tempfile.TemporaryDirectory() as td:
@@ -379,6 +478,7 @@ class TestResultsAndExitSemantics(unittest.TestCase):
             self.assertIn("Exact safe assistant wording.", text)
             self.assertIn("one_question: N", text)
             self.assertIn("zero_technical: Y", text)
+            self.assertIn("- Observed clarification questions: 1", text)
             self.assertIn(
                 "Times an unclear request cost more than one question (should be 0):** 1",
                 text,
@@ -396,6 +496,32 @@ class TestResultsAndExitSemantics(unittest.TestCase):
                 runner.WorkerClient(sandbox).turn(
                     on=True, utterance="save my progress", target="/tmp/x"
                 )
+
+    def test_timeout_byte_output_is_normalized_for_private_persistence(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            env = TestRealFixture()._env(root)
+            personal = root / "personal"
+            personal.mkdir()
+            fixture = TrialFixture(
+                awa_repo_root=REPO_ROOT,
+                governed_root=root,
+                personal_root=personal,
+                awa_cli=REPO_ROOT / "kernel" / "bin" / "dev-worktree.sh",
+                managed_root=root / "managed",
+                nonce="timeout-bytes",
+                env=env,
+            )
+            with mock.patch(
+                "consumer.trial_fixture.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(
+                    ["git"], 60, output=b"partial-\xff", stderr=b"problem-\xfe"
+                ),
+            ):
+                with self.assertRaisesRegex(FixtureError, "timed out"):
+                    fixture._run(["git", "--version"])
+            self.assertIsInstance(fixture.commands[-1]["stdout"], str)
+            self.assertIsInstance(fixture.commands[-1]["stderr"], str)
 
     def test_sandbox_cleanup_failure_overrides_aborted_status(self):
         with tempfile.TemporaryDirectory() as td:
@@ -434,6 +560,24 @@ class TestResultsAndExitSemantics(unittest.TestCase):
             text = Path(args.out).read_text(encoding="utf-8")
             self.assertIn('"status": "error"', text)
             self.assertIn("sandbox cleanup failed: injected", text)
+
+    def test_sandbox_owner_swap_is_nofollow_and_preserves_victim(self):
+        with tempfile.TemporaryDirectory() as td:
+            victim = Path(td) / "victim.txt"
+            victim.write_text("untouched\n", encoding="utf-8")
+            sandbox = runner.RouterSandbox(Path(td))
+            sandbox.restored = True
+            preserved = sandbox.close_if_restored(host_verified=False)
+            self.assertIn("protected host surfaces were not verified", preserved)
+            self.assertTrue(sandbox.root.is_dir())
+            sandbox.owner.unlink()
+            sandbox.owner.symlink_to(victim)
+            error = sandbox.close_if_restored()
+            self.assertIn("sandbox cleanup failed", error)
+            self.assertEqual(victim.read_text(encoding="utf-8"), "untouched\n")
+            runner.descriptor_rmtree(
+                sandbox.private_parent, sandbox.private_parent_identity
+            )
 
 
 class TestRealFixture(unittest.TestCase):
@@ -478,6 +622,10 @@ class TestRealFixture(unittest.TestCase):
             )
             env = self._env(root)
             env["GIT_CONFIG_GLOBAL"] = str(hostile_global)
+            env["GIT_DIR"] = "/hostile/git-dir"
+            env["GIT_WORK_TREE"] = "/hostile/work-tree"
+            env["GIT_INDEX_FILE"] = "/hostile/index"
+            env["GIT_SSH_COMMAND"] = "exit 93"
             fixture = TrialFixture(
                 awa_repo_root=REPO_ROOT,
                 governed_root=root,
@@ -493,14 +641,17 @@ class TestRealFixture(unittest.TestCase):
             self.assertEqual(fixture.env["GIT_CONFIG_GLOBAL"], os.devnull)
             self.assertEqual(fixture.env["GIT_CONFIG_VALUE_0"], os.devnull)
             self.assertEqual(fixture.env["GIT_CONFIG_VALUE_1"], "false")
-            self.assertEqual(
-                set(fixture.directory_identities),
+            self.assertEqual(fixture.env["GIT_CONFIG_VALUE_3"], "always")
+            for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_SSH_COMMAND"):
+                self.assertNotIn(key, fixture.env)
+            self.assertTrue(
                 {
                     str(fixture.origin),
                     str(fixture.primary),
                     str(fixture.fixture_root),
                     str(fixture.worktree),
-                },
+                    str(fixture.primary / ".git"),
+                }.issubset(set(fixture.directory_identities))
             )
 
             marker = fixture.worktree / OWNER_FILE
@@ -510,7 +661,12 @@ class TestRealFixture(unittest.TestCase):
             self.assertTrue(fixture.worktree.exists(), "uncertain ownership must preserve the target")
 
             marker.write_text(original, encoding="utf-8")
-            self.assertTrue(fixture.teardown())
+            with mock.patch.object(
+                fixture,
+                "_write_existing_regular",
+                side_effect=AssertionError("teardown must never rewrite possible concurrent work"),
+            ):
+                self.assertTrue(fixture.teardown())
             self.assertFalse(fixture.worktree.exists())
             self.assertFalse(fixture.primary.exists())
             self.assertFalse(fixture.origin.exists())
@@ -600,12 +756,93 @@ class TestRealFixture(unittest.TestCase):
             self.assertEqual(after, before, "active-root refusal must happen before teardown writes")
             self.assertIn("active", fixture.preserved_reason)
 
+    def test_second_quarantine_failure_reports_original_and_quarantined_union(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            personal = root / "personal"
+            personal.mkdir()
+            fixture = TrialFixture(
+                awa_repo_root=REPO_ROOT,
+                governed_root=root,
+                personal_root=personal,
+                awa_cli=REPO_ROOT / "kernel" / "bin" / "dev-worktree.sh",
+                managed_root=root / "managed",
+                nonce="second-quarantine",
+                env=self._env(root),
+            ).create()
+            original_quarantine = fixture._quarantine
+
+            def fail_second(path, label):
+                if label == "origin":
+                    raise FixtureError("injected second quarantine failure")
+                return original_quarantine(path, label)
+
+            with mock.patch.object(fixture, "_quarantine", side_effect=fail_second):
+                self.assertFalse(fixture.teardown())
+            guidance = fixture.recovery_guidance
+            self.assertIn(str(fixture.quarantine_parent / "primary"), guidance)
+            self.assertIn(str(fixture.origin), guidance)
+            self.assertIn("injected second quarantine failure", fixture.preserved_reason)
+
 
 @unittest.skipUnless(
     os.environ.get("AWA_TRIAL_REQUIRE_ROUTER_LIFECYCLE") == "1",
     "isolated real router lifecycle runs only in the credentialed router-seam job",
 )
 class TestRouterLifecycleSeam(unittest.TestCase):
+    def _production_env(self, root: Path) -> dict:
+        env = dict(os.environ)
+        env.update(
+            {
+                "HOME": str(root / "home"),
+                "XDG_DATA_HOME": str(root / "data"),
+                "XDG_CONFIG_HOME": str(root / "config"),
+                "XDG_STATE_HOME": str(root / "state"),
+                "AWA_POLICY": str(
+                    REPO_ROOT / "kernel" / "policy" / "default-worktree-policy.yml"
+                ),
+                "AWA_GOVERNED_ROOT": str(root),
+                "GIT_AUTHOR_NAME": "AWA Trial Seam",
+                "GIT_AUTHOR_EMAIL": "awa-trial-seam@example.invalid",
+                "GIT_COMMITTER_NAME": "AWA Trial Seam",
+                "GIT_COMMITTER_EMAIL": "awa-trial-seam@example.invalid",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+        )
+        for name in ("home", "data", "config", "state", "personal"):
+            (root / name).mkdir()
+        return env
+
+    def _production_args(self, root: Path, source: Path, suffix: str) -> argparse.Namespace:
+        return argparse.Namespace(
+            auto=True,
+            out=str(root / ("results-" + suffix + ".md")),
+            facilitator_log=str(root / ("facilitator-" + suffix + ".log")),
+            router_source=str(source),
+            governed_root=str(root),
+            personal_root=str(root / "personal"),
+            awa_cli=str(REPO_ROOT / "kernel" / "bin" / "dev-worktree.sh"),
+            managed_root=str(root / "managed"),
+        )
+
+    def _install_host_router(self, source: Path, env: dict) -> None:
+        subprocess.run(
+            ["make", "-C", str(source), "install"],
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=runner.COMMAND_TIMEOUT_SECONDS,
+        )
+        subprocess.run(
+            ["make", "-C", str(source), "doctor"],
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=runner.COMMAND_TIMEOUT_SECONDS,
+        )
+
     def test_isolated_install_on_uninstall_off_restore(self):
         source_raw = os.environ.get("AWA_TRIAL_ROUTER_SOURCE")
         self.assertTrue(source_raw, "AWA_TRIAL_ROUTER_SOURCE is required")
@@ -654,6 +891,65 @@ class TestRouterLifecycleSeam(unittest.TestCase):
                         sandbox.restore()
                     self.assertIsNone(sandbox.close_if_restored())
 
+    def test_production_run_trial_all_seven_has_pm_safe_complete_stream(self):
+        source = Path(os.environ["AWA_TRIAL_ROUTER_SOURCE"])
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            env = self._production_env(root)
+            args = self._production_args(root, source, "all-seven")
+            with mock.patch.dict(os.environ, env, clear=True):
+                self._install_host_router(source, env)
+                visible = io.StringIO()
+                with contextlib.redirect_stdout(visible):
+                    rc = runner._run_trial(args)
+            self.assertEqual(rc, 0)
+            output = visible.getvalue()
+            self.assertNotIn("[facilitator]", output)
+            self.assertNotIn(str(root), output)
+            allowed = ("PM: ", "Assistant: ")
+            self.assertTrue(all(line.startswith(allowed) for line in output.splitlines()))
+            self.assertEqual(output.count('PM: Type exactly: "'), 8)
+            self.assertEqual(
+                sum(line.startswith("PM: ") for line in output.splitlines()), 14
+            )
+            self.assertIn("Assistant:", output)
+            text = Path(args.out).read_text(encoding="utf-8")
+            self.assertEqual(text.count("### Step "), 7)
+            self.assertIn('"human_gate_passed": false', text)
+            self.assertIn('"status": "not_scored"', text)
+            self.assertIn("- Router restored and healthy in the trial sandbox: True", text)
+            private = Path(args.facilitator_log).read_text(encoding="utf-8")
+            self.assertIn("host router doctor", private)
+            self.assertIn("sandbox router", private)
+
+    def test_production_run_trial_restores_after_injected_post_uninstall_failure(self):
+        source = Path(os.environ["AWA_TRIAL_ROUTER_SOURCE"])
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            env = self._production_env(root)
+            args = self._production_args(root, source, "post-uninstall-failure")
+            real_worker = runner.WorkerClient
+
+            class FailingOffWorker(real_worker):
+                def turn(self, *, on, **kwargs):
+                    if not on:
+                        raise runner.TrialFailure("injected post-uninstall production failure")
+                    return super().turn(on=on, **kwargs)
+
+            with mock.patch.dict(os.environ, env, clear=True):
+                self._install_host_router(source, env)
+                with mock.patch(
+                    "consumer.trial_runner.WorkerClient", FailingOffWorker
+                ), contextlib.redirect_stdout(io.StringIO()):
+                    rc = runner._run_trial(args)
+            self.assertEqual(rc, 2)
+            text = Path(args.out).read_text(encoding="utf-8")
+            self.assertIn("injected post-uninstall production failure", text)
+            self.assertIn('"status": "error"', text)
+            self.assertIn("- Router state preserved: True", text)
+            self.assertIn("- Router restored and healthy in the trial sandbox: True", text)
+            self.assertIn("ERROR BEFORE OUTPUT", text)
+
 
 class TestCIConfiguration(unittest.TestCase):
     def test_router_seam_fails_closed_without_credentials(self):
@@ -663,6 +959,8 @@ class TestCIConfiguration(unittest.TestCase):
         self.assertIn("ROUTER_SEAM_TOKEN is required", workflow)
         self.assertIn("exit 1", workflow)
         self.assertNotIn("Skipping (green)", workflow)
+        self.assertIn("python: ['3.9', '3.12']", workflow)
+        self.assertIn("TestRouterLifecycleSeam", workflow)
 
 
 if __name__ == "__main__":

@@ -184,7 +184,11 @@ class OperatorLoop:
                expected_confirmation_fingerprint: str | None = None) -> dict:
         """Run one operator turn. `confirm` is the operator's answer to a consequence question
         (None = not yet asked/answered). `facts`/`target` let a caller (and tests) supply the
-        kernel target facts deterministically; in real use the kernel probes them."""
+        kernel target facts deterministically; in real use the kernel probes them.
+
+        `confirm=True` remains a trusted caller attestation for compatibility. Stateless or
+        untrusted replay adapters must also pass `expected_confirmation_fingerprint`; when supplied,
+        a mismatch always re-opens the gate instead of executing."""
         result: dict = {
             "utterance": utterance,
             "router_available": None,
