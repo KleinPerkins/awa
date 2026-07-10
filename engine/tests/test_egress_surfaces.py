@@ -7,7 +7,7 @@ the router UNINSTALLED (kernel-first). The seven surfaces (plan ~183):
   1. chat loop (operator loop)          — live loop over the golden set (FakeRouter), A0 subset.
   2. guard block / refuse message       — the REAL kernel guard hook, driven end-to-end.
   3. dashboard canvas                   — the seed's PM_COPY block + the emitter's plain_* fields.
-  4. MCP approval / consent labels      — the real consent_prompt() for every mutating tool.
+  4. MCP consent-copy contract          — candidate host copy; not production-wired by AWA.
   5. discard / save confirmation        — render_confirmation over the REAL kernel consequence.
   6. doctor / status                    — emitter.render_status_lines() over a real emit.
   7. detection receipts / timeline      — a REAL afterFileEdit receipt through render_timeline().
@@ -269,21 +269,27 @@ class TestEgressSurfaces(_EgressBase):
             self.assertIn("plain", doc)
             self.assertCleanAndBites(self._plain_projection(doc), "surface3:dashboard-real-emit")
 
-    # -- surface 4: MCP approval / consent labels ----------------------------------------------
+    # -- surface 4: contract-only MCP consent copy (not production-wired) -----------------------
     def test_surface4_mcp_consent_plain_intent(self):
-        cases = [("awa_mode_set", {"mode": "off"}), ("awa_mode_set", {"mode": "on"}),
-                 ("awa_mode_set", {"mode": "advisory"}), ("awa_mode_remove", {}),
-                 ("awa_mode_repair", {}), ("awa_mode_sync", {})]
+        cases = [("awa_mode_set", {"rel": "repo", "mode": "off"}),
+                 ("awa_mode_set", {"rel": "group/*", "mode": "off"}),
+                 ("awa_mode_set", {"rel": "repo", "mode": "on"}),
+                 ("awa_mode_set", {"rel": "group/*", "mode": "on"}),
+                 ("awa_mode_set", {"rel": "repo", "mode": "advisory"}),
+                 ("awa_mode_remove", {"rel": "repo"}),
+                 ("awa_mode_remove", {"rel": "group/*"}),
+                 ("awa_mode_repair", {}), ("awa_mode_sync", {}),
+                 ("awa_mode_sync", {"default_mode": "off"})]
         prompts = []
         for name, args in cases:
             p = mcp_server.consent_prompt(name, args)
-            self.assertIsInstance(p, str, f"{name}: mutating tool must have a consent prompt")
+            self.assertIsInstance(p, str, f"{name}: mutating tool must have candidate copy")
             # Plain INTENT, never the tool name (nor any awa_* token).
-            self.assertNotIn(name, p, f"{name}: consent label leaks the tool name")
-            self.assertNotIn("awa_", p, f"{name}: consent label leaks a tool token")
-            self.assertTrue(p.rstrip().endswith("?"), f"{name}: consent label should ask, plainly")
+            self.assertNotIn(name, p, f"{name}: candidate copy leaks the tool name")
+            self.assertNotIn("awa_", p, f"{name}: candidate copy leaks a tool token")
+            self.assertTrue(p.rstrip().endswith("?"), f"{name}: candidate copy should ask, plainly")
             prompts.append(p)
-        # Read-only tools take no consent prompt (nothing to approve).
+        # Read-only tools need no future mutating-action consent copy.
         for ro in ("awa_status", "awa_lease_read", "awa_guard_shell"):
             self.assertIsNone(mcp_server.consent_prompt(ro, {}), f"{ro}: read-only, expected no prompt")
         self.assertCleanAndBites(prompts, "surface4:mcp-consent")
