@@ -61,13 +61,16 @@ jobs:
   # missing/broken router a HARD FAILURE), so drift turns AWA CI red.
   #
   # KleinPerkins/intent-router is PRIVATE, so cloning it needs a read credential the default
-  # GITHUB_TOKEN does not carry. The job self-activates when the repo secret ROUTER_SEAM_TOKEN
-  # (a fine-grained PAT, Contents: read on KleinPerkins/intent-router) is present, and skips GREEN
-  # with an actionable notice until then — so it never falsely reds the PR before the credential
-  # exists, and needs no code change to turn on.
+  # GITHUB_TOKEN does not carry. ROUTER_SEAM_TOKEN (a fine-grained PAT, Contents: read on
+  # KleinPerkins/intent-router) is therefore a required external prerequisite. Absence is a hard,
+  # actionable failure: this seam must never report green without running.
   router-seam:
-    name: router-seam (pinned, non-skipped)
+    name: router-seam (pinned, py${{ matrix.python }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.9', '3.12']
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - name: Detect router-seam credential
@@ -79,12 +82,13 @@ jobs:
             echo "have_token=true" >> "$GITHUB_OUTPUT"
           else
             echo "have_token=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=router-seam inactive::ROUTER_SEAM_TOKEN not set. KleinPerkins/intent-router is PRIVATE, so co-installing it needs a read credential. Add a fine-grained PAT repo secret ROUTER_SEAM_TOKEN (Contents: read on KleinPerkins/intent-router) to activate the non-skipped seam run. Skipping (green) until then."
+            echo "::error title=router-seam blocked::ROUTER_SEAM_TOKEN is required. Add a fine-grained PAT repo secret with Contents: read on KleinPerkins/intent-router. This job fails closed and does not provision credentials."
+            exit 1
           fi
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
         if: steps.gate.outputs.have_token == 'true'
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python }}
       - name: Co-install the pinned router + run the seam NON-SKIPPED
         if: steps.gate.outputs.have_token == 'true'
         env:
@@ -102,3 +106,9 @@ jobs:
           # skip; the seam assertions then bite on any pinned-contract drift.
           AWA_SEAM_REQUIRE_ROUTER=1 python3 -m unittest -v \
             engine.tests.test_consumer_seam engine.tests.test_consumer_golden
+          # Prove the trial harness's REAL isolated lifecycle: installer ON + fresh worker,
+          # KEEP_STATE uninstall + two fresh OFF workers, then installer restore + doctor.
+          AWA_TRIAL_REQUIRE_ROUTER_LIFECYCLE=1 \
+            AWA_TRIAL_ROUTER_SOURCE="$RUNNER_TEMP/intent-router" \
+            python3 -m unittest -v \
+              engine.tests.test_consumer_trial_runner.TestRouterLifecycleSeam

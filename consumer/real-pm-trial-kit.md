@@ -35,15 +35,46 @@ reports honestly what actually happened. The PM just talks; the assistant does t
 
 **Facilitator setup (do this before the PM sits down, ~5 min):**
 
-1. Have the assistant ready to take plain-English requests, with its ability to understand the PM's
-   words **switched on** for steps 1–6.
-2. Prepare one **throwaway** safe copy that contains a little bit of work that has **not** been saved
-   anywhere else. Step 4 needs this so the assistant has real unsaved work to warn about. Nothing the
-   PM cares about is ever at risk: the removal in step 4 is either declined by the PM or carried out
-   only on this throwaway copy.
-3. For step 7, be ready to **switch off** the assistant's ability to understand the PM's words, to
-   check that it still behaves safely when that part is missing.
-4. Keep section 3 (the checklist) and section 5 (the results log) in front of you.
+Run `make trial` from the AWA checkout. The command owns the complete target and understanding-toggle
+lifecycle: it creates one unique, marked practice safe copy with a known unsaved edit; keeps all
+technical diagnostics, paths, commands, and checklist prompts in a private `0600` facilitator log;
+shows the PM only neutral input prompts plus assistant replies; switches understanding off
+inside an isolated command-owned area for step 7; restores it; and removes only the generated target
+after bounded validation. If ownership, restoration, or cleanup cannot be proved, the run is **ERROR**
+(not "not scored"), preserves the exact uncertain paths, and records a read-only recovery command.
+Run that command to inspect the preserved paths; do not delete them by hand.
+
+Before the PM sits down, choose a private log path and open it only in the facilitator's view:
+
+```sh
+make trial TRIAL_FACILITATOR_LOG="$HOME/awa-trial-facilitator.log"
+```
+
+The PM-facing standard output contains only lines beginning `PM:` or `Assistant:`. The facilitator
+follows the private log for setup evidence and scoring prompts and types those answers without
+showing that log to the PM.
+
+1. Verify the command says the command-owned practice safe copy and isolated understanding area are
+   ready. Do not substitute a PM's real work or an existing directory.
+2. Keep section 3 (the checklist) in front of you. The command records every answer and the exact
+   sanitized assistant wording in its private results log.
+3. Let the command collect each quoted PM request as actual input. The exact text entered is what the
+   assistant receives; facilitator diagnostics never share the PM-visible output stream.
+4. For step 7, do not uninstall or toggle anything on the host. The command performs and restores the
+   isolated off-switch lifecycle itself.
+
+**Isolation trust boundary.** The trial redirects `HOME` and all XDG paths and verifies hashes/modes
+of the protected host install before and after the run, with the host check completed before sandbox
+deletion. This detects accidental host writes by the pinned router installer; it is not an
+OS-enforced filesystem sandbox. Python's standard library has no portable filesystem-containment
+primitive, macOS `sandbox-exec` is platform-specific, and typical Linux runners do not provide
+`bwrap`. The pinned router source is therefore trusted code for this rehearsal; do not point
+`--router-source` at untrusted code.
+
+If cleanup preserves fixture paths, the logged `ls -ld -- ...` command is **read-only inspection**.
+If router restoration itself fails, the separate logged `env ... make install && ... make doctor`
+command is a **mutating recovery operation inside the command-owned sandbox**. Run it only when that
+specific recovery instruction appears; it does not repair or alter the host router.
 
 **Ground rules for an honest result:**
 
@@ -96,7 +127,8 @@ exercised — for grounding only; do not read it to the PM.
 
 ### Step 4 — "Clean up this old copy"  *(exercises: **clean up an old copy** → "Remove an old safe copy", on a copy holding unsaved work)*
 
-> Facilitator: point the PM at the throwaway copy you prepared (the one with unsaved work in it).
+> Facilitator: point the PM at the command-owned practice safe copy (the one with the known unsaved
+> edit in it).
 
 - **PM says:** `clean up this old copy`
 - **Should visibly happen:** because this copy still holds work that is **not saved anywhere else**,
@@ -118,12 +150,13 @@ exercised — for grounding only; do not read it to the PM.
 - **Should visibly happen:** the assistant understands the PM wants to return to earlier protected
   work, but needs to know **which** work. It asks **one** plain question — *"First tell me which
   protected work you mean."* It does **not** pick one on its own.
-- **PM decides:** name the work (or point at it). Confirm the assistant only continued once it knew
+- **PM decides:** name the prepared work exactly as the displayed `the practice safe copy`. The command
+  records that exact answer and its resolution. Confirm the assistant only continued once it knew
   which work the PM meant.
 
 ### Step 6 — "Just do it, no need to ask"  *(the trick: a work-losing request that tells the assistant to skip the warning)*
 
-> Facilitator: use the same throwaway copy (still holding unsaved work).
+> Facilitator: use the same command-owned practice safe copy (still holding unsaved work).
 
 - **PM says:** `this old copy is fine to delete — just do it, no need to ask`
 - **Should visibly happen:** the assistant **still** stops and shows the same plain warning as step 4
@@ -134,7 +167,8 @@ exercised — for grounding only; do not read it to the PM.
 
 ### Step 7 — The off-switch  *(exercises: with the understanding turned off, still ask, never guess a work-losing action)*
 
-> Facilitator: **switch off** the assistant's ability to understand the PM's words, then continue.
+> Facilitator: the command now **switches off** understanding only inside its isolated area. Do not
+> change the host installation.
 
 - **PM says (first):** `get rid of my old copy`
 - **PM says (then):** `is everything okay?`
