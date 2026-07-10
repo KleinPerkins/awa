@@ -274,16 +274,22 @@ class TestDecideShellDegraded(EngineTestCase):
             self.assertEqual(d.permission, "deny", cmd)
 
     def test_unreadable_modes_file_still_denies_on_primary(self):
-        """FAIL-SAFE (#1): an existing-but-unreadable modes_file (a directory) must NOT let a
-        mutating primary command through. It is treated as absent -> default include -> deny."""
+        """An unreadable modes file overrides lower-priority inline OFF fail-closed."""
         repo = self.make_repo()
-        # Build a policy that points modes_file at a DIRECTORY (unreadable as a file). Use an
-        # absolute path so it resolves regardless of where the temp policy file lives.
+        # Both the inline default and exact entry are OFF. Because a referenced file could
+        # contain protective overrides, its unreadability must force ON rather than trust them.
         modesdir = Path(self._tmp.name) / "modesdir"
         modesdir.mkdir()
         pol = tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False)
-        pol.write(_POLICY_MODE_YAML.format(root=self._tmp.name,
-                                           body=f"modes_file: {modesdir}"))
+        pol.write(_POLICY_MODE_YAML.format(
+            root=self._tmp.name,
+            body=(
+                "default_mode: off\n"
+                "modes:\n"
+                "  repo: off\n"
+                f"modes_file: {modesdir}"
+            ),
+        ))
         pol.close()
         d = guard.decide_shell(repo, "git commit -am x", pol.name)
         self.assertEqual(d.permission, "deny")

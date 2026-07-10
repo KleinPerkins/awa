@@ -54,8 +54,9 @@ mode subcommands (delegated to the engine modes manager; edits ONLY the host mod
   mode get <rel>                 show the explicit entry (exact key) for a repo path/glob
   mode set <rel> <on|off>        set an explicit mode (on = protected; off = disabled)
   mode remove <rel>              remove an explicit mode entry (idempotent)
-  mode repair                    normalize the file's own contents: drop invalid values/empty
-                                 keys, normalize default_mode (idempotent; no filesystem scan)
+  mode repair                    normalize the file's own contents: coerce invalid values to on,
+                                 drop unsafe/empty keys, normalize default_mode (idempotent;
+                                 requires an existing file; no filesystem scan)
   mode sync [--default-mode M]   ensure-exists + normalize the file (creates it if absent;
                                  preserves entries + a valid default_mode; no filesystem scan)
   (accepts --policy P / --modes-file F; defaults to the resolved host policy)
@@ -146,8 +147,8 @@ classify_repo() {
 
 # Resolve the EXPLICIT per-repo mode (on|off|invalid|(none)) via the generic
 # `mode-for` CLI — the SAME kernel resolver + host policy the classifier uses (zero-link;
-# the modes map / default_mode / modes_file all live in the host policy). Empty output
-# (no explicit entry) is surfaced as `(none)`. This is a READ; it never mutates anything.
+# inline/file modes and defaults all come from the host policy). Empty output (no exact or
+# matching glob entry) is surfaced as `(none)`. This is a READ; it never mutates anything.
 explicit_mode_for() {
   local top="$1" m
   m="$(python3 "$AWA_POLICY_LIB" mode-for --policy "$POLICY" \
@@ -904,11 +905,11 @@ try:
         allowed = "|".join(awa_policy.MODE_VALUES)
         if default_mode not in awa_policy.MODE_VALUES:
             warnings.append(f"default_mode '{default_mode}' is not one of {allowed}")
-        # (d) default_mode: off silences AWA for ALL eligible repos with no explicit entry.
+        # (d) default_mode: off silences AWA for eligible repos with no exact/glob match.
         if str(default_mode).strip().lower() == "off":
             warnings.append(
-                "default_mode 'off' disables AWA for ALL eligible repos with no explicit "
-                "entry — confirm this is intended"
+                "default_mode 'off' disables AWA for ALL eligible repos with no exact or "
+                "matching glob entry — confirm this is intended"
             )
         for key, val in modes.items():
             k = str(key).strip()

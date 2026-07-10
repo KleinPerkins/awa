@@ -45,8 +45,8 @@
     },
     {
       "id": 4,
-      "surface": "MCP approval / consent labels",
-      "render_path": "engine/mcp_server.py consent_prompt() — plain intent, never a tool name",
+      "surface": "MCP consent-copy contract (not production-wired)",
+      "render_path": "engine/mcp_server.py consent_prompt() — candidate host copy, plain intent, never a tool name",
       "authoritative_tests": [
         "engine.tests.test_egress_surfaces.TestEgressSurfaces.test_surface4_mcp_consent_plain_intent"
       ]
@@ -84,7 +84,7 @@
     ]
   },
   "mcp_consent": {
-    "requirement": "Approval labels state plain intent (e.g. 'Temporarily stop protecting this repo?'), never a tool name or mechanism term.",
+    "requirement": "Contract-only candidate approval copy states persistent exact/glob scope and fallback honestly, never a tool name or mechanism term; AWA does not claim this copy is production-wired.",
     "authoritative_tests": [
       "engine.tests.test_egress_surfaces.TestEgressSurfaces.test_surface4_mcp_consent_plain_intent"
     ]

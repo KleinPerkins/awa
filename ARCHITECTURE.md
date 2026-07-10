@@ -57,7 +57,8 @@ ever regressing a green verifier.
 | `recovery` | Patch round-trip + bundle (secret-skip S1, symlink-escape drop S2) + restore + list |
 | `daemon` | Single-instance (flock'd pidfile) bounded maintenance loop + quarantine-ref cleanup/retention |
 | `guard` | Adversary-aware mutating-shell classifier + engine-OFF decision + cleanup-refusal (`can_clean`); reads ONLY policy + `.awa/lease.json` |
-| `mcp_server` | stdio newline-delimited JSON-RPC MCP server exposing read-only tools (`awa_status`, `awa_lease_read`, `awa_guard_shell`) |
+| `mcp_server` | stdio newline-delimited JSON-RPC MCP server exposing three read-only diagnostic tools plus six path-scoped mode tools; inline instructions are the primary agent-routing surface |
+| `mcp_resources` | Pure fixed-resource registry/renderer for the secondary `awa://assistant/operator-guide/v1`; consumes in-memory advertised tool descriptions and reads no environment, filesystem, policy, contract, database, or live state |
 | `remote` | Apply-back execute adapter: read/write token split (S3), SHA-drift refusal, preview→confirm gating (live push is an operator step) |
 | `redact` | S5 secret/PII redaction pass; every persisted audit/command string is piped through it |
 | `cli` / `__main__` | `awa-engine` command surface (launched by `bin/awa-engine.sh`) |
@@ -104,13 +105,16 @@ modes:
   projects/bar: off
 ```
 
-Keys are repo paths relative to the governed root (exact or glob, first-match by file order, exact
-preferred), values `on|off` (case-normalized). One **fail-safe rule** governs both the classifier
-read-path and the modes writer: only an exact `off` disables; any other value — a typo, a removed
-legacy value — resolves to `on`. `default_mode` governs eligible repos with no explicit entry. The
-file is intended to be **source-tracked** in the host overlay and rewritten only by the tools —
-never hand-edited. A repo-local mode marker is deliberately rejected: a cloned repo could ship `off`
-to silence the guard (a repo-controlled safety downgrade), so modes are host-owned only.
+Keys are repo paths relative to the governed root (exact or glob), values `on|off`
+(case-normalized). Runtime merges compatibility entries/default from the inline host policy with
+the referenced modes file; the file wins identical keys/default. Resolution then prefers an exact
+combined key, then the first matching combined glob. `default_mode` applies only at the final
+eligibility step when neither matches. One **fail-safe rule** governs the classifier and writer:
+only an exact `off` disables; any other value — a typo or removed legacy value — resolves to `on`.
+A present but unreadable/non-regular referenced file forces combined modes/default to `on` rather
+than trusting lower-priority inline `off` settings. The file is intended to be **source-tracked** in
+the host overlay and rewritten only by tools — never hand-edited. A repo-local mode marker is
+deliberately rejected: a cloned repo could ship `off` to silence the guard, so modes are host-owned.
 
 ### Resolution precedence (classifier, first-match-wins)
 
@@ -135,31 +139,66 @@ identically, and their parity (including `modes_file` load and invalid handling)
 ### Default posture (product vs host)
 
 The shipped template keeps `default_mode: on` for byte-for-byte back-compat: a host with no
-`modes_file`/`modes` behaves exactly as before, and every eligible repo is protected (an
-included-primary mutation denies). A host may set `default_mode: off` to leave new eligible repos
-alone by default; any non-`off` default (including a stale legacy value) fails safe to ON, and
-`mode repair` normalizes a legacy `default_mode` forward to `on` (the sanctioned migration path).
+`modes_file`/`modes` behaves exactly as before. A host may set `default_mode: off` to exclude
+otherwise eligible repos with no combined exact/glob match; it does not govern safety-excluded,
+no-origin, or otherwise ineligible repos. Any non-`off` default (including a stale legacy value)
+fails safe to ON, and `mode repair` normalizes a legacy referenced-file `default_mode` forward to
+`on` (the sanctioned migration path).
 
 ### Tools — generalized verbs (view / add / update / delete / repair / sync)
 
 Modes are managed only through generalized verbs over the modes file — never by hand:
 
-- Engine: `python3 -m engine mode {list,get,set,remove,repair,sync,doctor}` (via `engine/modes.py`).
+- Engine: `python3 -m engine mode {list,get,set,remove,repair,sync}` (via `engine/modes.py`).
 - Kernel CLI: `dev-worktree.sh mode <verb>` delegates to the engine module.
 - MCP: read tools `awa_mode_list`/`awa_mode_get` plus mutating, path-scoped config tools
   `awa_mode_set`/`awa_mode_remove` (write) and `awa_mode_repair`/`awa_mode_sync` (ensure-exists +
   normalize/repair the file's own contents, idempotent and non-destructive of explicit entries).
 
-Writes are schema-validated, atomic, and backup-before-write, and are **path-scoped to the host
-modes file** — they never touch a repo, git, or a primary checkout. The MCP server's read-only
-invariant is amended to "read-only for safety state; config mutations are path-scoped to the host
-modes file." `sync`/`repair` do **not** scan the filesystem, materialize per-repo entries, prune, or
-report stale repos — they ensure the file exists and normalize/repair its own contents (dropping
-invalid values/empty keys, normalizing `default_mode`); the runtime **`default_mode`** is the
-mechanism that protects a new eligible repo. `sync` is additionally a no-op write when the file is
-already canonical (so an install/overlay run leaves a source-tracked file byte-stable). These make
+Writes are schema-validated and atomic (same-directory temporary file, `fsync`, then `os.replace`);
+mode writes do not create backup copies. They are **path-scoped to the host modes file** — they never
+touch a repo, git, or a primary checkout. The MCP server's read-only invariant is amended to
+"read-only for safety state; config mutations are path-scoped to the host modes file."
+`sync`/`repair` do **not** scan the filesystem, materialize per-repo entries, prune, report stale
+repos, or inspect inline policy settings. `repair` requires an existing referenced file; `sync`
+creates it when absent. They normalize only that file (preserving invalid/legacy value keys as
+protected `on`, dropping unsafe/empty keys, and normalizing an invalid file `default_mode`).
+`sync(default_mode=off)` can seed a missing or invalid file default, excluding each eligible repo
+with no combined inline/file exact or matching glob entry. `sync` is additionally a no-op write
+when the file is already canonical (so an install/overlay run leaves a source-tracked file
+byte-stable). These make
 modes changeable in plain language by a non-technical owner, with the CLI verbs as the parity
 mechanism.
+
+### MCP guidance is advisory and secondary to the kernel
+
+Correct routing must work from the nine tool descriptions and `initialize.instructions`; resources
+are not a safety or routing dependency. The server remains on MCP `2024-11-05`, advertises
+`capabilities.resources: {}`, and implements deterministic `resources/list`, exact-match
+`resources/read`, and an empty `resources/templates/list`. Its sole resource is a fixed
+`text/markdown` operator guide of at most 500 words rendered from the advertised descriptions inside
+the existing tool catalog. Independent semantic tests bind those descriptions to exact-before-glob
+mode resolution, default fallback, CLI routing, and safety boundaries.
+
+Resource consumption is host-driven: Cursor may list/read the guide when asked, but AWA does not
+assume automatic injection. The guide contains no live status, mode values, lease records, paths,
+SQLite history, recovery artifacts, raw kernel contract, templates, subscriptions, or lifecycle
+actions. It routes current-repo state, Safe Workspace creation/selection, policy/worktree health,
+and removal to the corresponding kernel CLI verbs; other lifecycle/recovery intents route to
+`awa-engine`. It states that engine status is not full health, guard output is diagnostic, lease
+reads validate contract fields/hash only, cleanup uses active-root/git/content checks, inline and
+file modes merge before exact/glob resolution, `default_mode` applies only at final eligibility,
+and safety exclusions still outrank `on`. None of these surfaces is load-bearing: kernel safety and
+cleanup refusal still hold with the engine off.
+
+The resource is retained solely because a real Cursor Desktop explicit on-demand read proved the
+plan's alternative utility criterion. Catalog discovery supports that read but is not evidence of
+model routing. The resource added no routing coverage beyond inline metadata; the model-output
+matrix was blocked by authentication and was not fabricated, so no model-routing benefit is proven.
+Evidence:
+[`RESULTS-MCP-GUIDANCE-BASELINE-20260709.md`](live-verify/RESULTS-MCP-GUIDANCE-BASELINE-20260709.md).
+`consent_prompt()` is contract-only candidate host copy; the stdio server does not render or
+enforce it, and no production consent wiring is claimed.
 
 ## The contract is BEHAVIOR-only (location is informational)
 

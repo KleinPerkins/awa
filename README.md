@@ -52,7 +52,9 @@ place org/host literals live, and it is never vendored or published.
 
 Each governed repo has an explicit AWA **mode** you can set and inspect:
 
-- **ON** — protected. A confirmed mutating command on the repo's **primary** checkout returns an
+- **ON** — a matching non-`off` mode classifies a repo as included unless a higher-priority safety
+  exclusion applies; `default_mode: on` applies only to repos that reach the final eligibility
+  step. A confirmed mutating command on a resulting included **primary** checkout returns an
   enforced hook **`deny`** (Cursor enforces `deny`; it treats `ask` as non-blocking — see
   [SECURITY.md](SECURITY.md#platform-limitation--cursor-enforces-hook-deny-not-ask-l4)), steering
   work into a Safe Workspace. A Cursor Cloud / background agent (already an isolated own-branch
@@ -62,32 +64,63 @@ Each governed repo has an explicit AWA **mode** you can set and inspect:
 One **fail-safe rule** governs both the classifier and the modes writer: only an exact `off`
 disables protection; **any other value** — a typo, a removed legacy value — resolves to ON.
 
-Modes live in a tool-owned, source-tracked modes file (schema `awa-modes/v1`) that your policy
-points at via `modes_file:`. You never hand-edit it — set and inspect modes through the CLI or the
-MCP tools:
+The runtime merges compatibility settings written inline in the host policy with the tool-owned,
+source-tracked modes file (schema `awa-modes/v1`) named by `modes_file:`; the referenced file wins
+an identical key/default. Exact keys then win over globs, matching globs follow file order, and
+`default_mode` applies only at final eligibility when neither matches. The CLI and MCP tools manage
+only the referenced file, not inline settings. Never hand-edit the referenced file:
 
 ```bash
 dev-worktree.sh mode list                 # show every configured repo + the default
 dev-worktree.sh mode get   projects/foo    # show the explicit entry (exact key) for one repo
 dev-worktree.sh mode set   projects/foo on # set a repo to on | off
-dev-worktree.sh mode remove projects/foo   # drop the explicit entry (fall back to the default)
+dev-worktree.sh mode remove projects/foo   # remove this file key; inline/glob/default may emerge
 dev-worktree.sh mode sync                  # ensure-exists + normalize the modes file (idempotent)
 ```
 
-`sync`/`repair` do **not** scan the filesystem, materialize per-repo entries, or prune stale
-repos — they ensure the file exists and normalize/repair its own contents; the runtime
-`default_mode` is what protects a new eligible repo. `policy-check` **WARNs** (never hard-fails) on
-an invalid/broad-off/legacy/dangling-pointer config.
+`sync`/`repair` do **not** scan the filesystem, materialize per-repo entries, or prune stale repos.
+`repair` requires an existing referenced file; `sync` creates one when missing. Both coerce invalid
+values to fail-safe `on`, drop unsafe/empty keys, and normalize an invalid default. A present but
+unreadable/non-regular referenced file forces runtime mode/default values to `on`, including over
+lower-priority inline `off` values. `policy-check` **WARNs** (never hard-fails) on an
+invalid/broad-off/legacy/dangling-pointer config.
 
 The same operations are exposed as MCP tools for plain-language use: `awa_mode_list` / `awa_mode_get`
 (read) and `awa_mode_set` / `awa_mode_remove` / `awa_mode_repair` / `awa_mode_sync` (write, scoped to
 the modes file only — they never touch a repo, git, or your primary checkout; `sync`/`repair`
-normalize the file's own contents, they do not scan the filesystem).
+normalize the file's own contents, they do not scan the filesystem). `awa_mode_list`/`get` expose
+only referenced-file storage, not effective runtime mode. Runtime first merges inline policy and
+file settings, then prefers an exact combined key and the first matching combined glob.
+`default_mode` applies only at the final eligibility step when neither matches. Removing a file key
+can therefore reveal an inline exact key or another inline/file glob rather than the default.
+Supplying `default_mode=off` to `awa_mode_sync` seeds only a missing or invalid file default, but
+when it does, each eligible repo with no combined exact or matching glob entry is excluded.
 
-**Default posture.** A repo with no explicit entry falls back to `default_mode`. The shipped default
-is `on` (every eligible repo protected). A host may set `default_mode: off` to leave new eligible
-repos alone by default; any non-`off` default (including a stale legacy value) fails safe to ON, and
-`mode repair` normalizes a legacy default_mode forward to `on`.
+The MCP server puts routing and safety guidance directly in each tool description and in
+`initialize.instructions`. It also advertises one secondary, fixed on-demand document at
+`awa://assistant/operator-guide/v1` (`text/markdown`). Cursor decides whether and when to list/read
+that resource; AWA does not assume it is automatically injected. The guide is advisory and contains
+no live status, modes, leases, paths, history, recovery data, raw contracts, or lifecycle actions.
+Use `dev-worktree.sh status` for current-repo classification/root/worktree state, `ensure` to
+create/select a Safe Workspace, `doctor` for policy/worktree health, and `clean` for
+bundle-or-refuse removal. Use `awa-engine` for adopt/attest/apply-back/publish/retire/recovery.
+Engine status is not full health, guard output is diagnostic, and lease reads check only contract
+fields/hash; cleanup uses the active-root heartbeat plus git/content checks. The kernel guarantee
+continues with the engine off.
+
+**Live evidence: RETAIN, narrowly.** A real Cursor Desktop explicit on-demand read returned the
+fixed guide; that read alone satisfies the plan's explicit-utility alternative. The resource added
+no metadata routing coverage beyond inline guidance, and no authenticated model-output matrix ran;
+no model-routing benefit is claimed. See
+[`RESULTS-MCP-GUIDANCE-BASELINE-20260709.md`](live-verify/RESULTS-MCP-GUIDANCE-BASELINE-20260709.md).
+`consent_prompt()` remains contract-only candidate copy for a future host integration: the AWA
+stdio server neither renders nor enforces it, so it is not a production consent control.
+
+**Default posture.** A repo with no combined inline/file exact or matching glob entry uses
+`default_mode` only if it reaches the final eligibility step. The shipped default is `on`. A host
+may set `default_mode: off` to exclude otherwise eligible unmatched repos; any non-`off` default
+(including a stale legacy value) fails safe to ON, and `mode repair` normalizes a legacy default in
+the referenced file forward to `on`.
 
 ## Install verbs
 
@@ -113,7 +146,8 @@ The engine (`awa-engine <verb>`, launched by `bin/awa-engine.sh`): `doctor`, lif
 (`recover patch|bundle|restore-patch|list`), guard (`guard shell`/`guard can-clean` — engine-off
 advisory; `guard can-clean` may refuse when kernel `clean` succeeds after squash-merge detection
 because engine cleanup remains ancestry-stricter until fast-follow B), `daemon` (`status`/`run-once`),
-`events`, and `mcp-serve` (a stdio JSON-RPC MCP server exposing read-only tools).
+`events`, and `mcp-serve` (a stdio JSON-RPC MCP server exposing nine tools plus the fixed advisory
+operator guide).
 
 ## Layout
 

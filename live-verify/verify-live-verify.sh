@@ -6,7 +6,8 @@ fail=0
 for f in README.md OPERATOR-CLOSEOUT.md OPERATOR-UAT-SESSION.md bootstrap-hook-probe-uat.sh \
          bootstrap-eligible-uat.sh cloud-hooks-runbook.md awa-mcp-runbook.md mode-uat-runbook.md \
          apply-back-uat-runbook.md move-agent-to-root-runbook.md desktop-hook-redrive-runbook.md \
-         RESULTS-R-A-2026-07-05.md RESULTS-e2e-uat-20260706.md RESULTS-e2e-uat-20260707.md; do
+         RESULTS-R-A-2026-07-05.md RESULTS-e2e-uat-20260706.md RESULTS-e2e-uat-20260707.md \
+         RESULTS-MCP-GUIDANCE-BASELINE-20260709.md; do
   if [ -f "$SELF/$f" ]; then echo "  PASS  $f"; else echo "  FAIL  missing $f"; fail=1; fi
 done
 if [ -f "$SELF/../hook-probe/RESULTS-MCP-2026-07-05.md" ]; then

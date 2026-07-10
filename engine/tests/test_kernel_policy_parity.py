@@ -12,6 +12,7 @@ exercise it use real temp dirs (one with `_ops/POLICY.md`, one without).
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -165,18 +166,44 @@ class TestKernelPolicyParity(unittest.TestCase):
         self.assertEqual(e_cfg.default_mode, "on")
 
     def test_unreadable_modes_file_agrees(self):
-        """#1: both mirrors treat an unreadable (directory) modes_file as absent -> the
-        derived posture is preserved identically (fail-safe, byte-parity)."""
+        """Both mirrors force ON when a directory makes referenced contents unknowable."""
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "worktree-modes.yml").mkdir()
             pol = Path(d) / "worktree-policy.yml"
-            pol.write_text("version: 1\ndefault: include\nmodes_file: worktree-modes.yml\n",
-                           encoding="utf-8")
+            pol.write_text(
+                "version: 1\n"
+                "default: include\n"
+                "default_mode: off\n"
+                "modes_file: worktree-modes.yml\n"
+                "modes:\n"
+                "  proj: off\n",
+                encoding="utf-8",
+            )
             e_cfg = engine_policy.PolicyConfig.load(str(pol))
             k_cfg = awa_policy.PolicyConfig.load(str(pol))
             self.assertEqual(e_cfg.modes, k_cfg.modes)
             self.assertEqual(e_cfg.default_mode, k_cfg.default_mode)
-            self.assertEqual(e_cfg.modes, {})
+            self.assertEqual(e_cfg.modes, {"proj": "on"})
+            self.assertEqual(e_cfg.default_mode, "on")
+
+    def test_nonregular_fifo_modes_file_agrees(self):
+        """Both mirrors reject a FIFO without blocking and force the same ON posture."""
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("FIFO support unavailable")
+        with tempfile.TemporaryDirectory() as d:
+            os.mkfifo(Path(d) / "worktree-modes.yml")
+            pol = Path(d) / "worktree-policy.yml"
+            pol.write_text(
+                "version: 1\n"
+                "default: include\n"
+                "default_mode: off\n"
+                "modes_file: worktree-modes.yml\n",
+                encoding="utf-8",
+            )
+            e_cfg = engine_policy.PolicyConfig.load(str(pol))
+            k_cfg = awa_policy.PolicyConfig.load(str(pol))
+            self.assertEqual(e_cfg.modes, k_cfg.modes)
+            self.assertEqual(e_cfg.default_mode, k_cfg.default_mode)
             self.assertEqual(e_cfg.default_mode, "on")
 
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -107,14 +108,33 @@ def _modes_from_data(data: dict) -> tuple[dict, str | None]:
     return modes, default_mode
 
 
+def _read_regular_text(path: str | Path) -> str:
+    """Read one regular file without blocking on FIFOs or following symlinks."""
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(path), flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"not a regular file: {path}")
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            fd = -1
+            return fh.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def _resolve_modes(data: dict, policy_path: str | Path) -> tuple[dict, str]:
     """Resolve the explicit modes map + default_mode from inline policy values and an
     optional `modes_file:` pointer.
 
     The pointer is resolved relative to the policy file's directory (~ and absolute paths
-    honored). The referenced file (schema awa-modes/v1) is MERGED over the inline values,
-    the referenced file winning on key collision. Missing default_mode defaults to "on"
-    (byte-for-byte back-compat when nothing is configured).
+    honored). A readable regular referenced file (schema awa-modes/v1) is MERGED over the
+    inline values, the referenced file winning on key collision. A missing file leaves the
+    inline settings in effect. A present but unreadable/non-regular file forces every inline
+    mode and the default to protected ``on``: its unknown contents must never make a primary
+    checkout less protected.
     """
     modes, inline_default = _modes_from_data(data)
     default_mode = inline_default or "on"
@@ -125,18 +145,17 @@ def _resolve_modes(data: dict, policy_path: str | Path) -> tuple[dict, str]:
         if not os.path.isabs(mf):
             base = Path(policy_path).resolve().parent
             mf = str(base / mf)
-        mfp = Path(mf)
-        if mfp.exists():
-            # FAIL-SAFE: an existing-but-unreadable modes_file (a directory, a symlink->dir,
-            # or chmod-000) would raise OSError from read_text and propagate through
-            # PolicyConfig.load; the shell classifier degrades ANY classifier crash to a
-            # non-protective class, silently ALLOWING mutation on an included primary checkout.
-            # Treat an unreadable pointer as ABSENT (fdata = {}) so the derived posture
-            # (default_mode / include-default) still protects the repo.
-            try:
-                fdata = _parse_mini_yaml(mfp.read_text(encoding="utf-8"))
-            except OSError:
-                fdata = {}
+        try:
+            text = _read_regular_text(mf)
+        except FileNotFoundError:
+            pass
+        except (OSError, UnicodeError):
+            # The referenced file may contain protective overrides for inline `off` values.
+            # When its contents are unknowable, fail closed instead of trusting lower-priority
+            # inline settings that could weaken protection.
+            return ({key: "on" for key in modes}, "on")
+        else:
+            fdata = _parse_mini_yaml(text)
             fmodes, fdefault = _modes_from_data(fdata)
             modes.update(fmodes)  # referenced file wins on key collision
             if fdefault:
@@ -220,7 +239,7 @@ def _is_glob(pat: str) -> bool:
 
 
 def mode_for(rel: str, cfg: PolicyConfig) -> str:
-    """Return the explicit mode set for `rel`, preferring EXACT keys over globs.
+    """Return the matching inline/file mode for `rel`, preferring EXACT keys over globs.
 
     Exact (non-glob) keys are matched first (by equality), then glob keys in insertion
     order — so an exact key wins even when a matching glob precedes it in the file. The

@@ -332,8 +332,7 @@ class TestModesFile(unittest.TestCase):
 
 
 class TestUnreadableModesFile(unittest.TestCase):
-    """FAIL-SAFE (#1): an existing-but-unreadable modes_file must be treated as ABSENT so a
-    would-be-included repo still classifies protectively (never `advisory`/allow)."""
+    """Unreadable/non-regular referenced modes files force a protected posture."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -363,7 +362,45 @@ class TestUnreadableModesFile(unittest.TestCase):
             self.assertNotEqual(c.classification, policy.ADVISORY)
             self.assertEqual(c.classification, policy.INCLUDE)  # protective (guard asks)
 
-    def test_modes_file_chmod_000_treated_as_absent(self):
+    def test_directory_forces_on_over_inline_off(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "worktree-modes.yml").mkdir()
+            pol = Path(d) / "worktree-policy.yml"
+            pol.write_text(
+                "version: 1\n"
+                "default: include\n"
+                "default_mode: off\n"
+                "modes_file: worktree-modes.yml\n"
+                "modes:\n"
+                "  proj: off\n",
+                encoding="utf-8",
+            )
+            cfg = policy.PolicyConfig.load(pol)
+            self.assertEqual(cfg.default_mode, "on")
+            self.assertEqual(cfg.modes, {"proj": "on"})
+            self.assertEqual(
+                policy.classify("proj", self.top, cfg, has_origin=True).classification,
+                policy.INCLUDE,
+            )
+
+    def test_fifo_is_rejected_without_blocking_and_forces_on(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("FIFO support unavailable")
+        with tempfile.TemporaryDirectory() as d:
+            os.mkfifo(Path(d) / "worktree-modes.yml")
+            pol = Path(d) / "worktree-policy.yml"
+            pol.write_text(
+                "version: 1\n"
+                "default: include\n"
+                "default_mode: off\n"
+                "modes_file: worktree-modes.yml\n",
+                encoding="utf-8",
+            )
+            cfg = policy.PolicyConfig.load(pol)
+            self.assertEqual(cfg.default_mode, "on")
+            self.assertEqual(cfg.modes, {})
+
+    def test_modes_file_chmod_000_forces_on(self):
         with tempfile.TemporaryDirectory() as d:
             mf = Path(d) / "worktree-modes.yml"
             mf.write_text("schema: awa-modes/v1\ndefault_mode: off\n", encoding="utf-8")
@@ -371,7 +408,7 @@ class TestUnreadableModesFile(unittest.TestCase):
             try:
                 pol = self._policy_with_modes_file(d, "worktree-modes.yml")
                 cfg = policy.PolicyConfig.load(pol)   # must NOT raise
-                # unreadable -> absent: the `off` default inside is NOT honored (fail safe)
+                # Unreadable -> forced ON: the `off` default inside is not honored.
                 self.assertEqual(cfg.default_mode, "on")
                 c = policy.classify("proj", self.top, cfg, has_origin=True)
                 self.assertNotEqual(c.classification, policy.ADVISORY)

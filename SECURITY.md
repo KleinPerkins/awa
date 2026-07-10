@@ -55,6 +55,45 @@ tracked in `live-verify/RESULTS-e2e-uat-20260707.md` (Phase 1). The `ask`-is-non
 `afterFileEdit`-ignores-permission halves are already proven (2026-07-05 live observation + on-disk
 mutation + the L2 doc snapshot); the deny-blocks-on-Desktop half is the open live confirmation.
 
+## MCP guidance and resource boundary
+
+MCP guidance is advisory and never grants safety authority. Tool descriptions and
+`initialize.instructions` are the primary routing surface; the host may optionally list/read the
+single fixed `awa://assistant/operator-guide/v1` document. Neither the server nor the guide assumes
+Cursor automatically consumes resources. A guard-tool result is diagnostic rather than permission
+to execute. Lease reads check only required fields and the identity hash; absent, unreadable, and
+malformed records all report `found:false`, and cleanup instead uses the active-root heartbeat plus
+git/content checks. `dev-worktree.sh` owns current-repo state, Safe Workspace selection, health, and
+cleanup; other lifecycle/recovery intents remain on `awa-engine`. Engine status is not a full health
+check, and all kernel guarantees continue with the engine off.
+
+The resource renderer is pure: it consumes only in-memory advertised tool descriptions and cannot
+read the environment, host policy, filesystem, database, contracts, or live AWA state. The guide excludes
+live status/modes/leases, machine paths, audit or SQLite history, recovery artifacts, raw contracts,
+templates, subscriptions, notifications, and lifecycle actions. Protocol handling accepts only an
+exact resource URI, returns sanitized standard errors (`-32600` invalid request, `-32602` invalid
+params, `-32002` resource not found), classifies every syntactically valid non-matching URI
+(including `urn:` forms) as not found, validates 2024-11-05 initialize fields and request-ID types,
+accepts only integer/string request IDs, rejects explicitly null params, non-finite/over-nested JSON,
+and oversized newline-delimited messages, ignores request-method notifications without executing
+them, and recovers after malformed input without terminating or contaminating the next request. The
+undeclared caller-supplied `policy` override is not accepted by `awa_guard_shell`; policy remains
+server-resolved.
+
+Mode tools read/write only the referenced host modes file; effective runtime mode also merges
+inline host-policy settings, then resolves exact before first matching glob, with `default_mode`
+only at final eligibility. Higher-priority safety exclusions outrank `on`. A present but
+unreadable/non-regular referenced file forces modes/default to fail-safe `on`, including over
+inline `off` values, and FIFO inputs are rejected without blocking.
+
+**Live evidence status: RETAIN, narrowly.** A real Cursor Desktop explicit on-demand resource read
+alone proved the plan's alternative utility criterion; catalog discovery is not treated as model
+routing. The resource added no routing coverage beyond inline metadata; authentication blocked the
+model-output matrix, no substitute was fabricated, and no model-routing benefit is claimed. See
+[`RESULTS-MCP-GUIDANCE-BASELINE-20260709.md`](live-verify/RESULTS-MCP-GUIDANCE-BASELINE-20260709.md).
+`consent_prompt()` is only contract-tested candidate copy for a future host integration: the stdio
+server does not render or enforce it, so it is not a production consent control.
+
 ## Cluster D — Security ledger
 
 Status legend: **Verified** (closed with evidence) / **Partially closed** (kernel part done, engine

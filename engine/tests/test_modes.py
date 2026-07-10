@@ -265,6 +265,14 @@ class TestCorruptFileRecovery(ModesTestCase):
         with self.assertRaises(modes.ModesError):
             modes.sync(self.path)
 
+    def test_read_fifo_raises_actionable_without_blocking(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("FIFO support unavailable")
+        os.mkfifo(self.path)
+        with self.assertRaises(modes.ModesError) as ctx:
+            modes.list_modes(self.path)
+        self.assertIn("not a readable regular file", str(ctx.exception))
+
 
 class TestSerializeChokePoint(ModesTestCase):
     """#10: repair/sync must NOT persist an unsafe key introduced by a hand-edit."""
@@ -320,6 +328,11 @@ class TestSerializerHeader(ModesTestCase):
         text = self.path.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("# AWA per-repo MODE file"))
         self.assertIn("DO NOT HAND-EDIT", text)
+        self.assertIn(
+            "# default_mode governs eligible repos with no explicit entry; "
+            "modes is a tool-managed map.\n",
+            text,
+        )
         self.assertIn("schema: awa-modes/v1", text)
         self.assertIn("default_mode: off", text)
 

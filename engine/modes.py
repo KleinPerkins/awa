@@ -41,6 +41,7 @@ from .policy import (
     MODE_VALUES,
     _modes_from_data,
     _parse_mini_yaml,
+    _read_regular_text,
 )
 
 SCHEMA = "awa-modes/v1"
@@ -63,10 +64,10 @@ _HEADER = (
 _REL_SAFE_RE = re.compile(r"^[A-Za-z0-9/._*?\[\]-]+\Z")
 # Broad rel keys that MUST NOT be set to `off` — they disable the guard for every matched repo.
 _BROAD_OFF_RELS = frozenset({".", "*", "**"})
-# Default governing mode for eligible repos with no explicit entry, used ONLY when a file
-# is (re)created without an existing/explicit default, OR to normalize an invalid/legacy
-# default. "on" reproduces today's derived classification byte-for-byte (product back-compat)
-# and is the fail-safe target: only an exact `off` disables protection.
+# Default governing mode for eligible repos with no exact or matching glob entry, used ONLY
+# when a file is (re)created without an existing/explicit default, OR to normalize an
+# invalid/legacy default. "on" reproduces today's derived classification byte-for-byte
+# (product back-compat) and is the fail-safe target: only an exact `off` disables protection.
 DEFAULT_DEFAULT_MODE = "on"
 
 
@@ -188,8 +189,8 @@ def _read(path: str | Path) -> tuple[dict, Optional[str], Optional[str], bool]:
     if not p.exists():
         return {}, None, None, False
     try:
-        text = p.read_text(encoding="utf-8")
-    except OSError as exc:
+        text = _read_regular_text(p)
+    except (OSError, UnicodeError) as exc:
         # A directory, symlink->dir, chmod-000, or otherwise non-regular/unreadable target.
         # Raise an ACTIONABLE error instead of a raw traceback.
         raise ModesError(
@@ -459,7 +460,8 @@ def sync(path: str | Path, default_mode: Optional[str] = None) -> dict:
     Idempotent and non-destructive: an existing valid default_mode is PRESERVED (the
     ``default_mode`` argument only seeds a brand-new / previously-invalid default);
     existing entries are preserved (normalized casing, and any non-``off`` value coerced to
-    ``on`` by the shared fail-safe rule). Never overwrites operator entries.
+    ``on`` by the shared fail-safe rule). Never overwrites operator entries. Seeding ``off``
+    leaves eligible repos with no exact or matching glob entry unprotected by default.
     """
     with _modes_lock(path):
         modes, dm, schema, exists = _read(path)
