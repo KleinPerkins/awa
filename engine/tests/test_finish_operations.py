@@ -370,6 +370,58 @@ class GitOperationInventoryTest(FinishBase):
         self.assertEqual(removed["outcome"], "removed", removed)
         self.assertFalse(Path(wt).exists())
 
+    def test_foreign_top_level_lock_ignored_but_genuine_git_lock_still_blocks(self) -> None:
+        # Live-Desktop-UAT regression. A Cursor Agent-window worktree under ~/dev governance
+        # carries a FOREIGN host session lock (``cursor-session.lock``, written by the ~/dev
+        # one-writer ``session-lock`` hook) in its per-worktree git_dir for the whole session.
+        # It shares the ``.lock`` suffix but is a PID marker, not a git artifact. Before the fix
+        # ``_operation_top_presence`` flagged ANY top-level ``*.lock`` as a live git operation, so
+        # with no git operation in progress the finish hook failed open (no warning rendered) and a
+        # genuine Close was refused (``operation_live_lock`` -> inventory ``safe=False``). Foreign
+        # non-git locks must be IGNORED; genuine top-level git locks must STILL block.
+        _repo, wt, _branch = self.operation_repo("operation-foreign-lock")
+        git_dir = os.path.abspath(self.targets(wt)["git_dir"])
+
+        foreign = [Path(git_dir, "cursor-session.lock"), Path(git_dir, "zzz-foreign.lock")]
+        # Mirror the real host marker content (token=pid:.. / pid=.. / tool=); the stem matches no
+        # git top-level lockable and no top-level object named ``cursor-session`` exists.
+        foreign[0].write_text(
+            "token=pid:4242\npid=4242\ntty=?\nts=0\nhost=x\ntool=\n", encoding="utf-8")
+        foreign[1].write_text("arbitrary non-git lock\n", encoding="utf-8")
+
+        # Direction A — foreign locks alone: MUST NOT raise, MUST leave the inventory safe.
+        presence = FIN._operation_top_presence(git_dir)  # returns normally (no raise)
+        self.assertIsInstance(presence, dict)
+        clean = FIN.build_inventory(wt, git_dir)
+        self.assertTrue(clean["safe"], clean)
+        self.assertEqual(clean["refuse_reason"], "")
+        self.assertEqual(
+            [entry for entry in clean["entries"] if entry["class"] == "operation"], [])
+
+        # Direction B — each genuine top-level git lock STILL blocks, even while the foreign locks
+        # remain present (index.lock/HEAD.lock also exercise the "locks an existing object" path;
+        # packed-refs.lock exercises the git-lockable-stem allow-list path with no matching file).
+        for stem in ("index", "HEAD", "packed-refs"):
+            with self.subTest(stem=stem):
+                lock = Path(git_dir, stem + ".lock")
+                lock.write_bytes(b"")
+                try:
+                    with self.assertRaises(FIN.FinishError) as caught:
+                        FIN._operation_top_presence(git_dir)
+                    self.assertEqual(str(caught.exception), "operation_live_lock")
+                    blocked = FIN.build_inventory(wt, git_dir)
+                    self.assertFalse(blocked["safe"], blocked)
+                    self.assertEqual(blocked["refuse_reason"], "operation_live_lock")
+                finally:
+                    lock.unlink()
+
+        # With the genuine locks gone the still-present foreign locks keep the tree safe — proving
+        # the block came from the real git lock, not the coexisting foreign session marker.
+        restored = FIN.build_inventory(wt, git_dir)
+        self.assertTrue(restored["safe"], restored)
+        for path in foreign:
+            self.assertTrue(path.exists(), path)
+
 
 if __name__ == "__main__":
     import unittest

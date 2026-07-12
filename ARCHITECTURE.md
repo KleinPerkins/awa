@@ -48,7 +48,9 @@ selected admin roots twice, recursively and no-follow, and requires byte-identic
 type/mode/size/SHA-256 records. Git APIs supply `refs/bisect`/`refs/rewritten`; pseudo refs, exact raw
 index bytes, conflict stages, worktree dependencies, original branch identity, and operation-rooted
 object closure complete the private manifest. Unknown/ambiguous state or any link, special file,
-mount, live lock, path escape, or read drift refuses. The public projection is only fixed synthetic
+mount, live git lockfile, path escape, or read drift refuses; a foreign non-git top-level `.lock`
+(e.g. the ~/dev host `cursor-session.lock` one-writer session marker) is not a git operation and is
+ignored, so it never blocks finish. The public projection is only fixed synthetic
 operation copy. Recognized detached rebase/bisect binds the original branch and forces retention.
 Every finish-local Git child—from the first discovery probe through Retain, reconciliation,
 worktree removal, and ref cleanup—drops all inherited `GIT_*` variables, fixes locale and the

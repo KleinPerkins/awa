@@ -1027,6 +1027,19 @@ _OPERATION_TOP_FILES = frozenset({
 _OPERATION_TOP_DIRS = frozenset({
     b"sequencer", b"rebase-merge", b"rebase-apply", b"NOTES_MERGE_WORKTREE",
 })
+# Git holds a top-level ``<stem>.lock`` only while it is actually updating the git-managed
+# ``<stem>``. The set of stems git locks at the git_dir top level = every operation pseudo-ref /
+# dir AWA already recognizes, PLUS git's other core top-level lockables (the index, the
+# HEAD/FETCH_HEAD pseudo-refs, config, packed-refs, shallow, commondir, COMMIT_EDITMSG). A
+# ``.lock`` whose stem is none of these AND has no matching top-level object is FOREIGN — e.g. the
+# ~/dev host one-writer session lock ``cursor-session.lock`` (git_dir/cursor-session.lock, a PID
+# marker) or an editor lock — and never signals a live git operation.
+_GIT_TOP_LOCK_EXTRA_STEMS = frozenset({
+    b"index", b"HEAD", b"FETCH_HEAD", b"config", b"packed-refs",
+    b"shallow", b"commondir", b"COMMIT_EDITMSG",
+})
+_GIT_TOP_LOCKABLE_STEMS = (
+    _OPERATION_TOP_FILES | _OPERATION_TOP_DIRS | _GIT_TOP_LOCK_EXTRA_STEMS)
 _OPERATION_OPTIONAL_BY_GROUP = {
     "merge": frozenset({
         b"MERGE_HEAD", b"MERGE_MSG", b"MERGE_MODE", b"MERGE_AUTOSTASH",
@@ -1095,8 +1108,18 @@ def _operation_top_presence(git_dir: str) -> dict[bytes, str]:
         names = sorted(
             item.name if isinstance(item.name, bytes) else os.fsencode(item.name)
             for item in os.scandir(fd))
-        if any(name.endswith(b".lock") for name in names):
-            raise FinishError("operation_live_lock")
+        present = set(names)
+        for name in names:
+            if not name.endswith(b".lock"):
+                continue
+            stem = name[:-len(b".lock")]
+            # A GENUINE in-progress git lock has a git-managed lockable stem, or locks an existing
+            # top-level object ``<stem>`` (git creates ``<f>.lock`` to atomically update ``<f>``).
+            # Foreign ``.lock`` files (the host ``cursor-session.lock`` one-writer session marker,
+            # editor locks, ...) share the suffix but are not git operations, so they are ignored
+            # here — they must not raise ``operation_live_lock`` nor mark the inventory unsafe.
+            if stem in _GIT_TOP_LOCKABLE_STEMS or stem in present:
+                raise FinishError("operation_live_lock")
         out = {}
         for name in names:
             if name not in _OPERATION_TOP_FILES and name not in _OPERATION_TOP_DIRS:
