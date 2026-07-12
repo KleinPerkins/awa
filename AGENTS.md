@@ -7,6 +7,7 @@
 - Before merge, run code-review and hardening swarms; iterate when the operator requests another pass.
 - Verify reported failures are true positives before acting or reporting; confirm built-vs-gaps against disk and gates.
 - Prefer the simplest root-bound, proof-checked AWA mechanism; reject identity or lineage designs that depend on unstable Cursor chat IDs or complex actor/session control planes.
+- AWA implementation/refactor sessions: launch with project root = KleinPerkins/awa product repo, not disposable UAT fixtures or the ~/dev host overlay.
 
 ## Learned Workspace Facts
 
@@ -17,3 +18,5 @@
 - Product repo mutations use `_ops/bin/dev-worktree.sh ensure` + linked worktree; ~/dev is worktree-excluded — edit host overlay in place on a branch.
 - MCP mode tools mutate only the host modes file — never repos, git state, or primary checkouts.
 - Documented guard residual: cross-cwd `git -C <primary>` from a linked worktree is not classified by payload cwd (see SECURITY.md shell-gate scope).
+- `dev-worktree.sh clean --force` only overrides the ignored-files gate (`--bundle` archives first); it does not bypass commit-safety (`branch_is_cleanup_safe`) — branches with unrecognized-unshared commits still refuse.
+- Recovery archives from `clean --bundle` live under `${XDG_STATE_HOME:-~/.local/state}/awa/recovery` (outside git); no built-in TTL/prune verb today.
