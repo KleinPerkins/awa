@@ -167,7 +167,7 @@
     "warning": {
       "version": "1",
       "renderer": "consumer/finish_current.py render_warning over kernel/lib/awa_finish.py render_rows",
-      "rule": "The approved static payload is immutable and byte-snapshot-tested. Only escaped numbered rows after the final heading are dynamic; C0, DEL, all C1 controls, bidi controls, surrogates, and Markdown metacharacters never render raw. There is no row limit or truncation. Canonical shallow rows represent physical untracked/ignored trees containing only directories, so `None | No operator work will be deleted.` is emitted only when no visible file or directory-tree work would be deleted. The egress exception is scoped only to this exact template plus valid rows."
+      "rule": "The approved static payload is immutable and byte-snapshot-tested; each of the five operator options (Commit, Retain, Mixed, Cancel, Close) is separated by a blank line so the Markdown-rendered modal shows each on its own line instead of reflowing them into one paragraph. Only escaped numbered rows after the final heading are dynamic; C0, DEL, all C1 controls, bidi controls, surrogates, and Markdown metacharacters never render raw. There is no row limit or truncation. Canonical shallow rows represent physical untracked/ignored trees containing only directories, so `None | No operator work will be deleted.` is emitted only when no visible file or directory-tree work would be deleted. The egress exception is scoped only to this exact template plus valid rows."
     },
     "dialogue": {
       "schema": "awa_finish_dialogue/v1",

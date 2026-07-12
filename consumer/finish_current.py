@@ -98,9 +98,13 @@ Removing this temporary workspace permanently deletes work you have not committe
 How do you want to proceed? Reply with exactly one of: Commit, Retain, Mixed, Cancel, or Close.
 
 Commit --> Choose which items below to deliver; the agent commits and pushes or merges them.
+
 Retain --> Choose which items below to keep; the agent saves them on your computer, outside the workspace, so removal cannot delete them.
+
 Mixed  --> Choose Commit or Retain for each item; the agent does both.
+
 Cancel --> Do nothing and continue what you were doing.
+
 Close  --> Remove the temporary workspace now. Everything listed below is permanently deleted, the agent stops, and this chat stays open.
 
 To remove the workspace, reply with exactly: Close
