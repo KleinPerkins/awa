@@ -264,12 +264,8 @@ _CLOUD_ENV_FLAGS = (
 )
 
 
-def _is_truthy(val) -> bool:
-    return str(val).strip().lower() in ("1", "true", "yes", "on")
-
-
-def _affirmative_broker(val) -> bool:
-    """Only a real broker handle counts — Desktop payloads often carry false/0/\"false\"."""
+def _affirmative_context_handle(val) -> bool:
+    """Both context fields may carry booleans or opaque handles; reject only false-like values."""
     if val is None:
         return False
     if val is False or val == 0:
@@ -295,10 +291,7 @@ def _is_cloud(cwd: str) -> bool:
         val = os.environ.get(name)
         if val is None:
             continue
-        if "broker" in name.lower():
-            if _affirmative_broker(val):
-                return True
-        elif _is_truthy(val):
+        if _affirmative_context_handle(val):
             return True
     top = os.path.abspath(cwd or "")
     return top == "/workspace" or top.startswith("/workspace" + os.sep)

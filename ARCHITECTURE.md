@@ -25,6 +25,130 @@ daemon/engine/watcher **OFF**. Nothing the engine adds may become load-bearing f
 guarantee. The behavior contract is frozen so the engine can be layered *behind* the kernel without
 ever regressing a green verifier.
 
+### Root-bound finish: kernel authority, consumer ergonomics
+
+`kernel/lib/awa_finish.py` and `kernel/bin/dev-worktree.sh clean --finish-current` own inventory,
+challenge, literal-`Close`, lock, final fingerprint, session, removal, reconciliation, and local
+branch-disposition decisions. The private proof covers every physical object (encoded raw path,
+type, mode, size, regular-file hash, link target, grouped-directory descendants, and exact Git
+status/index evidence), plus the root and per-worktree Git-admin physical incarnations, with
+no-follow before/after identity checks; operator output remains one
+escaped row per Git item and exposes none of that private proof. That path imports no
+consumer/router/engine code and invokes no network.
+
+Inventory starts with a finish-only index-visibility preflight, before any Git status or physical
+tree scan and before challenge creation. It reads SHA-1/SHA-256 index structure and NUL-delimited
+`ls-files` tags with fsmonitor disabled, optional locks disabled, and lazy fetch forbidden. Any
+assume-unchanged, skip-worktree/sparse, fsmonitor, malformed, ambiguous, or unreadable state maps to
+the one generic `index_visibility_flags` refusal; no flagged path or private Git value enters a
+projection. Ordinary `clean --path` does not call this preflight and retains its v1 behavior.
+The inventory then canonicalizes every supported per-worktree Git operation (merge, sequencer,
+rebase-merge/apply, am, bisect, and notes merge). Under the shared lock it descriptor-scans the
+selected admin roots twice, recursively and no-follow, and requires byte-identical raw-name-sorted
+type/mode/size/SHA-256 records. Git APIs supply `refs/bisect`/`refs/rewritten`; pseudo refs, exact raw
+index bytes, conflict stages, worktree dependencies, original branch identity, and operation-rooted
+object closure complete the private manifest. Unknown/ambiguous state or any link, special file,
+mount, live lock, path escape, or read drift refuses. The public projection is only fixed synthetic
+operation copy. Recognized detached rebase/bisect binds the original branch and forces retention.
+Every finish-local Git child—from the first discovery probe through Retain, reconciliation,
+worktree removal, and ref cleanup—drops all inherited `GIT_*` variables, fixes locale and the
+no-lock/no-lazy-fetch/no-prompt profile, then uses a no-follow-validated Git-dir/worktree/real-index
+binding. Only Commit's contained temporary-index operation may substitute its validated index path.
+
+`consumer/finish_current.py` is a production stdlib conversational adapter:
+
+1. A versioned pure matcher recognizes high-signal direct closeout wording before generic router
+   normalization and rejects negated/quoted/meta/hypothetical uses.
+2. Preview resolves exactly one local linked-worktree root, calls the Phase-1 inventory/challenge,
+   renders immutable warning copy plus Phase-1 escaped rows, and stores `awa_finish_dialogue/v1`
+   state keyed by stable conversation id.
+3. `sessionStart` writes an atomic root-bound current identity with the real payload
+   session/conversation plus exact branch/common-dir. The guard reuses that identity rather than
+   minting an `unattributed` member.
+4. The user-level `beforeSubmitPrompt` command hook returns `{continue:false,user_message:...}` only
+   after complete preview/index publication. Its private invocation ticket binds the post-output
+   publication transition to the exact emitted conversation/session/root/generation/nonce/warning
+   digest. Hook challenges start inactive. After a hook-mode Commit/Retain/Mixed action, the action
+   CLI persists only `action_complete_refresh_pending`; the next prompt is discarded before
+   recognition and used to create the fresh warning, while only the hook's post-output transition
+   makes that generation choice-accepting. Thus an exact Close used as the refresh trigger cannot
+   act; a second exact Close is required. A later choice candidate creates one atomic envelope
+   carrying the submitted bytes, attachment provenance, and additive canonical decision.
+   Commit/Retain/Mixed/Cancel canonicalize case-insensitively; Close canonicalizes only from exact
+   bytes.
+5. `dispatch --current` resolves exactly one root/session/generation, consumes exactly one envelope,
+   and activates that same challenge by nonce/generation CAS. Partial/timeout state, reconstruction,
+   attachment, replay, ambiguity, and drift cannot activate it. A Close casing/trim variant returns
+   a correction without activation. Only exact activated Close invokes the kernel CLI with literal
+   authorization plus the envelope's complete expected nonce/generation pair. That pair can name
+   only the exact still-current hook challenge; a direct replacement cannot inherit it. Before any shared-lock or destructive
+   attempt, the kernel exclusive-creates a nonce/generation-bound `awa_finish_generation_state/v1`
+   `close_claimed` record. Every outcome after that claim is one-use; retry requires a fresh preview
+   and envelope. One closed typed builder projects every dispatcher result after authorization
+   handling: it emits fixed copy and validated outcome/reason/branch values only, never child
+   output, exceptions, kernel messages, paths, object ids, hashes, prompt bytes, or extra fields.
+   The clean child emits one exact machine-mode JSON shape; extra, malformed, oversized, or
+   exit-status-contradictory output is treated as uncertainty rather than parsed heuristically.
+   Proven removal reports removal plus agent stop/chat-open truth; proven refusal reports
+   preservation; any post-invocation ambiguity reports unknown removal and stops.
+6. Commit's GitHub delivery adapter is the only network-bearing finish component. Retain writes a
+   typed protected artifact outside the worktree and verifies a disposable restore under the same
+   per-common-dir lock. Its kernel-owned selected snapshot is reused for exact source suppression,
+   including complete recursive directory descendants and status/index bytes. Both require a fresh
+   preview afterward. Retain infers the source SHA-1/SHA-256 object format, installs proof blobs with
+   filters disabled, fsyncs payloads/blobs/directories, restore-proves while unpublished, writes and
+   syncs the true manifest while still hidden, then publishes through a content-addressed pending
+   marker, staging→final/root-sync barrier, and atomic pending→committed trust latch. Readers and
+   kernel suppression independently require the committed marker's artifact id and exact
+   true-manifest digest. Markerless legacy artifacts remain listable/restorable/deletable but never
+   suppress source rows. Deletion similarly uses a durable, resumable tombstone before recursive
+   removal. Every visible Git-ignored row, including directories and secret-named files, is
+   deterministically Retain-only; Commit and the Mixed commit partition reject it before claiming
+   the dialogue or mutating Git/artifacts, and finish never invokes `git add -f`.
+   An operation row additionally captures its exact admin tree, logical/pseudo/original refs, raw
+   index, indexed/worktree dependencies, and a local pack for the manifest's reachable closure.
+   Disposable proof restores the same object format, verifies the complete operation digest and
+   bytes/modes/stages/reachability, then runs only operation-specific abort/reset on a second copy.
+   Exact digest equality plus the committed publication latch is required for suppression; legacy
+   file-only artifacts retain their existing read lifecycle.
+7. Heartbeat membership and current-session reads/merges/writes share the per-common-dir lock.
+   Existing same-boot legacy state and structurally valid prior-boot projections are migrated only
+   after live target recheck; malformed bytes are preserved. Every dual timestamp is derived from
+   one epoch sample, with only the old one-second writer skew eligible for locked normalization.
+   The writer revalidates linked-root/common-dir/branch identity inside the lock.
+8. Preview, final recheck, operation identity, and the removal journal bind the install id plus
+   root/Git-admin device/inode/incarnation evidence. Before physical removal the kernel fsyncs
+   `awa_finish_removal/v1` in `prepared`. Recovery uses both root existence and local Git worktree
+   registration. Every returned remove result is reclassified under the lock: absence plus
+   unregistration finalizes even after a nonzero Git result, while a still-present original is
+   called intact only after the complete operation fingerprint byte-matches. Partial deletion,
+   inspection failure, signal disagreement, or a same-path replacement remains uncertain and
+   preserves the journal. It durably records the actual removed-phase branch result before emitting
+   its idempotent operation-bound receipt, then exception-contains challenge/root/session cleanup
+   and completes `finalized`; no retained fallback is invented. The shell invokes this recovery
+   immediately when a child disappears after removal. The conversation index remains the exact
+   journal-bound terminal recovery anchor after dialogue/envelope cleanup and through complete
+   removed/uncertain stdout flush, then is exact-CAS deleted. Output interruption or failed deletion
+   therefore leaves duplicate truthful recovery available, never a false surviving-workspace
+   projection, and superseding generations are untouched.
+9. `kernel/lib/awa_durability.py` is the shared stdlib physical-durability ABI for finish and root
+   state: complete write, private atomic replace/exclusive create, durable unlink/adoption, and
+   component-wise private directory creation. `_sync_fd` retries `EINTR`, always calls `fsync`, and
+   on Darwin also requires successful `F_FULLFSYNC` for regular files and directories. After Git's
+   logical worktree removal the kernel full-syncs the surviving root-parent and Git-admin-parent
+   namespaces before branch handling. A branch delete uses explicit Git ref-fsync settings, then
+   syncs loose refs/reflogs/packed-refs or reftable list/files/directories. Failed post-remove sync
+   keeps the prepared/removed journal unfinalized and branch truth empty until reconciliation
+   explicitly re-adopts and syncs the exact visible state.
+
+Cancel uses the same terminal-generation authority: it writes `cancelled` first, then performs
+bounded challenge/dialogue/index/envelope projection cleanup. Readers ignore terminal projections,
+and any cleanup fault is reported rather than converting partial cleanup into success.
+
+This layering means removing every Phase-2 file or disabling every hook reduces recall but leaves the
+Phase-1 refusal unchanged. Successful removal makes the workspace unavailable and the agent must
+stop; the Cursor chat remains open because no chat-close API exists.
+
 ## Two layers, one repo
 
 - **Kernel** (`kernel/`) — the generic safety layer, installed verbatim onto a host:

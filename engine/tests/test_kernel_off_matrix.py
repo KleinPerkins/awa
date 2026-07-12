@@ -36,7 +36,7 @@ _KNOWN_STDLIB = {
     "__future__", "argparse", "hashlib", "json", "os", "platform", "subprocess", "sys",
     "time", "calendar", "re", "fnmatch", "shlex", "dataclasses", "pathlib", "typing",
     "functools", "itertools", "collections", "datetime", "tempfile", "importlib", "ast",
-    "io", "math", "contextlib", "shutil", "stat", "glob", "textwrap", "enum", "errno",
+    "io", "math", "contextlib", "shutil", "stat", "glob", "textwrap", "enum", "errno", "fcntl",
 }
 # macOS immutable-flag primitives — forbidden PRODUCT-WIDE for K0/K1 (archive-only is K2).
 _IMMUTABLE_TOKENS = ("chflags", "uchg", "schg", "uappnd", "SF_IMMUTABLE", "st_flags")
@@ -44,6 +44,13 @@ _IMMUTABLE_TOKENS = ("chflags", "uchg", "schg", "uappnd", "SF_IMMUTABLE", "st_fl
 # SQLite / common-dir advisory locks are allowed; they serialize writers, they do NOT lock a
 # worktree against removal).
 _LOCK_TOKENS = ("flock", "fcntl", "lockf")
+# The genuine advisory-lock APIs. `fcntl` imported ONLY for the Darwin F_FULLFSYNC durability
+# barrier is NOT one of these; but `fcntl.flock` / `fcntl.lockf` and the fcntl range-lock command
+# family (F_SETLK*) ARE real advisory locks — they must be flagged even inside a durability module.
+_ADVISORY_FCNTL_CMDS = (
+    "flock", "lockf", "F_SETLK", "F_SETLKW", "F_GETLK",
+    "F_OFD_SETLK", "F_OFD_SETLKW", "F_OFD_GETLK", "LOCK_EX", "LOCK_SH", "LOCK_NB",
+)
 
 
 class KernelOffMatrixTest(EngineTestCase):
@@ -144,17 +151,95 @@ class KernelOffMatrixTest(EngineTestCase):
                          "no macOS immutable flag may protect active worktrees (K0/K1); "
                          "archive-only hardening is K2:\n" + "\n".join(offenders))
 
+    # Root-bound finish (2026-07-10) shares the engine's per-common-dir WRITE-SERIALIZATION flock.
+    # awa_finish.py is EXEMPT from the worktree-lock ban for EXACTLY the same reason engine/lock.py
+    # is: it serializes the finish critical section against ordinary clean + engine maintenance
+    # (byte-identical lock ABI, asserted in
+    # test_finish_kernel.EngineOffAndLockAbiTest.test_lock_path_is_byte_identical_to_engine_abi);
+    # it does NOT lock a worktree against removal (a busy lock makes finish REFUSE = fail-safe
+    # preserve, never force-remove). dev-worktree.sh is exempt for the SAME reason (Fix 3,
+    # 2026-07-10): the ordinary `clean --path` destructive section now HOLDS that same shared lock
+    # (opening the byte-identical lockfile on an fd and delegating the flock to awa_finish.py's
+    # flock-fd helper) so an ordinary clean serializes against a concurrent finish/engine mutation.
+    # A busy lock makes the clean REFUSE (clean_lock_busy) and preserve the worktree — it never
+    # locks a worktree against removal. The disposition/protection decision remains advisory kernel
+    # state (no OS lock). The exempted files carry only the shared write-serialization lock; the
+    # behavioral fail-safe (busy -> refuse, never force-remove) is proven in the finish/clean suites.
+    # awa_roots.py uses the identical lock ABI only for the root-bound current-session CAS, so a
+    # fire-and-forget sessionStart cannot erase a conversation attached by the first prompt.
+    _LOCK_EXEMPT = {"awa_finish.py", "awa_roots.py", "dev-worktree.sh"}
+
+    # Darwin durability (2026-07-10) requires fcntl(fd, F_FULLFSYNC) — a physical write BARRIER,
+    # not an advisory lock. awa_durability.py therefore imports fcntl SOLELY for F_FULLFSYNC. It is
+    # NOT in _LOCK_EXEMPT (it holds no lock at all): the carve-out below allows the bare `fcntl`
+    # token ONLY while the file proves F_FULLFSYNC use and introduces NO genuine advisory-lock API,
+    # so a real range-lock / flock added there is still flagged (see the biting regression
+    # test_fsync_fcntl_carveout_still_flags_real_locks).
+    _FSYNC_ONLY_FCNTL = {"awa_durability.py"}
+
+    @classmethod
+    def _lock_offenders_in(cls, name: str, text: str) -> list:
+        """Advisory-lock tokens a single kernel source file introduces (empty == clean).
+
+        A durability module may import fcntl only for the F_FULLFSYNC barrier; that lone use is
+        allowed, but every real advisory-lock API (flock / lockf / fcntl range-lock command) is
+        still reported, keeping the no-worktree-lock invariant's teeth intact."""
+        if name in cls._LOCK_EXEMPT:
+            return []
+        hits = []
+        for tok in _LOCK_TOKENS:
+            if tok not in text:
+                continue
+            if (tok == "fcntl" and name in cls._FSYNC_ONLY_FCNTL
+                    and "F_FULLFSYNC" in text
+                    and not any(cmd in text for cmd in _ADVISORY_FCNTL_CMDS)):
+                continue
+            hits.append(tok)
+        return hits
+
     def test_no_advisory_lock_in_kernel_change_surface(self) -> None:
-        """The KERNEL introduces no OS advisory lock on worktrees. (The engine's pre-existing
+        """The KERNEL introduces no OS advisory lock ON WORKTREES. (The engine's pre-existing
         SQLite / common-dir advisory locks serialize writers and are out of scope — they do
-        NOT lock a worktree against removal.)"""
+        NOT lock a worktree against removal. The finish core's shared write-serialization lock is
+        exempt for the same reason; see _LOCK_EXEMPT. awa_durability.py's fcntl is the F_FULLFSYNC
+        durability barrier — not a lock — and is carved out by _FSYNC_ONLY_FCNTL.)"""
         offenders = [f"{p.relative_to(_REPO_ROOT)}: {tok}"
                      for p in self._src_files(_KERNEL)
-                     for tok in _LOCK_TOKENS
-                     if tok in p.read_text(encoding="utf-8", errors="replace")]
+                     for tok in self._lock_offenders_in(
+                         p.name, p.read_text(encoding="utf-8", errors="replace"))]
         self.assertEqual(offenders, [],
                          "the kernel clean/roots path must introduce no OS advisory lock:\n"
                          + "\n".join(offenders))
+
+    def test_fsync_fcntl_carveout_still_flags_real_locks(self) -> None:
+        """The F_FULLFSYNC carve-out for awa_durability.py permits fcntl used ONLY for the Darwin
+        durability barrier, yet MUST keep flagging any genuine advisory lock — otherwise a real
+        worktree lock could hide behind the durability import."""
+        dur = "awa_durability.py"
+        # Allowed: fcntl imported purely for the F_FULLFSYNC write barrier.
+        self.assertEqual(
+            self._lock_offenders_in(
+                dur, "import fcntl\nfcntl.fcntl(fd, fcntl.F_FULLFSYNC)\n"),
+            [], "F_FULLFSYNC-only fcntl is a durability barrier, not an advisory lock")
+        # Flagged: an fcntl range-lock (advisory) hidden behind the same durability import.
+        self.assertIn(
+            "fcntl",
+            self._lock_offenders_in(
+                dur, "import fcntl\nfcntl.fcntl(fd, fcntl.F_SETLK)  # F_FULLFSYNC\n"),
+            "a real fcntl range-lock in the durability module must still be flagged")
+        # Flagged: flock / lockf are advisory locks regardless of file.
+        self.assertIn(
+            "flock",
+            self._lock_offenders_in(
+                dur, "import fcntl\nfcntl.flock(fd, fcntl.LOCK_EX)  # F_FULLFSYNC\n"),
+            "fcntl.flock is an advisory lock even inside the durability module")
+        # The carve-out is durability-module-scoped: any OTHER kernel file using bare fcntl is
+        # still flagged, even if it names F_FULLFSYNC.
+        self.assertIn(
+            "fcntl",
+            self._lock_offenders_in(
+                "awa_policy.py", "import fcntl\nfcntl.fcntl(fd, F_FULLFSYNC)\n"),
+            "the F_FULLFSYNC carve-out is scoped to the durability module only")
 
 
 if __name__ == "__main__":

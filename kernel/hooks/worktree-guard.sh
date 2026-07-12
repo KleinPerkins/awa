@@ -43,6 +43,7 @@ cwd=""
 is_mutating="0"
 is_cloud="no"
 has_paths="no"
+session_id=""
 paths=()
 eval "$(HOOK_INPUT="$input" python3 - <<'PY'
 import json, os, re, sys, shlex
@@ -86,6 +87,13 @@ workspace = (
     or _first_root(tool_input.get("workspace_roots"))
     or os.getcwd()
 )
+session_values = {
+    str(src.get(key)).strip()
+    for src in (data, tool_input)
+    for key in ("session_id", "sessionId", "conversation_id", "conversationId")
+    if isinstance(src.get(key), str) and str(src.get(key)).strip()
+}
+session_id = next(iter(session_values)) if len(session_values) == 1 else ""
 
 paths = []
 for source in (data, tool_input):
@@ -286,13 +294,8 @@ for p in paths:
     resolved.append(p)
 
 
-def _truthy(v):
-    return str(v).strip().lower() in ("1", "true", "yes", "on")
-
-
-def _affirmative_broker(v):
-    """Only a real broker HANDLE counts as cloud — Desktop payloads often carry
-    `cloud_agent_identity_broker: false` (or 0 / \"false\"), which must NOT degrade to allow."""
+def _affirmative_context_handle(v):
+    """Context fields may be booleans or opaque handles; reject only false-like values."""
     if v is None:
         return False
     if v is False or v == 0:
@@ -313,18 +316,16 @@ def _affirmative_broker(v):
 # broker handle (not false/0/\"false\"), or a /workspace root.
 is_cloud = False
 for src in (data, tool_input):
-    if _truthy(src.get("is_background_agent")):
+    if _affirmative_context_handle(src.get("is_background_agent")):
         is_cloud = True
-    if _affirmative_broker(src.get("cloud_agent_identity_broker")):
+    if _affirmative_context_handle(src.get("cloud_agent_identity_broker")):
         is_cloud = True
 if workspace == "/workspace" or workspace.startswith("/workspace/"):
     is_cloud = True
 for name in ("CURSOR_BACKGROUND_AGENT", "CURSOR_CLOUD_AGENT", "IS_BACKGROUND_AGENT",
-             "is_background_agent", "AWA_FORCE_CLOUD"):
-    if _truthy(os.environ.get(name, "")):
-        is_cloud = True
-for name in ("cloud_agent_identity_broker", "CURSOR_AGENT_IDENTITY_BROKER"):
-    if _affirmative_broker(os.environ.get(name)):
+             "is_background_agent", "AWA_FORCE_CLOUD", "cloud_agent_identity_broker",
+             "CURSOR_AGENT_IDENTITY_BROKER"):
+    if _affirmative_context_handle(os.environ.get(name)):
         is_cloud = True
 
 print("payload_ok=%s" % ("yes" if payload_ok else "no"))
@@ -333,6 +334,7 @@ print("cwd=%s" % shlex.quote(workspace))
 print("is_mutating=%s" % ("1" if classify_mutating(cmd) else "0"))
 print("is_cloud=%s" % ("yes" if is_cloud else "no"))
 print("has_paths=%s" % ("yes" if paths else "no"))
+print("session_id=%s" % shlex.quote(session_id))
 print("paths=(%s)" % " ".join(shlex.quote(p) for p in resolved))
 PY
 )"
@@ -471,8 +473,17 @@ maybe_refresh_active_heartbeat() {
     # Only a LINKED worktree (Safe Workspace) is heart-beaten; the primary checkout is never a
     # removal target and must not acquire a removal-blocking heartbeat (git-dir == git-common-dir).
     [ "$gd" != "$common" ] || exit 0
+    sid="${session_id:-${DEV_SESSION_ID:-}}"
+    if [ -z "$sid" ]; then
+      sid="$(python3 "$AWA_ROOTS_LIB" current-session-read --root "$top" 2>/dev/null | \
+        python3 -c 'import json,sys; print((json.load(sys.stdin).get("current_session") or {}).get("session_id",""))' \
+        2>/dev/null || true)"
+    fi
+    [ -n "$sid" ] || exit 0
+    branch="$(git -C "$top" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    [ -n "$branch" ] && [ "$branch" != "HEAD" ] || exit 0
     python3 "$AWA_ROOTS_LIB" heartbeat --root "$top" --common-dir "$common" \
-      --session-id "${DEV_SESSION_ID:-}" >/dev/null 2>&1 || true
+      --branch "$branch" --session-id "$sid" >/dev/null 2>&1 || true
     exit 0
   ) >/dev/null 2>&1 || true
   return 0

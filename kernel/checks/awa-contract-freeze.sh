@@ -347,6 +347,170 @@ else
 fi
 rm -rf "$arat" 2>/dev/null || true
 
+# 8) Finish additive schemas/keysets are exact-pinned to live constants and declared shapes.
+if CONTRACT="$CONTRACT" AWA_HOME="$AWA_HOME" python3 - <<'PY'
+import importlib.util, json, os, pathlib, sys
+root = pathlib.Path(os.environ["AWA_HOME"])
+contract = json.load(open(os.environ["CONTRACT"], encoding="utf-8"))
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+ux = load("awa_finish_consumer_freeze", root / "consumer" / "finish_current.py")
+fin = load("awa_finish_kernel_freeze", root / "kernel" / "lib" / "awa_finish.py")
+roots = load("awa_roots_freeze", root / "kernel" / "lib" / "awa_roots.py")
+durability = load("awa_durability_freeze", root / "kernel" / "lib" / "awa_durability.py")
+fc = contract["finish_conversation"]
+errors = []
+checks = (
+    (ux.DIALOGUE_SCHEMA, fc["dialogue"]["schema"], "dialogue schema"),
+    (ux.CURRENT_INDEX_SCHEMA, fc["current_index"]["schema"], "index schema"),
+    (ux.CHOICE_ENVELOPE_SCHEMA, fc["choice_envelope"]["schema"], "envelope schema"),
+    (ux.HOOK_PUBLICATION_TICKET_SCHEMA,
+     fc["hook"]["publication_ticket"]["schema"], "hook publication ticket schema"),
+    (ux.RETAIN_SCHEMA, fc["protected_retain"]["schema"], "retain schema"),
+    (ux.RETAIN_PUBLICATION_SCHEMA,
+     fc["protected_retain"]["publication"]["schema"], "retain publication schema"),
+    (fin.SCHEMA_RETAIN_PUBLICATION,
+     fc["protected_retain"]["publication"]["schema"], "kernel retain publication schema"),
+    (fin.SCHEMA_CHALLENGE, contract["awa_finish_challenge"]["schema"], "challenge schema"),
+    (fin.SCHEMA_OPERATION_MANIFEST,
+     contract["awa_git_operation_manifest"]["schema"], "operation manifest schema"),
+    (fin.SCHEMA_GENERATION_STATE,
+     contract["awa_finish_generation_state"]["schema"], "generation-state schema"),
+    (fin.SCHEMA_REMOVAL_JOURNAL,
+     contract["awa_finish_removal"]["schema"], "removal-journal schema"),
+    (fin.SCHEMA_SELECTED_SNAPSHOT,
+     fc["protected_retain"]["selected_snapshot"]["schema"], "snapshot schema"),
+    (roots.SCHEMA_CURRENT_SESSION,
+     contract["active_root"]["current_session_identity"]["schema"], "current-session schema"),
+)
+for live, declared, label in checks:
+    if live != declared:
+        errors.append(f"{label}: {live!r} != {declared!r}")
+keyset_checks = (
+    (ux.DIALOGUE_KEYS, fc["dialogue"]["declared_keys"], "dialogue keys"),
+    (ux.CURRENT_INDEX_KEYS, fc["current_index"]["declared_keys"], "current-index keys"),
+    (ux.CHOICE_ENVELOPE_KEYS, fc["choice_envelope"]["declared_keys"], "choice-envelope keys"),
+    (ux.HOOK_PUBLICATION_TICKET_KEYS,
+     fc["hook"]["publication_ticket"]["declared_keys"], "hook publication ticket keys"),
+    (fin.CHALLENGE_KEYS, contract["awa_finish_challenge"]["declared_keys"], "challenge keys"),
+    (fin.GENERATION_STATE_KEYS,
+     contract["awa_finish_generation_state"]["declared_keys"], "generation-state keys"),
+    (fin.REMOVAL_JOURNAL_KEYS,
+     contract["awa_finish_removal"]["declared_keys"], "removal-journal keys"),
+    (roots.ACTIVE_SESSION_KEYS,
+     contract["active_root"]["sessions_field"]["member_declared_keys"],
+     "active-root session-member keys"),
+    (roots.CURRENT_SESSION_KEYS,
+     contract["active_root"]["current_session_identity"]["declared_keys"],
+     "current-session keys"),
+)
+for live, declared, label in keyset_checks:
+    if set(live) != set(declared):
+        errors.append(f"{label}: live/contract drift")
+if set(fin.GENERATION_TRANSITIONS) != set(
+        contract["awa_finish_generation_state"]["transition_values"]):
+    errors.append("generation-state transition vocabulary drift")
+if set(fin.REMOVAL_PHASES) != set(contract["awa_finish_removal"]["phase_values"]):
+    errors.append("removal-journal phase vocabulary drift")
+operation_contract = contract["awa_git_operation_manifest"]
+if set(fin._OPERATION_GROUP_COPY) != set(operation_contract["groups"]):
+    errors.append("operation group vocabulary drift")
+if fin.OPERATION_CLASSIFICATION_VERSION != operation_contract["classification_version"]:
+    errors.append("operation classification version drift")
+if fin.INVENTORY_FINGERPRINT_VERSION != operation_contract["inventory_fingerprint_version"]:
+    errors.append("inventory fingerprint version drift")
+if fin.RETAIN_CLASSIFICATION_VERSION != operation_contract["retain_classification_version"]:
+    errors.append("retain classification version drift")
+for name in (
+        "_sync_fd", "write_all", "atomic_private_replace", "create_private_exclusive",
+        "durable_unlink", "durable_adopt", "adopt_visible",
+        "ensure_private_directory", "sync_directory", "sync_regular"):
+    if not callable(getattr(durability, name, None)):
+        errors.append(f"shared durability primitive missing {name}")
+if "operation_id" not in contract["clean_receipt"]["finish_fields"]["keys"]:
+    errors.append("clean receipt operation_id not declared")
+visibility_rule = contract["clean_receipt"]["finish_fields"].get(
+    "finish_index_visibility_rule", "")
+if fin.INDEX_VISIBILITY_REFUSAL != "index_visibility_flags":
+    errors.append("finish index-visibility refusal token drift")
+for required in (
+        "assume-unchanged", "skip-worktree", "fsmonitor", "SHA-1", "SHA-256",
+        "GIT_OPTIONAL_LOCKS=0", "GIT_NO_LAZY_FETCH=1", "ordinary `clean --path`",
+):
+    if required not in visibility_rule:
+        errors.append(f"finish index-visibility contract missing {required}")
+expected = {
+    "dialogue": {"schema","recognizer_version","conversation_id","session_id","state",
+                 "target","fingerprint","nonce","generation","hook_mode","visible","rows",
+                 "created_at_epoch","action_kind","action_commit_complete",
+                 "action_retain_complete","action_artifact_id"},
+    "current_index": {"schema","root","session_id","conversation_id","generation","nonce",
+                      "fingerprint","created_at_epoch"},
+    "choice_envelope": {"schema","root","session_id","conversation_id","generation","nonce",
+                        "exact_text","canonical_choice","attachments_present","event_id",
+                        "created_at_epoch"},
+}
+for name, keys in expected.items():
+    if set(fc[name]["declared_keys"]) != keys:
+        errors.append(f"{name}.declared_keys drift")
+snapshot_keys = {"schema","selected_paths","status_hex","index_hex","entries"}
+if set(fc["protected_retain"]["selected_snapshot"]["declared_keys"]) != snapshot_keys:
+    errors.append("selected_snapshot.declared_keys drift")
+if set(fc["protected_retain"]["publication"]["declared_keys"]) != set(
+        ux.RETAIN_PUBLICATION_KEYS):
+    errors.append("retain publication declared_keys drift")
+if set(fc["protected_retain"]["manifest_declared_keys"]) != set(
+        ux.RETAIN_MANIFEST_KEYS):
+    errors.append("retain manifest declared_keys drift")
+if set(fin.RETAIN_PUBLICATION_KEYS) != set(ux.RETAIN_PUBLICATION_KEYS):
+    errors.append("kernel/consumer retain publication key drift")
+if fc["protected_retain"]["publication"].get("protocol") != ux.RETAIN_PUBLICATION_PROTOCOL:
+    errors.append("retain publication protocol drift")
+public_projection = fc["dialogue"]["public_projection"]
+if public_projection.get("outcomes") != [
+        item.value for item in ux.PublicDispatchOutcome]:
+    errors.append("public projection outcome vocabulary drift")
+if public_projection.get("reasons") != [
+        item.value for item in ux.PublicDispatchReason]:
+    errors.append("public projection reason vocabulary drift")
+if public_projection.get("branch_results") != [
+        item.value for item in ux.PublicBranchResult]:
+    errors.append("public projection branch vocabulary drift")
+if public_projection.get("selection_states") != [
+        item.value for item in ux.PublicSelectionState]:
+    errors.append("public projection selection vocabulary drift")
+if public_projection.get("action_states") != ["action_complete_refresh_pending"]:
+    errors.append("public projection action-state vocabulary drift")
+if public_projection.get("shell_machine_mode_env") != ux.FINISH_PUBLIC_PROJECTION_ENV:
+    errors.append("public projection shell machine-mode environment drift")
+shell_text = (root / "kernel" / "bin" / "dev-worktree.sh").read_text(encoding="utf-8")
+if ux.FINISH_PUBLIC_PROJECTION_ENV not in shell_text:
+    errors.append("public projection shell machine mode missing")
+session_keys = {"schema","root","session_id","conversation_id","session_key","branch",
+                "common_dir","boot_id","updated_at_epoch"}
+if set(contract["active_root"]["current_session_identity"]["declared_keys"]) != session_keys:
+    errors.append("current_session_identity.declared_keys drift")
+hook_entry = fc["hook"].get("installed_entry")
+if hook_entry != {"command_role": "kernel/hooks/before-submit-prompt.sh", "type": "command",
+                  "matcher": "UserPromptSubmit", "timeout": 20, "failClosed": False}:
+    errors.append("hook.installed_entry drift")
+if fc["hook"].get("output_shape") != ["continue", "user_message"]:
+    errors.append("hook.output_shape drift")
+if fc["hook"].get("continue_shape") != ["continue"]:
+    errors.append("hook.continue_shape drift")
+if errors:
+    print("PHASE2 CONTRACT DRIFT: " + "; ".join(errors), file=sys.stderr)
+    sys.exit(1)
+PY
+then
+  pass "Finish schemas, constants, and declared keysets exact-pinned"
+else
+  bad "Finish contract/code constants or keysets drifted"
+fi
+
 if [ "$fail" -eq 0 ]; then
   echo "awa-contract-freeze: OK"
 else

@@ -225,3 +225,12 @@ def render_outcome(ok: bool, *, did: str, detail: str = "") -> dict:
         "plain": (detail or "I checked afterwards and it did not complete, so I stopped. "
                             "Your work is untouched."),
     }
+
+
+def render_finish_warning(rows: str) -> str:
+    """The one warning-scoped egress exception; static copy and rows remain deterministic."""
+    from .finish_current import render_warning
+    rendered = render_warning(rows)
+    if egress.scan_finish_warning(rendered):
+        raise ValueError("malformed finish warning")
+    return rendered

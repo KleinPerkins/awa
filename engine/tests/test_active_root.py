@@ -16,8 +16,11 @@ import importlib.util
 import json
 import os
 import subprocess
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
+from unittest import mock
 
 from .helpers import EngineTestCase, commit_all, git
 
@@ -68,6 +71,43 @@ class ActiveRootTest(EngineTestCase):
         r2 = AR.heartbeat(root)
         self.assertEqual(r1["first_seen"], r2["first_seen"])
         self.assertGreaterEqual(r2["last_heartbeat_epoch"], r1["last_heartbeat_epoch"])
+
+    def test_dual_timestamp_writer_samples_epoch_once(self) -> None:
+        root = self.a_dir("single-clock")
+        epoch = 1_700_000_000
+        with mock.patch.object(AR, "_now_epoch", side_effect=[epoch]) as clock:
+            rec = AR.heartbeat(root)
+        self.assertEqual(clock.call_count, 1)
+        self.assertEqual(rec["last_heartbeat_epoch"], epoch)
+        self.assertEqual(rec["last_heartbeat"], AR._iso_from_epoch(epoch))
+        member = rec["sessions"]["unattributed"]
+        self.assertEqual(member["last_heartbeat_epoch"], epoch)
+        self.assertEqual(member["last_heartbeat"], AR._iso_from_epoch(epoch))
+
+    def test_heartbeat_normalizes_only_one_second_legacy_skew(self) -> None:
+        root = self.a_dir("legacy-skew")
+        AR.heartbeat(root, session_id="one", boot=AR.boot_id())
+        AR.heartbeat(root, session_id="two", boot=AR.boot_id())
+        path = Path(AR.record_path(root))
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        one = rec["sessions"][AR.session_key("one")]
+        one["last_heartbeat"] = AR._iso_from_epoch(one["last_heartbeat_epoch"] + 1)
+        path.write_text(json.dumps(rec), encoding="utf-8")
+        refreshed = AR.heartbeat(root, session_id="two", boot=AR.boot_id())
+        normalized = refreshed["sessions"][AR.session_key("one")]
+        self.assertEqual(
+            normalized["last_heartbeat"],
+            AR._iso_from_epoch(normalized["last_heartbeat_epoch"]))
+
+        raw = path.read_bytes()
+        malformed = json.loads(raw)
+        member = malformed["sessions"][AR.session_key("one")]
+        member["last_heartbeat"] = AR._iso_from_epoch(member["last_heartbeat_epoch"] + 2)
+        path.write_text(json.dumps(malformed), encoding="utf-8")
+        before = path.read_bytes()
+        refused = AR.heartbeat(root, session_id="two", boot=AR.boot_id())
+        self.assertFalse(refused["ok"])
+        self.assertEqual(path.read_bytes(), before)
 
     # ---- STALE (TTL) allows -------------------------------------------------
     def test_ttl_expired_is_stale_and_allows(self) -> None:
@@ -176,7 +216,11 @@ class ActiveRootTest(EngineTestCase):
 
     # ---- sessionStart hook: heartbeat refresh + dead-root guidance ----------
     def _run_session_hook(self, cwd: str) -> dict:
-        payload = json.dumps({"workspace_roots": [cwd]})
+        payload = json.dumps({
+            "workspace_roots": [cwd],
+            "conversation_id": "conversation-realistic",
+            "session_id": "session-realistic",
+        })
         env = os.environ.copy()
         env["AWA_HOME"] = str(_REPO_ROOT)
         r = subprocess.run([self.session_hook], input=payload, cwd=cwd,
@@ -191,6 +235,163 @@ class ActiveRootTest(EngineTestCase):
         self.assertIn("additional_context", out)
         self.assertEqual(AR.disposition(wt)["disposition"], "active",
                          "sessionStart in a linked worktree must refresh its heartbeat")
+        rec, status = AR.read_current_session(wt)
+        self.assertEqual(status, "ok")
+        self.assertEqual(rec["session_id"], "session-realistic")
+        target_branch = git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        target_common = git(
+            wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        self.assertEqual(rec["branch"], target_branch)
+        self.assertEqual(rec["common_dir"], target_common)
+        active, corrupt = AR.read_record(wt)
+        self.assertFalse(corrupt)
+        member = active["sessions"][AR.session_key("session-realistic")]
+        contract = json.loads(
+            (_REPO_ROOT / "contracts" / "awa-contract.v1.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(member), set(contract["active_root"]["sessions_field"][
+            "member_declared_keys"]))
+        self.assertNotIn("unattributed", active["sessions"])
+
+    def test_guard_payload_or_current_identity_never_mints_unattributed(self) -> None:
+        repo = self.make_repo("guardidentity")
+        wt = self.add_worktree(repo, "feat/identity")
+        target_branch = git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        target_common = git(
+            wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        AR.write_current_session(
+            wt, session_id="real-session", conversation_id="real-conversation",
+            branch=target_branch, common_dir=target_common)
+        payload = json.dumps({"command": "ls", "workspace_roots": [wt]})
+        env = os.environ.copy()
+        env.pop("DEV_SESSION_ID", None)
+        env["AWA_HEARTBEAT_REFRESH_THROTTLE"] = "0"
+        result = subprocess.run(
+            [self.guard_hook], input=payload, cwd=wt, env=env,
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record, corrupt = AR.read_record(wt)
+        self.assertFalse(corrupt)
+        self.assertIn(AR.session_key("real-session"), record["sessions"])
+        self.assertNotIn("unattributed", record["sessions"])
+
+    def test_delayed_current_binding_after_removal_creates_no_phantom_state(self) -> None:
+        repo = self.make_repo("bindingbarrier")
+        wt = self.add_worktree(repo, "feat/barrier")
+        branch = git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        common = git(
+            wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        entered = threading.Event()
+        proceed = threading.Event()
+        result: dict = {}
+        real_lock = AR._common_dir_lock
+
+        @contextmanager
+        def delayed_lock(*args, **kwargs):
+            entered.set()
+            self.assertTrue(proceed.wait(5))
+            with real_lock(*args, **kwargs):
+                yield
+
+        def bind() -> None:
+            result.update(AR.bind_current_session(
+                wt, session_id="late", conversation_id="late-conversation",
+                branch=branch, common_dir=common, source="sessionStart"))
+
+        with mock.patch.object(AR, "_common_dir_lock", delayed_lock):
+            worker = threading.Thread(target=bind)
+            worker.start()
+            self.assertTrue(entered.wait(5))
+            git(repo, "worktree", "remove", "--force", wt)
+            proceed.set()
+            worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(result["ok"], result)
+        self.assertIn("root_absent", result["reason"])
+        self.assertEqual(AR.read_current_session(wt)[1], "absent")
+        self.assertFalse(Path(AR.record_path(wt)).exists())
+
+    def test_prior_boot_current_session_replaced_but_malformed_bytes_preserved(self) -> None:
+        repo = self.make_repo("currentreboot")
+        wt = self.add_worktree(repo, "feat/reboot")
+        branch = git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        common = git(
+            wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        old = AR.write_current_session(
+            wt, session_id="old", conversation_id="old-conversation",
+            branch=branch, common_dir=common)
+        path = Path(AR.current_session_path(wt))
+        old["boot_id"] = "prior-boot"
+        path.write_text(json.dumps(old), encoding="utf-8")
+        replaced = AR.bind_current_session(
+            wt, session_id="new", conversation_id="new-conversation",
+            branch=branch, common_dir=common, source="sessionStart")
+        self.assertTrue(replaced["ok"], replaced)
+        self.assertTrue(replaced["replaced_prior_boot"])
+        current, status = AR.read_current_session(wt)
+        self.assertEqual(status, "ok")
+        self.assertEqual(current["session_id"], "new")
+
+        malformed = dict(current)
+        malformed["boot_id"] = "another-prior-boot"
+        malformed["updated_at_epoch"] = "bad"
+        path.write_text(json.dumps(malformed), encoding="utf-8")
+        before = path.read_bytes()
+        refused = AR.bind_current_session(
+            wt, session_id="third", conversation_id="third-conversation",
+            branch=branch, common_dir=common, source="sessionStart")
+        self.assertFalse(refused["ok"])
+        self.assertEqual(refused["reason"], "current_session_malformed")
+        self.assertEqual(path.read_bytes(), before)
+
+        partial = dict(current)
+        partial["session_id"] = "partial-old"
+        partial["session_key"] = AR.session_key("partial-old")
+        partial["conversation_id"] = ""
+        partial["boot_id"] = "partial-prior-boot"
+        path.write_text(json.dumps(partial), encoding="utf-8")
+        partial_replaced = AR.bind_current_session(
+            wt, session_id="third", conversation_id="third-conversation",
+            branch=branch, common_dir=common, source="beforeSubmitPrompt")
+        self.assertTrue(partial_replaced["ok"], partial_replaced)
+        self.assertTrue(partial_replaced["replaced_prior_boot"])
+        cleanup = AR.remove_current_session_cas(
+            wt, session_id=current["session_id"],
+            conversation_id=current["conversation_id"], branch=branch,
+            common_dir=common, expected_boot_id=current["boot_id"])
+        self.assertTrue(cleanup["ok"])
+        self.assertEqual(cleanup["reason"], "superseded")
+        surviving, surviving_status = AR.read_current_session(wt)
+        self.assertEqual(surviving_status, "ok")
+        self.assertEqual(surviving["session_id"], "third")
+
+    def test_reboot_heartbeat_prunes_valid_old_members_and_preserves_mixed_projection(self) -> None:
+        root = self.a_dir("heartbeat-reboot")
+        current_boot = AR.boot_id()
+        AR.heartbeat(root, session_id="old-member", boot=current_boot)
+        AR.heartbeat(root, session_id="current-member", boot=current_boot)
+        path = Path(AR.record_path(root))
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        rec["sessions"][AR.session_key("old-member")]["boot_id"] = "prior-boot"
+        path.write_text(json.dumps(rec), encoding="utf-8")
+        pruned = AR.heartbeat(root, session_id="current-member", boot=current_boot)
+        self.assertEqual(pruned["schema"], "active_root/v1")
+        self.assertEqual(set(pruned["sessions"]), {AR.session_key("current-member")})
+
+        mixed = json.loads(path.read_text(encoding="utf-8"))
+        mixed["sessions"][AR.session_key("prior-top")] = dict(
+            mixed["sessions"][AR.session_key("current-member")],
+            session_id="prior-top", boot_id="prior-boot")
+        top = mixed["sessions"][AR.session_key("prior-top")]
+        for key in (
+                "session_id", "pid", "boot_id", "branch", "git_common_dir",
+                "first_seen", "last_heartbeat", "last_heartbeat_epoch"):
+            mixed[key] = top[key]
+        path.write_text(json.dumps(mixed), encoding="utf-8")
+        before = path.read_bytes()
+        refused = AR.heartbeat(root, session_id="current-member", boot=current_boot)
+        self.assertFalse(refused["ok"], refused)
+        self.assertEqual(refused["reason"], "heartbeat_mixed_boot_projection")
+        self.assertEqual(path.read_bytes(), before)
 
     def test_session_hook_surfaces_dead_root_guidance(self) -> None:
         repo = self.make_repo("deadsess")
@@ -227,9 +428,17 @@ class ActiveRootTest(EngineTestCase):
     def _age_heartbeat(self, root: str, seconds_ago: int = 100000) -> None:
         rp = Path(AR.record_path(root))
         rec = json.loads(rp.read_text(encoding="utf-8"))
-        rec["last_heartbeat_epoch"] = int(time.time()) - seconds_ago
-        rec["last_heartbeat"] = "2000-01-01T00:00:00Z"
+        epoch = int(time.time()) - seconds_ago
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+        rec["first_seen"] = timestamp
+        rec["last_heartbeat_epoch"] = epoch
+        rec["last_heartbeat"] = timestamp
         rec.pop("pid", None)
+        for member in (rec.get("sessions") or {}).values():
+            member["first_seen"] = timestamp
+            member["last_heartbeat_epoch"] = epoch
+            member["last_heartbeat"] = timestamp
+            member["pid"] = None
         rp.write_text(json.dumps(rec), encoding="utf-8")
 
     def test_guard_hotpath_refresh_keeps_active_session_alive_past_ttl(self) -> None:

@@ -18,6 +18,10 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from consumer import finish_current as finish_ux
+from engine import guard as engine_guard
 
 _REPO = Path(__file__).resolve().parent.parent.parent
 _GUARD = _REPO / "kernel" / "hooks" / "worktree-guard.sh"
@@ -73,10 +77,17 @@ class TestBashGuardWrapperParity(unittest.TestCase):
     def _guard(self, command: str) -> dict:
         return self._guard_payload({"cwd": str(self.repo), "command": command})
 
-    def _guard_payload(self, payload: dict) -> dict:
+    def _guard_payload(self, payload: dict, env_updates: dict | None = None) -> dict:
         env = dict(os.environ)
+        for name in (
+                "CURSOR_BACKGROUND_AGENT", "CURSOR_CLOUD_AGENT", "IS_BACKGROUND_AGENT",
+                "is_background_agent", "AWA_FORCE_CLOUD", "cloud_agent_identity_broker",
+                "CURSOR_AGENT_IDENTITY_BROKER"):
+            env.pop(name, None)
         env["AWA_GOVERNED_ROOT"] = str(self.root)
         env["AWA_POLICY"] = str(self.policy)
+        if env_updates:
+            env.update(env_updates)
         proc = subprocess.run([str(_GUARD)], input=json.dumps(payload), capture_output=True,
                               text=True, env=env)
         return json.loads(proc.stdout)
@@ -181,6 +192,40 @@ class TestBashGuardWrapperParity(unittest.TestCase):
                               input=json.dumps({"command": "git commit -am x", "cwd": str(self.repo)}),
                               capture_output=True, text=True, env=env)
         self.assertEqual(json.loads(proc.stdout).get("permission"), "deny")
+
+    def test_background_and_broker_context_parity_matrix(self):
+        affirmative = (True, 1, "true", "opaque-handle", {"handle": "opaque"}, ["opaque"])
+        false_like = (None, False, 0, "", "false", "0", "no", "off", {}, [])
+        base = {"command": "git commit -am x", "cwd": str(self.repo)}
+        for field in ("is_background_agent", "cloud_agent_identity_broker"):
+            for nested in (False, True):
+                for value, expected in (
+                        *((item, True) for item in affirmative),
+                        *((item, False) for item in false_like)):
+                    with self.subTest(
+                            field=field, nested=nested, value=repr(value)):
+                        payload = dict(base)
+                        if nested:
+                            payload["tool_input"] = {field: value}
+                        else:
+                            payload[field] = value
+                        permission = self._guard_payload(payload).get("permission")
+                        self.assertEqual(permission, "allow" if expected else "deny")
+                        self.assertEqual(finish_ux._unsupported(payload), expected)
+
+            for value, expected in (
+                    ("opaque-env-handle", True), ("true", True), ("1", True),
+                    ("", False), ("false", False), ("0", False),
+                    ("no", False), ("off", False)):
+                with self.subTest(field=field, environment=value):
+                    permission = self._guard_payload(
+                        base, env_updates={field: value}).get("permission")
+                    self.assertEqual(permission, "allow" if expected else "deny")
+                    with mock.patch.dict(
+                            os.environ, {field: value}, clear=True):
+                        self.assertEqual(
+                            engine_guard._is_cloud(str(self.repo)), expected)
+                        self.assertEqual(finish_ux._unsupported(base), expected)
 
     def test_classifier_unavailable_asks_not_denies(self):
         """classify_context fail-safe (include + reason fail-safe: ask) must ASK, not DENY."""
