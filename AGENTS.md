@@ -8,6 +8,8 @@
 - Verify reported failures are true positives before acting or reporting; confirm built-vs-gaps against disk and gates, then lock accepted fixes with biting regressions.
 - For AWA, prioritize determinism, reliability, and consistency over convenience; destructive-path uncertainty must preserve the workspace.
 - Do not claim live Desktop proof from tests or agent rehearsal; require the operator's real prompt and inspect the resulting metadata.
+- Prefer the simplest root-bound, proof-checked AWA mechanism; reject identity or lineage designs that depend on unstable Cursor chat IDs or complex actor/session control planes.
+- AWA implementation/refactor sessions: launch with project root = KleinPerkins/awa product repo, not disposable UAT fixtures or the ~/dev host overlay.
 
 ## Learned Workspace Facts
 
@@ -23,3 +25,5 @@
 - Commit requires an exact-head merge-commit PR incorporated into the live default branch with passing checks; Retain creates a protected restore-proven local artifact; ignored rows are Retain-only; removal is zero-network.
 - After hook-mode Commit/Retain/Mixed, the next prompt only publishes a fresh hook-owned warning; even `Close` is discarded there, so a second exact `Close` is required.
 - Finish CLIs reject option abbreviations and expose only fixed closed JSON; removed-state and branch truth come from durable index/journal evidence, never invented fallbacks.
+- `dev-worktree.sh clean --force` only overrides the ignored-files gate (`--bundle` archives first); it does not bypass commit-safety (`branch_is_cleanup_safe`) — branches with unrecognized-unshared commits still refuse.
+- Recovery archives from `clean --bundle` live under `${XDG_STATE_HOME:-~/.local/state}/awa/recovery` (outside git); no built-in TTL/prune verb today.
