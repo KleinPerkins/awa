@@ -1,8 +1,12 @@
 name: ci
-# CI for the AWA product (generic kernel + engine + dashboard). Runs the full verification
-# gate on every push/PR and on release tags: engine test suite (kernel + engine core, includes
-# the zero-link preflight + kernel/engine policy parity), the role-resolved contract-freeze
+# CI for the AWA product (generic kernel + engine + dashboard): engine test suite (kernel + engine
+# core, incl. the zero-link preflight + kernel/engine policy parity), the role-resolved contract-freeze
 # check, and the standalone installer's static preflight + full install lifecycle.
+#
+# COST CONTROL (see KleinPerkins/dev _ops/plans/local-ci-migration.md): push/PR runs the PRIMARY
+# interpreter only; the full {3.9,3.12} matrix AND the credentialed router-seam job run on release
+# tags (v*) only. The per-interpreter × seam fan-out on every push was the dominant Actions-minute
+# consumer, and merge gating never depended on this workflow (only on `pr-automation / verify`).
 #
 # HEADLESS-SAFE: every step runs with HOME pointed at a throwaway dir under $RUNNER_TEMP, so CI
 # never mutates a real home. stdlib + sqlite3 only — no third-party deps to install. Scratch git
@@ -28,7 +32,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.9', '3.12']
+        # Cost control: primary interpreter on push/PR; full matrix on release tags (v*) only.
+        python-version: ${{ (github.ref_type == 'tag') && fromJSON('["3.9","3.12"]') || fromJSON('["3.12"]') }}
     steps:
       # SHA-pinned (supply-chain hardening): tags are mutable, full commit SHAs are immutable.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
@@ -66,6 +71,8 @@ jobs:
   # actionable failure: this seam must never report green without running.
   router-seam:
     name: router-seam (pinned, py${{ matrix.python }})
+    # Cost control: the credentialed seam job runs on release tags (v*) only, not on every push/PR.
+    if: ${{ github.ref_type == 'tag' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
