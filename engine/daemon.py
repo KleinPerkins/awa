@@ -24,7 +24,7 @@ import os
 import time
 from pathlib import Path
 
-from . import gitutil, paths, state as state_mod
+from . import gitutil, paths, retention, state as state_mod
 
 
 class AlreadyRunning(RuntimeError):
@@ -294,10 +294,14 @@ def run_once(state: state_mod.State, *, delete_remote: bool = False) -> dict:
     ingested = ingest_detection_receipts(state)
     clean_ingested = ingest_clean_receipts(state)
     missing = detect_missing_unattributed(state)
+    # Opportunistic recovery-retention pass: throttled to once/24h and NON-BLOCKING (a concurrent
+    # pass simply skips), so the daemon never becomes a new safety dependency (engine-off safe).
+    retention_result = retention.run_maintenance(state, trigger="opportunistic")
     return {"quarantine_cleaned": cleaned, "detections_ingested": ingested,
             "clean_receipts_ingested": clean_ingested,
             "missing_unattributed": len(missing),
-            "active_leases": len(state.list_leases("active"))}
+            "active_leases": len(state.list_leases("active")),
+            "retention": retention_result}
 
 
 def run_loop(state: state_mod.State, *, max_iterations: int = 1, interval: float = 0.0,

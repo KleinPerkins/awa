@@ -25,6 +25,7 @@ from . import (
     modes as modes_mod,
     paths,
     recovery,
+    retention,
     state as state_mod,
 )
 
@@ -143,10 +144,22 @@ def cmd_recover(args: argparse.Namespace) -> int:
                       "included": r.included, "skipped_secrets": r.skipped_secrets,
                       "skipped_symlink_escape": r.skipped_symlink_escape})
     if args.what == "prune":
+        if getattr(args, "maintenance", False):
+            # Canonical retention evaluator (7d TTL + 1GiB/24h pressure) under the state-root lock.
+            # --opportunistic selects the throttled/non-blocking trigger used by the sessionStart
+            # hook + daemon; the default (manual) always runs a full blocking pass.
+            trigger = "opportunistic" if getattr(args, "opportunistic", False) \
+                else retention.REASON_MANUAL
+            with state_mod.State(assert_local=False) as st:
+                res = retention.run_maintenance(st, trigger=trigger)
+            return _emit({"action": "prune", **res})
         res = recovery.prune_artifacts(older_than_seconds=args.older_than, force=args.force)
         return _emit({"action": "prune", **res})
     if args.what == "list":
         return _emit({"artifacts": recovery.list_artifacts()})
+    if args.what == "status":
+        with state_mod.State(assert_local=False) as st:
+            return _emit({"action": "status", **retention.status(st)})
     return _emit({"ok": False, "error": f"unknown recover subcommand: {args.what}"}, code=2)
 
 
@@ -312,9 +325,10 @@ def build_parser() -> argparse.ArgumentParser:
     lr.add_argument("--worktree", required=True)
     lr.set_defaults(fn=cmd_lease_read)
 
-    rc = sub.add_parser("recover", help="recovery manager (bundle/patch/archive/restore/list/prune)")
+    rc = sub.add_parser("recover",
+                        help="recovery manager (bundle/patch/archive/restore/list/prune/status)")
     rc.add_argument("what", choices=["bundle", "patch", "archive", "restore-patch",
-                                     "restore-bundle", "list", "prune"])
+                                     "restore-bundle", "list", "prune", "status"])
     rc.add_argument("--worktree", default=".")
     rc.add_argument("--patch", default="")
     rc.add_argument("--archive", default="")
@@ -324,6 +338,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="prune: delete non-protected artifacts at least this many seconds old")
     rc.add_argument("--force", action="store_true",
                     help="prune: delete eligible non-protected artifacts (protected archives are still refused)")
+    rc.add_argument("--maintenance", action="store_true",
+                    help="prune: run the canonical retention evaluator (7d TTL + 1GiB/24h pressure) "
+                         "under the shared state-root lock, instead of a manual force prune")
+    rc.add_argument("--opportunistic", action="store_true",
+                    help="prune --maintenance: opportunistic trigger (sessionStart hook / daemon) — "
+                         "throttled to <=1/24h and non-blocking (a concurrent pass simply skips)")
     rc.set_defaults(fn=cmd_recover)
 
     g = sub.add_parser("guard", help="engine-off kernel guard (shell/can-clean)")

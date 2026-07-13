@@ -59,12 +59,21 @@ class _EmitterModeTestBase(unittest.TestCase):
         self.root = Path(self._tmp.name) / "gov"
         self.root.mkdir(parents=True, exist_ok=True)
         self._saved_policy = os.environ.get("AWA_POLICY")
+        # Hermetic + side-effect-free: point XDG_STATE_HOME at an EMPTY temp so the additive
+        # environment.recovery probe finds no engine state db and returns available:false WITHOUT
+        # spawning the engine or touching the operator's real recovery state during the test.
+        self._saved_state_home = os.environ.get("XDG_STATE_HOME")
+        os.environ["XDG_STATE_HOME"] = str(Path(self._tmp.name) / "state")
 
     def tearDown(self) -> None:
         if self._saved_policy is None:
             os.environ.pop("AWA_POLICY", None)
         else:
             os.environ["AWA_POLICY"] = self._saved_policy
+        if self._saved_state_home is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = self._saved_state_home
         self._tmp.cleanup()
 
     def _write_policy(self, text: str) -> None:
@@ -162,6 +171,10 @@ class TestEmitterModeSurface(_EmitterModeTestBase):
         for key in ("schema", "generated_at", "root", "default_base", "summary",
                     "repos", "environment"):
             self.assertIn(key, doc)
+        # Additive recovery-retention visibility block is always present; with no engine state db
+        # (isolated empty XDG_STATE_HOME) it reports available:false WITHOUT spawning the engine.
+        self.assertIn("recovery", doc["environment"])
+        self.assertFalse(doc["environment"]["recovery"]["available"])
         for key in ("repos", "included", "excluded", "advisory", "worktrees", "linked",
                     "dirty", "ahead_of_main", "behind_main", "diverged", "no_base",
                     "orphan_branches"):

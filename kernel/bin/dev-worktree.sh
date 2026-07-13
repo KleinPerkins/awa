@@ -510,7 +510,7 @@ awa_bundle_ignored() {
   AWA_SRC="$path" AWA_DEST="$dest" AWA_MANIFEST="$manifest" \
   AWA_ALLOW_SECRETS="${AWA_BUNDLE_ALLOW_SECRETS:-0}" IGNORED_NL="$ignored_nl" \
   python3 - <<'PY'
-import json, os, re, subprocess, sys
+import hashlib, json, os, re, subprocess, sys, time
 src = os.environ["AWA_SRC"]; dest = os.environ["AWA_DEST"]; manifest = os.environ["AWA_MANIFEST"]
 allow_secrets = os.environ.get("AWA_ALLOW_SECRETS") == "1"
 entries = [e for e in os.environ["IGNORED_NL"].splitlines() if e.strip()]
@@ -533,8 +533,23 @@ if included:
         print(f"dev-worktree: tar failed ({rc}) creating {dest}", file=sys.stderr); sys.exit(1)
 else:
     open(dest, "wb").close()
+# Unified recovery-artifact manifest (awa_recovery_artifact/v1): the SAME shape the engine writers
+# emit, so kernel bundles participate directly in the engine's retention lifecycle (TTL/pressure)
+# without a legacy-normalization guess. Kernel-first: computed with the stdlib only, zero network.
+_h = hashlib.sha256()
+with open(dest, "rb") as _fh:
+    for _chunk in iter(lambda: _fh.read(1024 * 1024), b""):
+        _h.update(_chunk)
+_epoch = int(time.time())
 with open(manifest, "w", encoding="utf-8") as fh:
-    json.dump({"source": src, "archive": dest, "included": included,
+    json.dump({"schema": "awa_recovery_artifact/v1",
+               "artifact_id": "bundle-" + os.urandom(16).hex(),
+               "kind": "bundle", "protected": False,
+               "source": src, "archive": dest, "archive_name": os.path.basename(dest),
+               "size": os.path.getsize(dest), "sha256": _h.hexdigest(),
+               "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_epoch)),
+               "created_at_epoch": _epoch,
+               "included": included,
                "skipped_secrets": skipped, "skipped_symlink_escape": skipped_symlink,
                "allow_secrets": allow_secrets}, fh, indent=2)
 print(dest)

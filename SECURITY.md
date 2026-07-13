@@ -182,6 +182,35 @@ The §H1 copy-honesty gate: **all three capabilities are green** on the host (`o
 `kernel-guarantee-verify.sh` env matrix). Operator surfaces use the upgraded `strings[]` table;
 copy-honesty-check enforces gated verbs at build time.
 
+## Recovery retention lifecycle security (Phase 3)
+
+The retention lifecycle deletes ordinary recovery artifacts on a schedule, so it is treated as a
+destructive surface and inherits AWA's destructive-path discipline — while staying **off** the
+kernel finish/removal path.
+
+- **Strictly separate from finish authorization.** No retention logic runs on the exact-`Close`
+  authorization or worktree-removal path. Retention runs only in the engine; worktree cleanup and
+  kernel safety hold with the engine, hook, router, and MCP all absent (kernel-first).
+- **Protected artifacts never auto-removed, and survive uninstall.** A manifest `protected:true`
+  (whole-worktree archives + kernel Retain artifacts) is excluded from TTL and pressure pruning.
+  `install.sh --uninstall` preserves `protected-retain/` AND every protected artifact inside
+  `recovery/` (an unreadable manifest is preserved fail-safe), removing only ordinary state.
+- **Containment + fail-safe deletion.** Every deletion target must be a non-symlink file resolving
+  beneath the physical recovery root; symlink/path-escape targets are refused, including via a
+  tampered resume journal. Deletion is crash-resumable (transient `recovery/.trash` journal written
+  before any unlink; durable `awa_recovery_tombstone/v1` recorded; journal removed last) and
+  idempotent on resume. A failed archive unlink is an honest ERROR that PRESERVES the artifact and
+  writes no tombstone — destructive uncertainty never reports success. Bounded retry/backoff caps a
+  transient failure at 3 attempts.
+- **Zero network, local disk, owner-only perms.** No retention path performs any network call.
+  recovery dir + `.trash` are `0700`; ordinary archives/manifests/journals `0600`; a protected
+  artifact's archive + manifest `0400`. Legacy pairs are permission-repaired before evaluation (S4).
+- **One lock ABI.** Maintenance serializes on the single global state-root lock using the same
+  advisory-flock ABI + private-lockfile perms as the finish/clean/Retain per-common-dir lock; an
+  opportunistic trigger acquires non-blocking and skips rather than racing a concurrent pass.
+- **Never fails silently.** Failed maintenance, protected-storage growth, and watermark overage
+  surface in the dashboard (`environment.recovery`) and a bounded sessionStart context warning.
+
 ## Shell-gate interception scope (adversarial UATs)
 
 The `beforeShellExecution` gate (`worktree-guard.sh`) is AWA's pre-mutation gate — the only hook whose

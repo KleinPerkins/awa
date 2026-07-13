@@ -177,11 +177,12 @@ stop; the Cursor chat remains open because no chat-close API exists.
 | `policy` | Generic repo classifier: include/exclude globs + governed-marker & foreign-hook detectors + per-repo mode resolution (`default_mode` + a `modes_file`), all supplied by a host policy file (mirror of `kernel/lib/awa_policy.py`) |
 | `modes` | Generic mode-management verbs (`list`/`get`/`set`/`remove`/`repair`/`sync`/`doctor`) over the tool-owned `awa-modes/v1` modes file; atomic + schema-validated + path-scoped (never touches a repo, git, or a primary checkout) |
 | `lock` | Per-common-dir advisory flock — the real write-serialization/collision boundary |
-| `state` | SQLite (WAL) store: leases, append-only **redacted** audit events, detections, quarantine refs, recovery artifacts |
+| `state` | SQLite (WAL) store: leases, append-only **redacted** audit events, detections, quarantine refs, recovery artifacts (+ Phase-3 `recovery_source_deleted` age clock, `recovery_tombstones`, maintenance meta) |
 | `lease` | `.awa/lease.json` read/write + attest; native-window adopt (no push) |
 | `lifecycle` | Adopt → attest → apply-back **preview** (SHA-bound, recovery-before-mutation) → retire |
-| `recovery` | Patch round-trip + bundle (secret-skip S1, symlink-escape drop S2) + restore + list |
-| `daemon` | Single-instance (flock'd pidfile) bounded maintenance loop + quarantine-ref cleanup/retention |
+| `recovery` | Patch round-trip + bundle (secret-skip S1, symlink-escape drop S2) + whole-worktree archive + restore + list; emits the ONE unified `awa_recovery_artifact/v1` manifest and runs prune-on-creation |
+| `retention` | The canonical recovery-retention evaluator + crash-resumable, tombstoned deletion transaction (7-day TTL, 1-GiB/24h pressure, source-deleted age clock) under the shared state-root lock; the ONE implementation every trigger calls |
+| `daemon` | Single-instance (flock'd pidfile) bounded maintenance loop + quarantine-ref cleanup/retention + throttled opportunistic recovery-retention pass |
 | `guard` | Adversary-aware mutating-shell classifier + engine-OFF decision + cleanup-refusal (`can_clean`); reads ONLY policy + `.awa/lease.json` |
 | `mcp_server` | stdio newline-delimited JSON-RPC MCP server exposing three read-only diagnostic tools plus six path-scoped mode tools; inline instructions are the primary agent-routing surface |
 | `mcp_resources` | Pure fixed-resource registry/renderer for the secondary `awa://assistant/operator-guide/v1`; consumes in-memory advertised tool descriptions and reads no environment, filesystem, policy, contract, database, or live state |
@@ -325,6 +326,39 @@ Evidence:
 [`RESULTS-MCP-GUIDANCE-BASELINE-20260709.md`](live-verify/RESULTS-MCP-GUIDANCE-BASELINE-20260709.md).
 `consent_prompt()` is contract-only candidate host copy; the stdio server does not render or
 enforce it, and no production consent wiring is claimed.
+
+## Recovery retention lifecycle (Phase 3)
+
+AWA never silently deletes at-risk work, but recovery artifacts cannot grow without bound. Phase 3
+adds a retention lifecycle that runs **entirely in the engine, off the kernel safety path** — the
+finish authorization + removal path contains **no** retention logic, and worktree cleanup stays
+correct with the engine absent.
+
+- **One artifact format.** Both the kernel bundler (`dev-worktree.sh clean --bundle`) and the engine
+  writers (`recovery.py`) emit the ONE `awa_recovery_artifact/v1` manifest: collision-resistant
+  `artifact_id`, `kind` (`bundle | patch | worktree-archive`), `protected`, `source`, `size`,
+  `sha256`, and a creation timestamp. Legacy pairs are normalized + permission-repaired on read.
+- **One evaluator, one deletion transaction.** `retention.run_maintenance` is the single evaluator;
+  every trigger calls it. Ordinary artifacts expire at a **7-day TTL**; a **1-GiB** soft watermark
+  prunes the oldest ordinary artifacts after a **24-hour** minimum age. The age clock starts when the
+  **source work is deleted** (recorded once in `recovery_source_deleted`), not at archive creation.
+  **Protected** whole-worktree archives and kernel Retain artifacts are **never** auto-removed and
+  **survive uninstall**.
+- **Triggers.** The deterministic PRIMARY trigger is **prune-on-creation** (every artifact write runs
+  the bounded pass, so storage self-limits with no schedule). The SEPARATE fail-open sessionStart
+  hook (`kernel/hooks/awa-recovery-maintenance.sh`, installed beside — and never changing — the
+  kernel worktree-context hook) and `daemon run-once` are OPPORTUNISTIC secondary triggers: quiet on
+  success, throttled to ≤1/24h, non-blocking. The hook contains no retention logic and never unlinks.
+- **Crash-resumable + contained.** Each deletion writes a transient `recovery/.trash` journal before
+  any unlink, records a durable `awa_recovery_tombstone/v1` (so a recovery row never implies a
+  restorable archive), then removes the journal; an interrupted deletion is completed idempotently on
+  the next pass. Every target must be a non-symlink file resolving beneath the physical recovery root;
+  a failed unlink is an honest ERROR that PRESERVES the artifact.
+- **One lock ABI.** Maintenance serializes on the single global state-root lock
+  (`locks/recovery-maintenance.lock`) using the same advisory-flock ABI as the per-common-dir
+  finish/clean/Retain lock; an opportunistic trigger acquires non-blocking and skips when a pass runs.
+- **Visibility.** Failed maintenance, protected-storage growth, and watermark overage surface in the
+  dashboard (`environment.recovery`, additive) and a bounded sessionStart context warning.
 
 ## The contract is BEHAVIOR-only (location is informational)
 

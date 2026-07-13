@@ -85,6 +85,28 @@ CREATE TABLE IF NOT EXISTS recovery_artifacts (
     archive TEXT NOT NULL,
     manifest TEXT
 );
+-- Phase 3 recovery-retention: the age clock starts when the SOURCE work is deleted, not when
+-- the archive is created. Manifests are read-only, so first-observed source-deletion time is
+-- recorded here, keyed by the collision-resistant artifact_id (works for legacy artifacts too).
+CREATE TABLE IF NOT EXISTS recovery_source_deleted (
+    artifact_id TEXT PRIMARY KEY,
+    epoch INTEGER NOT NULL,
+    iso TEXT NOT NULL
+);
+-- Phase 3 recovery-retention: an explicit prune tombstone (artifact_id, time, reason, bytes) so
+-- a recovery row/receipt no longer implies an expired archive is restorable. Append-only, keyed
+-- by artifact_id (idempotent under crash-resume via INSERT OR IGNORE).
+CREATE TABLE IF NOT EXISTS recovery_tombstones (
+    artifact_id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    ts_epoch INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    bytes INTEGER NOT NULL DEFAULT 0,
+    kind TEXT,
+    archive TEXT,
+    manifest TEXT,
+    source TEXT
+);
 CREATE TABLE IF NOT EXISTS clean_receipts (
     receipt_id TEXT PRIMARY KEY,
     ts TEXT NOT NULL,
@@ -124,8 +146,28 @@ class State:
         self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(_DDL)
+        self._migrate()
         self._set_meta("schema_version", str(SCHEMA_VERSION))
         self._tighten_perms()
+
+    def _migrate(self) -> None:
+        """Additive-within-v1 column migration for `recovery_artifacts` (Phase 3 retention).
+
+        `_DDL` uses CREATE TABLE IF NOT EXISTS, which will NOT add columns to a table an older
+        install already created. Add each Phase-3 column idempotently (ALTER TABLE ADD COLUMN,
+        guarded by PRAGMA table_info) so a pre-existing db upgrades in place with no data loss.
+        """
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(recovery_artifacts)")}
+        additions = (
+            ("artifact_id", "TEXT"),
+            ("sha256", "TEXT"),
+            ("bytes", "INTEGER"),
+            ("protected", "INTEGER NOT NULL DEFAULT 0"),
+            ("status", "TEXT NOT NULL DEFAULT 'active'"),
+        )
+        for name, decl in additions:
+            if name not in cols:
+                self.conn.execute(f"ALTER TABLE recovery_artifacts ADD COLUMN {name} {decl}")
 
     def _tighten_perms(self) -> None:
         for suffix in ("", "-wal", "-shm"):
@@ -298,11 +340,15 @@ class State:
 
     # ---- recovery artifacts --------------------------------------------------
     def record_recovery(self, kind: str, source: str, archive: str,
-                        manifest: str | None = None, lease_id: str | None = None) -> None:
+                        manifest: str | None = None, lease_id: str | None = None,
+                        *, artifact_id: str | None = None, sha256: str | None = None,
+                        bytes: int | None = None, protected: bool = False) -> None:
         self.conn.execute(
-            "INSERT INTO recovery_artifacts(ts,lease_id,kind,source,archive,manifest) "
-            "VALUES(?,?,?,?,?,?)",
-            (now_iso(), lease_id, kind, source, archive, manifest),
+            "INSERT INTO recovery_artifacts"
+            "(ts,lease_id,kind,source,archive,manifest,artifact_id,sha256,bytes,protected,status) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,'active')",
+            (now_iso(), lease_id, kind, source, archive, manifest,
+             artifact_id, sha256, bytes, 1 if protected else 0),
         )
 
     def recovery_artifacts(self, limit: int = 100) -> list[dict]:
@@ -310,6 +356,63 @@ class State:
             "SELECT * FROM recovery_artifacts ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def mark_recovery_pruned(self, artifact_id: str, archive: str | None = None) -> None:
+        """Reconcile recovery rows once an artifact is pruned so a row no longer implies the
+        archive is restorable. Matches by artifact_id (new rows) OR archive path (legacy rows)."""
+        self.conn.execute(
+            "UPDATE recovery_artifacts SET status='pruned' "
+            "WHERE artifact_id=? OR (archive=? AND ?<>'')",
+            (artifact_id, archive or "", archive or ""),
+        )
+
+    # ---- recovery source-deletion age clock (Phase 3) ------------------------
+    def get_source_deleted_epoch(self, artifact_id: str) -> int | None:
+        row = self.conn.execute(
+            "SELECT epoch FROM recovery_source_deleted WHERE artifact_id=?", (artifact_id,)
+        ).fetchone()
+        return int(row["epoch"]) if row else None
+
+    def set_source_deleted_epoch(self, artifact_id: str, epoch: int) -> None:
+        """Record the FIRST-observed source-deletion time for an artifact (idempotent — a later
+        observation never moves the clock forward or back)."""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO recovery_source_deleted(artifact_id,epoch,iso) VALUES(?,?,?)",
+            (artifact_id, int(epoch),
+             time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(epoch)))),
+        )
+
+    def clear_source_deleted(self, artifact_id: str) -> None:
+        """Source reappeared (path reused) — stop aging it (fail-safe: keep the artifact)."""
+        self.conn.execute("DELETE FROM recovery_source_deleted WHERE artifact_id=?", (artifact_id,))
+
+    # ---- recovery prune tombstones (Phase 3) ---------------------------------
+    def record_recovery_tombstone(self, artifact_id: str, *, reason: str, bytes: int = 0,
+                                  kind: str | None = None, archive: str | None = None,
+                                  manifest: str | None = None, source: str | None = None) -> bool:
+        """Append ONE prune tombstone (idempotent by artifact_id). Returns True on a new row."""
+        epoch = int(time.time())
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO recovery_tombstones"
+            "(artifact_id,ts,ts_epoch,reason,bytes,kind,archive,manifest,source) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (artifact_id, now_iso(), epoch, reason, int(bytes or 0), kind, archive, manifest,
+             source),
+        )
+        return cur.rowcount > 0
+
+    def recovery_tombstones(self, limit: int = 100) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM recovery_tombstones ORDER BY ts_epoch DESC, artifact_id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def tombstone_exists(self, artifact_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM recovery_tombstones WHERE artifact_id=? LIMIT 1", (artifact_id,)
+        ).fetchone()
+        return row is not None
 
     def close(self) -> None:
         try:

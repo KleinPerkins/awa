@@ -264,11 +264,21 @@ The kernel worktree CLI (`dev-worktree.sh`, frozen verbs): `status`, `ensure`, `
 
 The engine (`awa-engine <verb>`, launched by `bin/awa-engine.sh`): `doctor`, lifecycle
 (`adopt`/`attest`/`apply-back`/`publish`/`retire`/`lease-read`), recovery
-(`recover patch|bundle|restore-patch|list`), guard (`guard shell`/`guard can-clean` — engine-off
-advisory; `guard can-clean` may refuse when kernel `clean` succeeds after squash-merge detection
-because engine cleanup remains ancestry-stricter until fast-follow B), `daemon` (`status`/`run-once`),
-`events`, and `mcp-serve` (a stdio JSON-RPC MCP server exposing nine tools plus the fixed advisory
-operator guide).
+(`recover patch|bundle|archive|restore-patch|restore-bundle|list|prune|status`), guard
+(`guard shell`/`guard can-clean` — engine-off advisory; `guard can-clean` may refuse when kernel
+`clean` succeeds after squash-merge detection because engine cleanup remains ancestry-stricter until
+fast-follow B), `daemon` (`status`/`run-once`), `events`, and `mcp-serve` (a stdio JSON-RPC MCP
+server exposing nine tools plus the fixed advisory operator guide).
+
+## Recovery retention
+
+Recovery artifacts (git-ignored bundles, patches, and protected whole-worktree archives) are kept in
+the engine state dir and pruned by ONE evaluator: ordinary artifacts expire at a **7-day TTL**, with
+a **1-GiB / 24-hour** soft-watermark pressure policy; **protected** archives are never auto-removed
+and survive uninstall. Pruning runs off the finish/removal path — deterministically **on every
+artifact write**, plus opportunistic (throttled ≤1/24h, non-blocking) passes from a fail-open
+sessionStart hook and `daemon run-once`. Inspect with `awa-engine recover status`; force a canonical
+pass with `awa-engine recover prune --maintenance`.
 
 ## Layout
 

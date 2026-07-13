@@ -21,6 +21,9 @@ HOOKS_JSON="${AWA_HOOKS_JSON:-$HOME/.cursor/hooks.json}"
 SESSION_HOOK="$SCRIPT_DIR/worktree-session.sh"
 GUARD_HOOK="$SCRIPT_DIR/worktree-guard.sh"
 PROMPT_HOOK="$SCRIPT_DIR/before-submit-prompt.sh"
+# Phase 3: a SECOND, fail-open sessionStart hook (engine retention maintenance) installed BESIDE the
+# kernel-only worktree-session.sh without changing it. Both coexist as distinct sessionStart entries.
+MAINT_HOOK="$SCRIPT_DIR/awa-recovery-maintenance.sh"
 
 MODE="install"
 case "${1:-}" in
@@ -31,7 +34,7 @@ esac
 
 if [ "$MODE" = "check" ]; then
   HOOKS_JSON="$HOOKS_JSON" SESSION_HOOK="$SESSION_HOOK" GUARD_HOOK="$GUARD_HOOK" \
-    PROMPT_HOOK="$PROMPT_HOOK" python3 - <<'PY'
+    PROMPT_HOOK="$PROMPT_HOOK" MAINT_HOOK="$MAINT_HOOK" python3 - <<'PY'
 import json, os, pathlib, sys
 
 path = os.environ["HOOKS_JSON"]
@@ -48,17 +51,21 @@ if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data
     print("install-hooks --check: object/version/hooks shape drift", file=sys.stderr)
     sys.exit(1)
 hooks = data["hooks"]
-expect = {
-    "sessionStart": {"command": os.path.realpath(os.environ["SESSION_HOOK"]),
-                     "type": "command", "timeout": 5, "failClosed": False},
-    "beforeShellExecution": {"command": os.path.realpath(os.environ["GUARD_HOOK"]),
-                             "type": "command", "timeout": 20, "failClosed": False},
-    "beforeSubmitPrompt": {"command": os.path.realpath(os.environ["PROMPT_HOOK"]),
-                           "type": "command", "matcher": "UserPromptSubmit",
-                           "timeout": 20, "failClosed": False},
-    "afterFileEdit": {"command": os.path.realpath(os.environ["GUARD_HOOK"]),
-                      "type": "command", "timeout": 20},
-}
+# A LIST of (event, wanted) so one event (sessionStart) can carry two distinct AWA-owned entries
+# (the kernel worktree-context hook + the engine retention-maintenance hook).
+expect = [
+    ("sessionStart", {"command": os.path.realpath(os.environ["SESSION_HOOK"]),
+                      "type": "command", "timeout": 5, "failClosed": False}),
+    ("sessionStart", {"command": os.path.realpath(os.environ["MAINT_HOOK"]),
+                      "type": "command", "timeout": 5, "failClosed": False}),
+    ("beforeShellExecution", {"command": os.path.realpath(os.environ["GUARD_HOOK"]),
+                              "type": "command", "timeout": 20, "failClosed": False}),
+    ("beforeSubmitPrompt", {"command": os.path.realpath(os.environ["PROMPT_HOOK"]),
+                            "type": "command", "matcher": "UserPromptSubmit",
+                            "timeout": 20, "failClosed": False}),
+    ("afterFileEdit", {"command": os.path.realpath(os.environ["GUARD_HOOK"]),
+                       "type": "command", "timeout": 20}),
+]
 errors = []
 def awa_owned(entry, wanted_path):
     command = str(entry.get("command", ""))
@@ -70,7 +77,7 @@ def awa_owned(entry, wanted_path):
     parts = pathlib.Path(resolved).parts
     return (len(parts) >= 5 and parts[-5:] == (
         "awa", "current", "kernel", "hooks", pathlib.Path(wanted_path).name))
-for event, wanted in expect.items():
+for event, wanted in expect:
     arr = hooks.get(event)
     if not isinstance(arr, list):
         errors.append(f"{event}: missing/non-list")
@@ -78,9 +85,11 @@ for event, wanted in expect.items():
     matches = [entry for entry in arr if isinstance(entry, dict)
                and awa_owned(entry, wanted["command"])]
     if len(matches) != 1:
-        errors.append(f"{event}: expected one exact AWA path, found {len(matches)}")
+        errors.append(f"{event}[{pathlib.Path(wanted['command']).name}]: "
+                      f"expected one exact AWA path, found {len(matches)}")
     elif matches[0] != wanted:
-        errors.append(f"{event}: exact entry drift {matches[0]!r}")
+        errors.append(f"{event}[{pathlib.Path(wanted['command']).name}]: "
+                      f"exact entry drift {matches[0]!r}")
 if errors:
     print("install-hooks --check: " + "; ".join(errors), file=sys.stderr)
     sys.exit(1)
@@ -90,7 +99,7 @@ PY
 fi
 
 mkdir -p "$(dirname "$HOOKS_JSON")"
-chmod +x "$SESSION_HOOK" "$GUARD_HOOK" "$PROMPT_HOOK"
+chmod +x "$SESSION_HOOK" "$GUARD_HOOK" "$PROMPT_HOOK" "$MAINT_HOOK"
 
 tmp="$(mktemp)"
 if [ -f "$HOOKS_JSON" ]; then
@@ -99,9 +108,9 @@ else
   printf '{"version":1,"hooks":{}}\n' > "$tmp"
 fi
 
-python3 - "$tmp" "$HOOKS_JSON" "$SESSION_HOOK" "$GUARD_HOOK" "$PROMPT_HOOK" <<'PY'
+python3 - "$tmp" "$HOOKS_JSON" "$SESSION_HOOK" "$GUARD_HOOK" "$PROMPT_HOOK" "$MAINT_HOOK" <<'PY'
 import json, pathlib, shutil, sys, time
-src, dest, session_hook, guard_hook, prompt_hook = map(pathlib.Path, sys.argv[1:6])
+src, dest, session_hook, guard_hook, prompt_hook, maint_hook = map(pathlib.Path, sys.argv[1:7])
 try:
     data = json.loads(src.read_text())
 except Exception as exc:
@@ -122,6 +131,7 @@ for event, arr in hooks.items():
 session_hook = session_hook.resolve()
 guard_hook = guard_hook.resolve()
 prompt_hook = prompt_hook.resolve()
+maint_hook = maint_hook.resolve()
 
 def awa_owned(existing, wanted_path):
     command = str(existing.get("command", ""))
@@ -143,6 +153,15 @@ def ensure(event, entry):
 
 ensure("sessionStart", {
     "command": str(session_hook),
+    "type": "command",
+    "timeout": 5,
+    "failClosed": False,
+})
+# Phase 3: the SEPARATE engine retention-maintenance sessionStart hook (fail-open, quiet, throttled
+# by the engine). It coexists with the kernel worktree-context hook above (distinct filenames, so
+# `awa_owned` dedups each independently) and never changes it.
+ensure("sessionStart", {
+    "command": str(maint_hook),
     "type": "command",
     "timeout": 5,
     "failClosed": False,

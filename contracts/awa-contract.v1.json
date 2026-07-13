@@ -279,5 +279,45 @@
     "storage": "<slug>-<hash>.json under ${XDG_STATE_HOME:-~/.local/state}/awa/roots (dir 700, file 600), local disk.",
     "k2_todo": "DEFERRED (K2 observability, not a safety gap): dead-root records + roots/ grow unbounded — add a prune/TTL + size cap. The safety-relevant record escape (`forget` / --force) already ships.",
     "note": "Additive-within v1 (a new OPTIONAL top-level schema block, 2026-07-08; fail-closed hardening + hot-path-refresh + TTL-clamp + operator-override fields added 2026-07-08; OPTIONAL per-session `sessions` map + finish-only per-session waiver added 2026-07-10 for Root-Bound Worktree Finish Phase 1); NO v2."
+  },
+  "recovery_retention": {
+    "manifest": {
+      "schema": "awa_recovery_artifact/v1",
+      "emitted_by_role": "The ONE unified recovery-artifact manifest shape emitted by BOTH the KERNEL bundler (dev-worktree.sh `clean --bundle` → awa_bundle_ignored) and the ENGINE writers (recovery.py create_bundle/create_patch/create_worktree_archive). stdlib-only, zero-network.",
+      "required_keys": [
+        "schema", "artifact_id", "kind", "protected", "source",
+        "archive", "archive_name", "size", "sha256", "created_at", "created_at_epoch"
+      ],
+      "kind_values": ["bundle", "patch", "worktree-archive"],
+      "identity_rule": "artifact_id is collision-resistant '<kind>-<128-bit hex>'. A legacy artifact predating this shape is normalized on read (deterministic 'legacy-<sha256(name)[:32]>' id, kind inferred from the manifest name, size/mtime from disk) and permission-repaired BEFORE policy evaluation — never silently trusted.",
+      "protected_rule": "protected:true (whole-worktree archives + kernel Retain artifacts) are NEVER automatically removed by TTL or pressure, and SURVIVE uninstall."
+    },
+    "deletion_journal": {
+      "schema": "awa_recovery_deletion/v1",
+      "role": "A TRANSIENT, crash-resumable on-disk tombstone journal (under recovery/.trash) written BEFORE any unlink and removed after the durable tombstone is recorded. An interrupted deletion is completed idempotently by reconcile (`_resume`). A failed archive unlink is an ERROR (the artifact stays restorable), never a reported success.",
+      "phase_values": ["prepared", "archive_removed"]
+    },
+    "tombstone": {
+      "schema": "awa_recovery_tombstone/v1",
+      "role": "A DURABLE prune record (state db `recovery_tombstones`, append-only, keyed by artifact_id) so a recovery row/receipt never implies an expired archive is still restorable. Also reconciles the `recovery_artifacts` row to status='pruned'.",
+      "reason_values": ["ttl", "pressure", "manual"]
+    },
+    "policy": {
+      "ttl_seconds": 604800,
+      "pressure_watermark_bytes": 1073741824,
+      "pressure_min_age_seconds": 86400,
+      "maintenance_throttle_seconds": 86400,
+      "max_delete_attempts": 3,
+      "age_clock_rule": "The age clock starts when the SOURCE work is DELETED (recorded once in state `recovery_source_deleted`), not when the archive is created; while the source still exists the artifact never ages. Ordinary artifacts expire at the 7-day TTL. A 1-GiB soft watermark prunes the OLDEST ordinary artifacts (oldest-first) after a 24-hour minimum age; young or protected artifacts may honestly leave storage above the watermark. Without a state db, ordinary artifacts fail SAFE (never TTL/pressure eligible)."
+    },
+    "single_evaluator_rule": "Artifact creation (prune-on-creation), the sessionStart hook, `daemon run-once`, and manual `recover prune --maintenance` ALL call ONE engine evaluator (retention.run_maintenance) and ONE crash-resumable deletion transaction. The hook contains NO retention logic and never directly unlinks a file.",
+    "trigger_rule": "The DETERMINISTIC primary trigger is prune-on-creation (every artifact write runs the bounded pass, so storage self-limits without a schedule). The sessionStart hook (kernel/hooks/awa-recovery-maintenance.sh, SEPARATE from worktree-session.sh) and `daemon run-once` are OPPORTUNISTIC secondary triggers: quiet on success, throttled to at most once/24h (state retention_last_run_epoch), non-blocking. Correctness never depends on the nondeterministic session schedule.",
+    "lock_rule": "Every maintenance pass runs under the single global state-root lock (locks/recovery-maintenance.lock), using the SAME advisory-flock ABI + private-lockfile perms as the per-common-dir finish/clean/Retain lock, so at most one pass runs machine-wide; an opportunistic trigger acquires NON-BLOCKING and simply skips when a pass is already running.",
+    "containment_rule": "Every deletion target must be a NON-symlink file resolving beneath the physical recovery root (symlink/path-escape targets are refused, including via a tampered resume journal). Bounded retry/backoff (max 3 attempts) on a transient unlink; any residual/failure is surfaced as an ERROR — destructive uncertainty PRESERVES the artifact.",
+    "permissions_rule": "recovery dir + .trash are 0700; ordinary archives/manifests/journals are 0600; a protected artifact's archive + manifest are 0400. Legacy pairs are permission-repaired before policy evaluation.",
+    "no_finish_path_rule": "Retention/pruning is STRICTLY SEPARATE from the finish authorization + removal path. The exact-`Close` authorization and worktree removal contain NO retention logic; retention runs only in the ENGINE, off the kernel safety path (kernel-first: worktree cleanup stays correct with the engine absent).",
+    "visibility_rule": "Failed maintenance, protected-storage growth, and watermark overage surface in the dashboard (environment.recovery, additive) and in a bounded sessionStart context warning, so automatic cleanup never fails silently.",
+    "storage": "Artifacts + manifests under ${XDG_STATE_HOME:-~/.local/state}/awa/recovery (dir 700), transient deletion journals under recovery/.trash, durable tombstones + source-deletion clock in the state db. Local disk. Zero-network on every path.",
+    "note": "Additive-within v1 (a new OPTIONAL top-level schema block, 2026-07-12, for Root-Bound Worktree Finish Phase 3 — Recovery retention lifecycle). Existing awa-contract v1 consumers stay valid; NO v2."
   }
 }

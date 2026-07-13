@@ -184,21 +184,72 @@ do_uninstall() {
     awa_log "kept recovery/detection state at $STATE_DIR (--keep-state)"
   else
     if [ -d "$STATE_DIR" ]; then
-      awa_warn "removing ordinary state at $STATE_DIR; protected Retain artifacts survive normal uninstall"
+      awa_warn "removing ordinary state at $STATE_DIR; protected Retain + protected recovery artifacts survive normal uninstall"
       STATE_DIR="$STATE_DIR" python3 - <<'PY'
-import os, shutil
+import json, os, shutil
 from pathlib import Path
+
 root = Path(os.environ["STATE_DIR"])
-protected = root / "protected-retain"
+protected_retain = root / "protected-retain"   # kernel Retain artifacts (already protected)
+recovery = root / "recovery"                    # engine recovery artifacts (some protected)
+
+
+def protected_recovery_files(recovery_dir):
+    """Resolved paths of every file belonging to a PROTECTED recovery artifact (its manifest +
+    archive). Fail-safe: an unreadable manifest is PRESERVED (never delete under uncertainty)."""
+    keep = set()
+    if not recovery_dir.is_dir():
+        return keep
+    for m in recovery_dir.iterdir():
+        if not (m.is_file() and m.name.endswith(".manifest.json")):
+            continue
+        try:
+            doc = json.loads(m.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            keep.add(str(m.resolve()))
+            continue
+        if isinstance(doc, dict) and doc.get("protected"):
+            keep.add(str(m.resolve()))
+            if doc.get("archive"):
+                keep.add(str(Path(str(doc["archive"])).resolve()))
+            if doc.get("archive_name"):
+                keep.add(str((recovery_dir / str(doc["archive_name"])).resolve()))
+    return keep
+
+
+keep = protected_recovery_files(recovery)
+
 for child in list(root.iterdir()):
-    if child == protected:
+    if child == protected_retain:
+        continue
+    if child == recovery and keep:
+        # Prune ONLY ordinary artifacts; preserve every protected archive + manifest.
+        for f in list(recovery.rglob("*")):
+            if f.is_dir() or f.is_symlink():
+                continue
+            if str(f.resolve()) in keep:
+                continue
+            try:
+                f.unlink()
+            except OSError:
+                pass
+        for d in sorted((p for p in recovery.rglob("*") if p.is_dir()), reverse=True):
+            try:
+                d.rmdir()
+            except OSError:
+                pass
         continue
     if child.is_dir() and not child.is_symlink():
         shutil.rmtree(child)
     else:
         child.unlink()
-if not protected.exists():
-    root.rmdir()
+
+# Remove the state root only when NOTHING protected survived.
+if not protected_retain.exists() and not (recovery.is_dir() and any(recovery.iterdir())):
+    try:
+        root.rmdir()
+    except OSError:
+        pass
 PY
     fi
   fi
@@ -222,7 +273,8 @@ if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data
 hooks = data["hooks"]
 owned = {
     (pathlib.Path(os.environ["RUNTIME"]) / "kernel" / "hooks" / name).resolve()
-    for name in ("worktree-guard.sh", "worktree-session.sh", "before-submit-prompt.sh")
+    for name in ("worktree-guard.sh", "worktree-session.sh", "before-submit-prompt.sh",
+                 "awa-recovery-maintenance.sh")
 }
 def is_owned(entry):
     command = str(entry.get("command", ""))
