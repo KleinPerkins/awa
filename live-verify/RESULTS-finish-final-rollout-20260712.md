@@ -1,5 +1,7 @@
 # AWA Root-Bound Worktree Finish — Final-Rollout source-side coverage audit — 2026-07-12
 
+> **Superseded by [`RESULTS-finish-all-transitions-trial-20260712.md`](RESULTS-finish-all-transitions-trial-20260712.md)** (this audit is kept as history). This doc is the **static, source-side** audit: it maps each plan scenario to the existing `module::Class::test` that proves it, but did **not** execute anything end-to-end. The canonical coverage artifact is now the **executed** transition matrix, which drives all 13 plan scenarios end-to-end through the production surfaces (75 headless transitions, 0 gaps). This audit's per-scenario source-test citations have been **carried forward** into that matrix (see its *"Source-test citations carried forward from the superseded audit"* section) so no traceability is lost.
+
 **Feature under audit:** Root-Bound Worktree Finish (kernel-authorized closeout + hook/consumer
 convenience surfaces). This is the **pre-ship coverage gate**. Per the plan's hard rule *"Do not
 claim any live proof that did not occur"*, coverage is established **headlessly** (source test
