@@ -35,4 +35,20 @@ if [ -x "$SELF/bootstrap-eligible-uat.sh" ]; then
 else
   echo "  FAIL  bootstrap-eligible-uat.sh not executable"; fail=1
 fi
+# Comprehensive finish/retention UAT trial runner (Layer A) + live operator runbook (Layer B).
+for f in trial-runner/run_trial.py trial-runner/_trial_lib.py trial-runner/_trial_phase1.py \
+         trial-runner/_trial_phase2.py trial-runner/_trial_phase3.py trial-runner/_trial_live.py \
+         trial-runner/README.md trial-runner/LIVE-OPERATOR-RUNBOOK.md \
+         RESULTS-finish-all-transitions-trial-20260712.md; do
+  if [ -f "$SELF/$f" ]; then echo "  PASS  $f"; else echo "  FAIL  missing $f"; fail=1; fi
+done
+for f in trial-runner/provision-live-uat.sh trial-runner/teardown-live-uat.sh; do
+  if [ -x "$SELF/$f" ]; then echo "  PASS  $f executable"; else echo "  FAIL  $f not executable"; fail=1; fi
+done
+# The trial runner must at least be import/parse clean + discover its transitions (no sandboxes).
+if python3 "$SELF/trial-runner/run_trial.py" --list >/dev/null 2>&1; then
+  echo "  PASS  trial-runner --list (transitions discoverable)"
+else
+  echo "  FAIL  trial-runner --list failed"; fail=1
+fi
 if [ "$fail" -eq 0 ]; then echo "verify-live-verify: OK"; else echo "verify-live-verify: FAILED"; exit 1; fi
