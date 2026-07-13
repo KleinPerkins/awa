@@ -19,6 +19,12 @@ This runner closes the gap for every other transition.
 > deterministic behavior; the Cursor-UI rendering / live-operator-submission / live-agent-cessation
 > surfaces are honestly deferred to Layer B and marked SKIP here.
 
+**Where this fits:** this runner is layer **(a)** of the three-layer live-verify suite — see the
+[`live-verify/` index](../README.md), which also routes to layer **(c)**, the live ON/OFF guard-mode
+session [`OPERATOR-UAT-SESSION.md`](../OPERATOR-UAT-SESSION.md). The executed matrix this runner emits
+is recorded in the canonical coverage artifact
+[`RESULTS-finish-all-transitions-trial-20260712.md`](../RESULTS-finish-all-transitions-trial-20260712.md).
+
 ---
 
 ## Run it (one line)

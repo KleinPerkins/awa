@@ -156,7 +156,10 @@ python3 live-verify/trial-runner/run_trial.py
 <!-- END MATRIX -->
 
 **Machine matrix:** `{"counts":{"ERROR":0,"FAIL":0,"PASS":76,"SKIP":4},"source_head":"763be874176298c7fce4539af32f2733c0967617"}`
-(76 PASS = 75 headless transitions + the guard row).
+(76 PASS = 75 headless transitions + the guard row). Count reconciliation:
+`python3 live-verify/trial-runner/run_trial.py --list` reports **79 registered** transitions
+(75 headless + 4 live-deferred `LIVE-D1..D4`); a full run appends the runtime-only
+`GUARD-REAL-ENV-UNTOUCHED` row for **80** total rows (**76 PASS** + **4 SKIP**).
 
 ### 0-gap check vs the plan's 13 rollout scenarios
 
@@ -183,6 +186,47 @@ end-to-end by ≥1 headless transition; D1–D4 remain live-only by nature:
 **Conclusion: 0 headless coverage gaps.** The one gap found during construction (Mixed was only
 driven to its *selection* state) was closed this session with `P2-MIXED-EXECUTE` (see §4). D1–D4 are
 inherently live-Desktop-only (see §7) and are carried by the Layer-B runbook.
+
+### Headless → live bridge: the four live-deferred rows (D1–D4)
+
+The four `SKIP (live)` rows above are **not** headless gaps — each is an inherently live-Desktop-only
+surface whose deterministic behavior is already headless-proven, and each points at the exact Layer-B
+operator step ([`LIVE-OPERATOR-RUNBOOK.md`](trial-runner/LIVE-OPERATOR-RUNBOOK.md)) and the live
+record ([`RESULTS-finish-phase2-uat-20260712.md`](RESULTS-finish-phase2-uat-20260712.md)) that carry
+the live portion — so headless and live are one story:
+
+| Live row | Headless-proven counterpart(s) | Live operator step (Layer B) | Live status to date (Phase 2) |
+|----------|--------------------------------|------------------------------|-------------------------------|
+| `LIVE-D1-HOOK-RENDER` | `P2-HOOK-BLOCK`, `P2-HOOK-SHELL-SCHEMA`, `P2-WARNING-SNAPSHOT` (block decision + exact warning bytes) | [`LIVE-OPERATOR-RUNBOOK.md` step L1](trial-runner/LIVE-OPERATOR-RUNBOOK.md) | **PROVEN live** for `I'm done` (operator screenshot, runtime `e0f3ae4`) — [phase-2 record](RESULTS-finish-phase2-uat-20260712.md) checks 1–2 |
+| `LIVE-D2-CHOICE-SUBMIT` | `P2-CANON-CHOICES`, `P2-CLOSE-ROUTING`, `P2-DISPATCH-CLI-CLOSE`, `P2-RETAIN-*`, `P2-COMMIT-*`, `P2-MIXED-EXECUTE` | [`LIVE-OPERATOR-RUNBOOK.md` steps L2–L6](trial-runner/LIVE-OPERATOR-RUNBOOK.md) | **`Cancel` PROVEN live**; `Close`/`Commit`/`Retain`/`Mixed` submission still pending — [phase-2 record](RESULTS-finish-phase2-uat-20260712.md) checks 3–8 |
+| `LIVE-D3-AGENT-STOP` | `P2-DISPATCH-CLI-CLOSE`, `P1-CLOSE-REMOVES` (`agent_stopping` / `chat_remains_open` flags) | [`LIVE-OPERATOR-RUNBOOK.md` step L6](trial-runner/LIVE-OPERATOR-RUNBOOK.md) | Not yet live (needs a live exact-`Close`); the flags are headless-proven |
+| `LIVE-D4-COMMIT-GITHUB` | `P2-COMMIT-EVIDENCE-OK`, `P2-COMMIT-FAILURE-MATRIX` (evaluator + failure matrix) | [`LIVE-OPERATOR-RUNBOOK.md` step L5 (opt-in real-GitHub)](trial-runner/LIVE-OPERATOR-RUNBOOK.md) | Not yet live (needs a throwaway GitHub repo + network) |
+
+### Source-test citations carried forward from the superseded audit
+
+The now-superseded static audit
+([`RESULTS-finish-final-rollout-20260712.md`](RESULTS-finish-final-rollout-20260712.md)) mapped each
+plan scenario to the exact source `module::Class::test` that proves it. Because that audit is
+superseded by this **executed** matrix, its per-scenario citations are reproduced here verbatim so the
+canonical artifact retains full source-test traceability. Every cited test is wired into `make verify`
+via `engine/tests/run-tests.sh`, and the executed transitions above mirror these same assertions as
+their `oracle`.
+
+| # | Plan scenario | Source proving test(s) — carried forward from the audit |
+|---|---------------|---------------------------------------------------------|
+| 1 | Finish phrases → preview/block | `test_finish_conversation::RecognizerTest::test_all_approved_phrases_and_paraphrases`; `::test_high_signal_match_runs_before_router`; `HookAndDispatcherTest::test_hook_preview_blocks_with_exact_warning_and_bare_choice_handoff`; `::test_hook_script_uses_current_block_schema_and_exact_message`; `WarningSnapshotTest::test_static_warning_byte_snapshot` |
+| 2 | Metalinguistic negatives never trigger | `test_finish_conversation::RecognizerTest::test_negated_quoted_documentation_feature_hypothetical_and_meta_rejected` |
+| 3 | Choices + casing; exact one-use `Close` | `test_finish_conversation::HookAndDispatcherTest::test_choice_canonicalizer_casing_trimming_and_reasons`; `test_finish_hardening::CurrentEnvelopeAdversarialTest::test_non_destructive_casing_matrix_through_hook_envelope_and_current`; `::test_close_variants_correct_without_activation_or_mutation`; `HookAndDispatcherTest::test_close_routes_only_literal_close_to_kernel_executor`; `test_finish_kernel::AuthorizeChallengeTest::test_is_literal_close_exact_only`; `IdenticalRefusalGateTest::test_non_close_variants_all_refuse`, `::test_replay_once_challenge_consumed_on_removal`; `test_finish_phase2_final_blockers::HookOwnedActionRefreshTest::test_exact_close_trigger_only_publishes_then_second_close_invokes_once` |
+| 4 | Attachment / booleans / "yes" / approval-click rejected | `test_finish_hardening::CurrentEnvelopeAdversarialTest::test_attachment_provenance_refuses_every_choice`; `test_finish_conversation::HookAndDispatcherTest::test_choice_canonicalizer_casing_trimming_and_reasons`; `RecognizerTest::test_finish_ignores_trusted_boolean_bypass` |
+| 5 | Retain lifecycle (row-select, protected, secret-gate, list/restore/delete) | `test_finish_conversation::RetainArtifactTest::test_typed_artifact_restore_proof_permissions_lifecycle_and_secret`; `::test_retain_action_requires_fresh_preview_and_separate_close`; `::test_deleted_ignored_and_conflicted_types_are_manifested`; `::test_retain_lock_contention_refuses_and_preserves_source`; `test_finish_final_hardening::DurableRetainPublicationTest::*` |
+| 6 | Mixed (row-partitioned commit + retain) | `test_finish_hardening::StateMachineAdversarialTest::test_mixed_requires_exact_disjoint_complete_partition`; `test_finish_phase2_final_blockers::ActionCompletionLatchTest::test_mixed_is_complete_when_both_actions_finish_even_if_refresh_fails`; `IgnoredRowsRetainOnlyTest::test_mixed_retains_ignored_commits_ordinary_and_restore_proves_ignore_intent` |
+| 7 | Commit delivery boundaries; network only in Commit/Mixed | `test_finish_conversation::CommitDeliveryProofTest::test_strict_delivery_success_and_complete_zero_checks`; `::test_delivery_failure_matrix`; `test_finish_hardening::DeliveryAndInstallAdversarialTest::test_delivery_pending_failed_and_unstable_empty_refuse`; `CommitDeliveryProofTest::test_network_calls_structurally_commit_only`; `::test_missing_gh_or_network_fails_honestly`; `::test_selected_commit_excludes_unselected_rows_and_requires_fresh_preview` |
+| 8 | Dirty confirmed discard | `test_finish_kernel::EngineOffAndLockAbiTest::test_dirty_state_is_discarded_on_close`; `test_finish_operations::GitOperationInventoryTest::test_operation_discard_count_requires_exact_close`; `::test_each_operation_group_retain_restores_and_aborts_in_isolation` |
+| 9 | Multi-session blocking (session-lock ABI) | `test_finish_kernel::IdenticalRefusalGateTest::test_cross_session_fresh_blocks`; `SessionGateTest::*`; `EngineOffAndLockAbiTest::test_lock_path_is_byte_identical_to_engine_abi`; `test_finish_conversation::HookAndDispatcherTest::test_current_session_cas_uses_shared_common_dir_lock_abi`; `test_retention::TestThrottleAndSharedLock::test_opportunistic_skips_when_lock_is_held_never_races` |
+| 10 | Network-free branch disposition | `test_finish_kernel::NoNetworkGateTest::test_removal_and_branch_delete_perform_no_network`; `BranchDispositionTest::test_ephemeral_no_local_only_is_delete_eligible`, `::test_local_only_commits_retained`, `::test_non_ephemeral_branch_retained`, `::test_protected_branch_never_deleted`; `HookIndependentGateTest::test_branch_delete_fallback_still_reports_removed` |
+| 11 | Audit-failure honesty (no bare green pill) | `test_consumer_translators::TestTranslators::test_outcome_is_honest_about_failure`; `::test_zero_banned_terms_across_all_renderings`; `::test_render_block_never_leaks_real_kernel_guard_text`; `test_finish_publication_projection::DispatcherProjectionTest::test_hostile_removed_refused_uncertain_and_branch_fallback_are_total`; `::test_executor_exception_is_unknown_and_stops_without_exception_text`; `test_finish_phase2_final_blockers::ShellMachineTrustTest::test_malformed_and_contradictory_rc_zero_or_three_never_prove_removal` |
+| 12 | Terminal agent-stop after `Close` (structured outcome; literal cessation = D3 live) | `test_finish_conversation::HookAndDispatcherTest::test_close_routes_only_literal_close_to_kernel_executor`; `test_finish_publication_projection::DispatcherProjectionTest::test_hostile_removed_refused_uncertain_and_branch_fallback_are_total`; `test_finish_conversation::HookAndDispatcherTest::test_next_current_dispatch_repairs_power_loss_after_physical_removal` |
+| 13 | Phase-3 retention invariants on the finish path | `test_retention::TestFinishPathHasNoRetention::test_kernel_finish_has_no_retention`, `::test_consumer_finish_has_no_retention`; `test_finish_final_hardening::HonestRemovalClassificationTest::test_every_partial_content_class_with_same_root_inode_is_uncertain_and_preserved`; `test_finish_kernel::NoNetworkGateTest::test_removal_and_branch_delete_perform_no_network`; `IdenticalRefusalGateTest::*` + `AuthorizeChallengeTest::test_is_literal_close_exact_only` |
 
 ---
 
@@ -211,8 +255,8 @@ inherently live-Desktop-only (see §7) and are carried by the Layer-B runbook.
 | Gate | Result |
 |------|--------|
 | `python3 live-verify/trial-runner/run_trial.py` | **75/75 headless PASS, 0 FAIL, 0 ERROR**, 4 live-deferred SKIP, guard PASS (80 rows, ~153s) |
-| `make verify` | _recorded in the session report_ |
-| `git diff --check` | _recorded in the session report_ |
+| `make verify` | **`verify: OK`** (exit 0) — engine `unittest discover` + dashboard-emitter suites, `awa-contract-freeze.sh`, `install.sh --check`, and `verify-live-verify.sh` (incl. `run_trial.py --list` discovering all 79 registered transitions) all **GREEN** |
+| `git diff --check` | **clean** — the trial-runner addition (and this cohesion pass) touch only `live-verify/`; no whitespace errors, no product/contract/code files changed |
 
 ---
 

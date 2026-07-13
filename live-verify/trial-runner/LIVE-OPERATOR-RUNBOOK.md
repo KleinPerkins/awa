@@ -5,9 +5,11 @@ non-technical PM) only opens one throwaway Cursor window and submits a handful o
 Nothing here touches a real repo, the real state root, or (by default) the operator's
 `~/.cursor/hooks.json`.
 
-**Why this exists:** Layer A ([`run_trial.py`](run_trial.py)) already proves **74** finish/retention
-transitions headlessly, end-to-end, through the production surfaces. Four surfaces are *inherently*
-live-Desktop-only and — per `AGENTS.md` — must **not** be claimed from a headless test:
+**Why this exists:** Layer A ([`run_trial.py`](run_trial.py)) already proves **75** finish/retention
+transitions headlessly, end-to-end, through the production surfaces (23 Phase-1 + 33 Phase-2 +
+19 Phase-3; see [`RESULTS-finish-all-transitions-trial-20260712.md`](../RESULTS-finish-all-transitions-trial-20260712.md)).
+Four surfaces are *inherently* live-Desktop-only and — per `AGENTS.md` — must **not** be claimed from
+a headless test:
 
 | ID | Live-only surface | Proven by step |
 |----|-------------------|----------------|
