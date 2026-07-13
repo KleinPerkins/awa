@@ -277,9 +277,17 @@ No product code, product tests, or the frozen contract were modified. The change
 
 ## 6. Git state
 
-_Filled in the session report: safety-commit SHA on `cursor/worktree/awa-20260711033524`, PR link,
-and whether the `pr-automation-controller` armed auto-merge (the controller arms itself — no manual
-`gh pr merge --auto`)._
+- **Safety commit:** `897bd2a` — `test(live-verify): comprehensive finish/retention UAT trial runner
+  (Phases 1-3)` (12 files, +3395), created with the full pre-commit guard chain **enabled**
+  (session-lock + identity-guard + data-guard + registration-guard; never `--no-verify`).
+- **Branches (origin, both at `897bd2a`):** PR branch `uat/finish-all-transitions-trial-runner`; the
+  worktree's own `cursor/worktree/awa-20260711033524` fast-forwarded for durability.
+- **PR:** [KleinPerkins/awa#44](https://github.com/KleinPerkins/awa/pull/44) → base `main`.
+- **Auto-merge:** left to the repo's `pr-automation-controller` to arm itself — **no** manual
+  `gh pr merge --auto` (a prior manual arm wedged the controller). Arming/merge status is recorded in
+  the session report.
+- **This section** was added by a follow-up docs commit on top of `897bd2a`; the substantive
+  trial-runner infra is the safety commit above.
 
 ---
 
