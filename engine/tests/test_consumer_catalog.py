@@ -1,7 +1,8 @@
 """A0 deliverable 1: AWA's real intent-catalog/v1 is well-formed and jargon-free.
 
 Router-INDEPENDENT self-check (runs in `make verify` with the router uninstalled): the catalog
-declares the frozen required-key floor per verb, valid enum values, the five operator outcomes, and
+declares the frozen required-key floor per verb, valid enum values, the original five outcomes plus
+the additive root-bound finish outcome, and
 ZERO Tier A/B/C banned terms across every PM-facing / proposal-bound string (scanned with AWA's own
 egress-terms snapshot). The seam test additionally proves the ROUTER'S authoritative catalog-verify
 accepts this same file (when the router is installed)."""
@@ -34,9 +35,9 @@ class TestConsumerCatalog(unittest.TestCase):
         self.assertEqual(self.catalog.get("consumer"), "awa")
         self.assertGreaterEqual(len(self.verbs), 5, "at least the five-outcome verb set")
 
-    def test_five_operator_outcomes_present(self):
+    def test_original_five_plus_finish_outcome_present(self):
         outcomes = self.catalog.get("outcomes", [])
-        self.assertEqual(len(outcomes), 5, "the plan's FIVE operator outcomes")
+        self.assertEqual(len(outcomes), 6, "original five outcomes plus additive finish_current")
         verbs_named = {v for o in outcomes for v in o.get("verbs", [])}
         catalog_verbs = {v.get("verb") for v in self.verbs}
         self.assertTrue(verbs_named <= catalog_verbs,
@@ -60,10 +61,15 @@ class TestConsumerCatalog(unittest.TestCase):
                     self.assertIn(p["source"], _PSOURCE)
 
     def test_destructive_verb_carries_literal_confirm_slot(self):
-        """CR9 readiness: a destructive verb must declare a `confirm` (bool, source literal) required
-        param so the operator loop can force an explicit literal confirmation."""
+        """Old-copy cleanup keeps CR9 bool confirmation. finish_current deliberately has no trusted
+        boolean bypass; its later literal Close is kernel challenge-bound."""
         for v in self.verbs:
             if v["safety_class"] == "destructive":
+                if v["verb"] == "finish_current":
+                    self.assertFalse(
+                        [p for p in v["param_schema"] if p.get("name") == "confirm"],
+                        "finish_current must not accept the legacy trusted-bool confirm slot")
+                    continue
                 confirm = [p for p in v["param_schema"] if p.get("name") == "confirm"]
                 self.assertTrue(confirm, f"destructive verb {v['verb']!r} lacks a confirm slot")
                 self.assertEqual(confirm[0].get("type"), "bool")

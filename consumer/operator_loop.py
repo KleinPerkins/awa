@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from . import translators
+from . import finish_current, translators
 
 
 def _load_kernel_consequence():
@@ -173,6 +173,20 @@ class OperatorLoop:
     def map(self, utterance: str) -> dict | None:
         """`intent map`: ask the router for a proposal. Returns None when the router is not
         installed (the off-switch path). Never executes anything."""
+        if finish_current.recognize_finish(utterance):
+            return {
+                "schema": "intent-proposal/v1",
+                "consumer": "awa",
+                "verb": "finish_current",
+                "verdict": "strong",
+                "confidence": 1.0,
+                "safety_class": "destructive",
+                "requires_confirmation": True,
+                "missing_params": [],
+                "why": ["deterministic finish-current recognizer/v1"],
+                "tool_path": "cli",
+                "start_point": "current",
+            }
         engine = self._router_engine()
         if engine is None:
             return None
@@ -251,6 +265,28 @@ class OperatorLoop:
             result["decision"] = NOT_UNDERSTOOD
             result["secondary_explicit_path"] = _SECONDARY_EXPLICIT_PATH
             result["feedback"] = self._feedback(utterance, proposal, CHOICE_CLARIFY, "noop")
+            return result
+
+        # Finish recognition is recall-only. It starts the Phase-1 preview/challenge and never
+        # accepts the legacy trusted boolean confirmation path. The later exact standalone Close
+        # is dispatched separately and remains kernel-authoritative.
+        if verb == "finish_current":
+            result["decision"] = EXECUTE
+            result["confirmation"] = None
+            if self.executor is None:
+                result["outcome"] = {
+                    "ok": None, "dry_run": True, "verb": verb, "target": target,
+                    "authorization": False,
+                }
+            else:
+                result["outcome"] = self.executor(
+                    verb, {"conversation_id": self.session_id, "preview_only": True}, target)
+            outcome = result["outcome"] or {}
+            if isinstance(outcome.get("user_message"), str):
+                result["finish_warning"] = outcome["user_message"]
+            result["feedback"] = self._feedback(
+                utterance, proposal, CHOICE_ACCEPT,
+                "success" if outcome.get("ok") else "unknown")
             return result
 
         # CONFIRM-CONSEQUENCE (kernel-sourced, independent of the router). A verb whose CATALOG entry
@@ -386,7 +422,7 @@ class OperatorLoop:
 # machinery that carries routing/kernel metadata the PM must never see. `understanding`/
 # `confirmation`/`narration` are the plain-language renderings the operator actually reads.
 _PM_FACING_KEYS = ("utterance", "decision", "understanding", "confirmation", "narration",
-                   "secondary_explicit_path")
+                   "secondary_explicit_path", "finish_warning")
 
 
 def pm_view(result: dict) -> dict:

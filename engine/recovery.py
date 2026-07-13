@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import gitutil, paths, state as state_mod
+from . import gitutil, paths, retention, state as state_mod
 
 # S1 secret denylist (basename patterns), mirroring .gitignore secret classes.
 _SECRET = re.compile(
@@ -41,6 +41,17 @@ _SECRET = re.compile(
 # Manifest `kind` for the protected whole-worktree archive (D2). `prune_artifacts` treats any
 # artifact whose manifest marks `protected: true` as never-deletable.
 WORKTREE_ARCHIVE_KIND = "worktree-archive"
+
+
+def _prune_on_creation(state: state_mod.State | None, recovery_dir: Path) -> None:
+    """The DETERMINISTIC primary retention trigger: every artifact write runs the same bounded
+    maintenance pass under the shared state-root lock, so storage self-limits without depending on
+    any schedule. Fail-safe: a maintenance hiccup NEVER breaks artifact creation (we just wrote a
+    safety artifact — keeping it matters more than pruning)."""
+    try:
+        retention.run_maintenance(state, recovery_dir=recovery_dir, trigger="create")
+    except Exception:  # noqa: BLE001 - creation must succeed regardless of maintenance
+        pass
 
 
 def _slug(name: str) -> str:
@@ -122,23 +133,25 @@ def create_bundle(worktree_path: str, *, allow_secrets: bool = False,
     except OSError:
         pass
 
-    manifest_doc = {
-        "kind": "bundle",
-        "source": src,
-        "archive": str(archive),
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "included": included,
-        "skipped_secrets": skipped_secrets,
-        "skipped_symlink_escape": skipped_symlink,
-        "allow_secrets": allow_secrets,
-    }
+    manifest_doc = retention.build_manifest(
+        "bundle", src, archive, protected=False, recovery_root=rec,
+        extra={
+            "included": included,
+            "skipped_secrets": skipped_secrets,
+            "skipped_symlink_escape": skipped_symlink,
+            "allow_secrets": allow_secrets,
+        })
     paths.write_private(manifest, json.dumps(manifest_doc, indent=2) + "\n")
 
     if state is not None:
-        state.record_recovery("bundle", src, str(archive), str(manifest), lease_id)
+        state.record_recovery("bundle", src, str(archive), str(manifest), lease_id,
+                              artifact_id=manifest_doc["artifact_id"],
+                              sha256=manifest_doc["sha256"], bytes=manifest_doc["size"],
+                              protected=False)
         state.record_event("recovery_bundle",
                            f"bundle {archive.name}: {len(included)} incl, "
                            f"{len(skipped_secrets)} secret-skipped", lease_id)
+    _prune_on_creation(state, rec)
     return BundleResult(str(archive), str(manifest), included, skipped_secrets, skipped_symlink)
 
 
@@ -205,18 +218,15 @@ def create_worktree_archive(worktree_path: str, *, allow_secrets: bool = False,
     else:
         archive.write_bytes(b"")  # nothing safe to archive; still write the manifest.
 
-    manifest_doc = {
-        "kind": WORKTREE_ARCHIVE_KIND,
-        "protected": True,
-        "source": src,
-        "archive": str(archive),
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "included": included,
-        "skipped_secrets": skipped_secrets,
-        "skipped_symlink_escape": skipped_symlink,
-        "allow_secrets": allow_secrets,
-        "hardening": "archive-only (read-only file mode 0o400); no OS immutable flag / lock",
-    }
+    manifest_doc = retention.build_manifest(
+        WORKTREE_ARCHIVE_KIND, src, archive, protected=True, recovery_root=rec,
+        extra={
+            "included": included,
+            "skipped_secrets": skipped_secrets,
+            "skipped_symlink_escape": skipped_symlink,
+            "allow_secrets": allow_secrets,
+            "hardening": "archive-only (read-only file mode 0o400); no OS immutable flag / lock",
+        })
     paths.write_private(manifest, json.dumps(manifest_doc, indent=2) + "\n")
     # Archive-only hardening (perms-only, no OS lock): make the archive + manifest READ-ONLY.
     for p in (archive, manifest):
@@ -226,11 +236,16 @@ def create_worktree_archive(worktree_path: str, *, allow_secrets: bool = False,
             pass
 
     if state is not None:
-        state.record_recovery(WORKTREE_ARCHIVE_KIND, src, str(archive), str(manifest), lease_id)
+        state.record_recovery(WORKTREE_ARCHIVE_KIND, src, str(archive), str(manifest), lease_id,
+                              artifact_id=manifest_doc["artifact_id"],
+                              sha256=manifest_doc["sha256"], bytes=manifest_doc["size"],
+                              protected=True)
         state.record_event("recovery_worktree_archive",
                            f"protected whole-worktree archive {archive.name}: "
                            f"{len(included)} file(s), {len(skipped_secrets)} secret-skipped",
                            lease_id)
+    # Prune-on-creation still self-limits ORDINARY storage; the protected archive is never removed.
+    _prune_on_creation(state, rec)
     return ArchiveResult(str(archive), str(manifest), included, skipped_secrets, skipped_symlink, True)
 
 
@@ -283,11 +298,24 @@ def create_patch(worktree_path: str, *, recovery_dir: Path | None = None,
     rc2, staged, _ = gitutil.git(src, "diff", "--cached", "--name-only", timeout=30)
     included_staged = rc2 == 0 and bool(staged.strip())
 
+    # Sidecar manifest so a patch participates in the ONE unified artifact format (collision-
+    # resistant id, size, SHA-256, source attribution, creation time) — the age clock can then
+    # start from the patch source's deletion, same as a bundle.
+    manifest = rec / f"{patch.name}.manifest.json"
+    manifest_doc = retention.build_manifest(
+        "patch", src, patch, protected=False, recovery_root=rec,
+        extra={"has_changes": has_changes, "included_staged": included_staged})
+    paths.write_private(manifest, json.dumps(manifest_doc, indent=2) + "\n")
+
     if state is not None:
-        state.record_recovery("patch", src, str(patch), None, lease_id)
+        state.record_recovery("patch", src, str(patch), str(manifest), lease_id,
+                              artifact_id=manifest_doc["artifact_id"],
+                              sha256=manifest_doc["sha256"], bytes=manifest_doc["size"],
+                              protected=False)
         state.record_event("recovery_patch",
                            f"patch {patch.name} ({'changes' if has_changes else 'empty'})",
                            lease_id)
+    _prune_on_creation(state, rec)
     return PatchResult(str(patch), has_changes, included_staged)
 
 
@@ -308,20 +336,36 @@ def restore_patch(patch: str, dest_worktree: str, *, index: bool = False) -> Non
 
 
 def list_artifacts(recovery_dir: Path | None = None) -> list[dict]:
-    """Enumerate recovery artifacts on disk (manifests + patches)."""
+    """Enumerate recovery artifacts on disk (manifests + any legacy bare patches).
+
+    A patch now carries a sidecar `<name>.patch.manifest.json`, so the bare `.patch` is only
+    synthesized when it has NO manifest (a legacy patch), avoiding a double entry.
+    """
     rec = Path(recovery_dir) if recovery_dir else paths.recovery_dir()
     if not rec.exists():
         return []
     out: list[dict] = []
+    referenced: set[str] = set()
+    manifest_names = {p.name for p in rec.iterdir()
+                      if p.is_file() and p.name.endswith(".manifest.json")}
     for p in sorted(rec.iterdir()):
+        if p.name.startswith("."):
+            continue  # skip the internal .trash journal area
         if p.name.endswith(".manifest.json"):
             try:
-                out.append(json.loads(p.read_text(encoding="utf-8")))
+                doc = json.loads(p.read_text(encoding="utf-8"))
+                out.append(doc)
+                if doc.get("archive"):
+                    referenced.add(os.path.basename(str(doc["archive"])))
+                if doc.get("archive_name"):
+                    referenced.add(str(doc["archive_name"]))
             except (OSError, json.JSONDecodeError):
                 pass
-        elif p.suffix == ".patch":
-            out.append({"kind": "patch", "archive": str(p),
-                        "size": p.stat().st_size})
+    for p in sorted(rec.iterdir()):
+        if (p.is_file() and p.suffix == ".patch"
+                and (p.name + ".manifest.json") not in manifest_names
+                and p.name not in referenced):
+            out.append({"kind": "patch", "archive": str(p), "size": p.stat().st_size})
     return out
 
 

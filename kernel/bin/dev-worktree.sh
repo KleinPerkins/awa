@@ -26,6 +26,12 @@ AWA_POLICY_LIB="$KERNEL_DIR/lib/awa_policy.py"
 # Env-overridable so an operator/harness can point at a co-located copy; its ABSENCE is treated
 # as fail-CLOSED by the active-root gate (a corrupt install must not silently disable protection).
 AWA_ROOTS_LIB="${AWA_ROOTS_LIB:-$KERNEL_DIR/lib/awa_roots.py}"
+# Root-bound finish core (kernel-owned, stdlib-only; holds engine/router-off). Drives the
+# deterministic inventory/fingerprint/challenge/authorize/lock/branch-disposition primitives for
+# `clean --finish-current`. Its ABSENCE is fail-CLOSED on the finish path (refuse, never remove).
+# Export AWA_ROOTS_LIB so the finish lib loads the SAME sibling awa_roots.py this script uses.
+AWA_FINISH_LIB="${AWA_FINISH_LIB:-$KERNEL_DIR/lib/awa_finish.py}"
+export AWA_ROOTS_LIB
 
 # X3: agent-created worktrees live on a DURABLE root, not ~/.cursor/worktrees (which Cursor
 # subjects to its own count/size cleanup — conflicting with the no-lost-work guarantee). The
@@ -78,6 +84,23 @@ clean options:
   --bundle         archive git-ignored local files to the recovery dir before removal (X3)
   --force          discard git-ignored files (no bundle) and pass --force to worktree remove
   --delete-branch  also delete the local branch when it still points at captured HEAD
+
+  --finish-current       finish (discard + remove) the CURRENT linked worktree (takes NO --path;
+                         the target is the physical current dir, which must be a linked worktree).
+                         The flag alone is NOT authorization — see --preview / --authorization.
+  --preview              (with --finish-current) READ-ONLY: render the inventory of work that a
+                         discard would destroy + create a pending challenge; performs NO mutation.
+  --authorization ANS    (with --finish-current) consume the pending challenge and remove ONLY when
+                         ANS is the exact literal 'Close' AND the re-derived fingerprint byte-equals
+                         the challenge. Also accepted via AWA_FINISH_AUTHORIZATION.
+  --conversation-id ID   (with --finish-current) stable id keying the pending challenge across the
+                         preview->authorize round-trip (default: AWA_FINISH_CONVERSATION_ID /
+                         DEV_SESSION_ID / 'cli').
+  --expected-nonce ID    (with --finish-current) hook dispatcher binding for the selected challenge.
+  --expected-generation N
+                         (with --finish-current) hook dispatcher generation binding. Hook-mode Close
+                         requires both exact values; direct Phase-1 preview/Close remains compatible
+                         without either flag.
 
 policy:
   AWA_POLICY           path to the worktree policy (default: installed generic template)
@@ -487,7 +510,7 @@ awa_bundle_ignored() {
   AWA_SRC="$path" AWA_DEST="$dest" AWA_MANIFEST="$manifest" \
   AWA_ALLOW_SECRETS="${AWA_BUNDLE_ALLOW_SECRETS:-0}" IGNORED_NL="$ignored_nl" \
   python3 - <<'PY'
-import json, os, re, subprocess, sys
+import hashlib, json, os, re, subprocess, sys, time
 src = os.environ["AWA_SRC"]; dest = os.environ["AWA_DEST"]; manifest = os.environ["AWA_MANIFEST"]
 allow_secrets = os.environ.get("AWA_ALLOW_SECRETS") == "1"
 entries = [e for e in os.environ["IGNORED_NL"].splitlines() if e.strip()]
@@ -510,8 +533,23 @@ if included:
         print(f"dev-worktree: tar failed ({rc}) creating {dest}", file=sys.stderr); sys.exit(1)
 else:
     open(dest, "wb").close()
+# Unified recovery-artifact manifest (awa_recovery_artifact/v1): the SAME shape the engine writers
+# emit, so kernel bundles participate directly in the engine's retention lifecycle (TTL/pressure)
+# without a legacy-normalization guess. Kernel-first: computed with the stdlib only, zero network.
+_h = hashlib.sha256()
+with open(dest, "rb") as _fh:
+    for _chunk in iter(lambda: _fh.read(1024 * 1024), b""):
+        _h.update(_chunk)
+_epoch = int(time.time())
 with open(manifest, "w", encoding="utf-8") as fh:
-    json.dump({"source": src, "archive": dest, "included": included,
+    json.dump({"schema": "awa_recovery_artifact/v1",
+               "artifact_id": "bundle-" + os.urandom(16).hex(),
+               "kind": "bundle", "protected": False,
+               "source": src, "archive": dest, "archive_name": os.path.basename(dest),
+               "size": os.path.getsize(dest), "sha256": _h.hexdigest(),
+               "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_epoch)),
+               "created_at_epoch": _epoch,
+               "included": included,
                "skipped_secrets": skipped, "skipped_symlink_escape": skipped_symlink,
                "allow_secrets": allow_secrets}, fh, indent=2)
 print(dest)
@@ -549,6 +587,17 @@ _CLEAN_SAFE_REASON=""
 _CLEAN_ARCHIVE=""
 _CLEAN_ROOT_DISPOSITION=""
 _CLEAN_ROOT_DISPOSITION_REASON=""
+# Additive-within-v1 finish receipt fields (populated only on the `clean --finish-current` path;
+# left empty on the ordinary `clean --path` path so existing receipts are unchanged).
+_CLEAN_FINISH_CURRENT=0
+_CLEAN_AUTH_NONCE=""
+_CLEAN_DISCARD_COUNT=0
+_CLEAN_BRANCH_ACTION=""
+_CLEAN_CHALLENGE_FP=""
+_CLEAN_OPERATION_ID=""
+# A removed finish whose kernel receipt is not yet durable must leave its operation journal as the
+# sole recovery authority; the generic EXIT receipt writer must not mint a premature identity.
+_CLEAN_FINISH_RECEIPT_DEFERRED=0
 # MINOR #5: set when the receipt (audit record) could NOT be written, so the failure surfaces as
 # a non-zero audit exit status instead of being swallowed.
 _CLEAN_RECEIPT_ERROR=0
@@ -564,6 +613,7 @@ clean_set_disposition() {
 emit_clean_receipt() {
   [ "$_CLEAN_RECEIPT_WRITTEN" = "1" ] && return 0
   _CLEAN_RECEIPT_WRITTEN=1
+  [ "$_CLEAN_FINISH_RECEIPT_DEFERRED" = "1" ] && return 0
   if [ ! -f "$AWA_ROOTS_LIB" ]; then
     _CLEAN_RECEIPT_ERROR=1
     printf '%s: WARNING: cannot write clean receipt — kernel lib missing: %s\n' \
@@ -581,7 +631,10 @@ emit_clean_receipt() {
     --delete-branch "$_CLEAN_DELETE_BRANCH" --ignored-present "$_CLEAN_IGNORED_PRESENT" \
     --ignored-count "$_CLEAN_IGNORED_COUNT" --safe-reason "$_CLEAN_SAFE_REASON" \
     --archive "$_CLEAN_ARCHIVE" --root-disposition "$_CLEAN_ROOT_DISPOSITION" \
-    --root-disposition-reason "$_CLEAN_ROOT_DISPOSITION_REASON" 2>&1)"
+    --root-disposition-reason "$_CLEAN_ROOT_DISPOSITION_REASON" \
+    --finish-current "$_CLEAN_FINISH_CURRENT" --authorization-nonce "$_CLEAN_AUTH_NONCE" \
+    --discard-count "$_CLEAN_DISCARD_COUNT" --branch-action "$_CLEAN_BRANCH_ACTION" \
+    --challenge-fingerprint "$_CLEAN_CHALLENGE_FP" --operation-id "$_CLEAN_OPERATION_ID" 2>&1)"
   rc=$?
   set -e
   if [ "$rc" -ne 0 ]; then
@@ -706,21 +759,320 @@ EOF
   return 0
 }
 
+# Extract a single scalar key from a finish JSON blob on stdin (tabs/newlines flattened so the
+# value is safe to store in a shell var). Missing key -> the supplied default.
+_finish_json_get() {
+  local json="$1" key="$2" def="${3:-}"
+  printf '%s' "$json" | python3 -c '
+import json, sys
+key, default = sys.argv[1], sys.argv[2]
+try:
+    d = json.load(sys.stdin)
+    v = d.get(key, default)
+except Exception:
+    v = default
+print(str(v).replace("\t", " ").replace("\n", " "))
+' "$key" "$def" 2>/dev/null || printf '%s' "$def"
+}
+
+# Machine-facing finish output is a closed projection. It never copies the kernel message, reason,
+# paths, object ids, hashes, or extra child JSON. Human CLI output remains unchanged unless the
+# consumer explicitly requests this mode.
+_finish_emit_public_projection() {
+  [ "${AWA_FINISH_PUBLIC_PROJECTION:-0}" = "1" ] || return 1
+  local outcome="$1" branch_action="${2:-}"
+  case "$outcome" in
+    removed)
+      case "$branch_action" in
+        retained|retained_local_only|deleted)
+          printf '{"outcome":"removed","reason":"finish_removed","branch_action":"%s"}\n' \
+            "$branch_action"
+          ;;
+        *)
+          printf '{"outcome":"uncertain","reason":"removal_uncertain"}\n'
+          ;;
+      esac
+      ;;
+    uncertain)
+      printf '{"outcome":"uncertain","reason":"removal_uncertain"}\n'
+      ;;
+    *)
+      printf '{"outcome":"refused","reason":"workspace_preserved"}\n'
+      ;;
+  esac
+  return 0
+}
+
+# clean --finish-current: discard + remove the CURRENT linked worktree. The kernel refusal is the
+# ENTIRE safety guarantee in Phase 1 — removal happens ONLY when awa_finish.py, under the shared
+# per-common-dir lock, re-derives a fingerprint that byte-equals the pending challenge AND the
+# authorization is the exact literal 'Close'. The flag is NOT authorization. Any uncertainty
+# PRESERVES the worktree with a precise receipt. Uses finish_session_gate (inside finish-execute),
+# NOT the ordinary active-root gate, so the confirming session's own heartbeat does not self-block.
+clean_finish_current() {
+  local preview="$1" have_auth="$2" authorization="$3" conversation_id="$4" path_given="$5"
+  local expected_nonce="$6" expected_generation="$7"
+  _CLEAN_FINISH_CURRENT=1
+  _CLEAN_ROOT_DISPOSITION="finish"
+
+  # --finish-current takes NO --path (the target is the physical current dir) and --preview /
+  # --authorization are meaningful ONLY here.
+  if [ -n "$path_given" ]; then
+    clean_set_disposition refused finish_bad_args "clean --finish-current takes no --path (target is the current worktree)"
+    die "clean --finish-current takes no --path"
+  fi
+  if { [ -n "$expected_nonce" ] && [ -z "$expected_generation" ]; } || \
+     { [ -z "$expected_nonce" ] && [ -n "$expected_generation" ]; }; then
+    clean_set_disposition refused finish_bad_args \
+      "--expected-nonce and --expected-generation must be supplied together"
+    die "--expected-nonce and --expected-generation must be supplied together"
+  fi
+
+  # Fail-CLOSED if either kernel lib is missing (a corrupt install must never silently disable
+  # the finish safety gate).
+  if [ ! -f "$AWA_FINISH_LIB" ] || [ ! -f "$AWA_ROOTS_LIB" ]; then
+    clean_set_disposition refused finish_lib_missing "AWA finish kernel lib missing ($AWA_FINISH_LIB) — fail-closed refusal"
+    die "AWA finish kernel lib missing: $AWA_FINISH_LIB"
+  fi
+
+  # Target resolution is delegated to the stdlib finish kernel from the FIRST Git probe. It strips
+  # every inherited GIT_* selector/config/object variable, validates the linked-worktree
+  # administration files, binds the real worktree/index, and repeats the identity probes through
+  # that exact binding. Any mismatch/spoof -> refuse.
+  local here branch head git_dir common_dir target_json target_rc
+  here="$(pwd -P 2>/dev/null)" || { clean_set_disposition error finish_error "cannot resolve current directory"; die "cannot resolve current directory"; }
+  _CLEAN_PATH="$here"
+  set +e
+  target_json="$(python3 "$AWA_FINISH_LIB" resolve-target --root "$here" 2>/dev/null)"
+  target_rc=$?
+  set -e
+  if [ "$target_rc" -ne 0 ] || [ -z "$target_json" ]; then
+    clean_set_disposition refused finish_not_linked \
+      "current directory is not one exactly bound linked worktree"
+    die "current directory is not one exactly bound linked worktree"
+  fi
+  git_dir="$(_finish_json_get "$target_json" git_dir '')"
+  common_dir="$(_finish_json_get "$target_json" common_dir '')"
+  branch="$(_finish_json_get "$target_json" branch '')"
+  head="$(_finish_json_get "$target_json" head '')"
+  if [ -z "$git_dir" ] || [ -z "$common_dir" ] || [ -z "$branch" ] || [ -z "$head" ]; then
+    clean_set_disposition refused finish_not_linked \
+      "linked-worktree target identity is incomplete"
+    die "linked-worktree target identity is incomplete"
+  fi
+  _CLEAN_BRANCH="$branch"; _CLEAN_HEAD="$head"; _CLEAN_COMMON_DIR="$common_dir"
+
+  [ -n "$conversation_id" ] || conversation_id="${AWA_FINISH_CONVERSATION_ID:-${DEV_SESSION_ID:-cli}}"
+  local session_id="${DEV_SESSION_ID:-}"
+
+  # ---- READ-ONLY preview: inventory + fingerprint + pending challenge, no mutation ----
+  if [ "$preview" -eq 1 ]; then
+    local out rc rows
+    set +e
+    out="$(python3 "$AWA_FINISH_LIB" preview --root "$here" --git-dir "$git_dir" \
+      --common-dir "$common_dir" --branch "$branch" --head "$head" \
+      --session-id "$session_id" --conversation-id "$conversation_id" 2>/dev/null)"
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+      clean_set_disposition refused finish_inventory_unsafe \
+        "finish preview refused: $(_finish_json_get "$out" reason inventory_unsafe)"
+      note "finish preview refused (inventory unsafe or unreadable)" >&2
+      return 1
+    fi
+    _CLEAN_CHALLENGE_FP="$(_finish_json_get "$out" fingerprint '')"
+    _CLEAN_DISCARD_COUNT="$(_finish_json_get "$out" discard_count 0)"
+    rows="$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("rows",""))' 2>/dev/null || true)"
+    printf 'AWA finish preview — the following local work would be permanently discarded:\n\n'
+    printf '%s\n\n' "$rows"
+    printf 'To CONFIRM removal, re-run with the exact authorization word:\n'
+    printf '  %s clean --finish-current --authorization Close\n' "$SELF_NAME"
+    printf 'To CANCEL, do nothing (this preview performed no changes).\n'
+    clean_set_disposition refused finish_preview "finish preview rendered; pending challenge created (no removal performed)"
+    return 0
+  fi
+
+  # ---- EXECUTE: the flag is NOT authorization; an explicit literal 'Close' is required ----
+  if [ "$have_auth" -ne 1 ] && [ -n "${AWA_FINISH_AUTHORIZATION+set}" ]; then
+    authorization="${AWA_FINISH_AUTHORIZATION}"; have_auth=1
+  fi
+  if [ "$have_auth" -ne 1 ]; then
+    clean_set_disposition refused finish_no_authorization \
+      "finish requires an explicit authorization (the literal 'Close'); the flag alone is not authorization"
+    {
+      printf '%s: refusing to finish — no authorization provided\n' "$SELF_NAME"
+      printf '  Run a preview first:  %s clean --finish-current --preview\n' "$SELF_NAME"
+      printf '  Then confirm:         %s clean --finish-current --authorization Close\n' "$SELF_NAME"
+    } >&2
+    return 1
+  fi
+
+  # CWD SAFETY: the removal unlinks this dir; move to a surviving dir so the EXIT-trap receipt
+  # writer (and any child) can still fork/exec after the worktree is gone.
+  local safe_cwd
+  safe_cwd="$(dirname "$common_dir")"
+  [ -d "$safe_cwd" ] || safe_cwd="/"
+  cd "$safe_cwd" 2>/dev/null || cd / 2>/dev/null || true
+
+  local out rc outcome receipt_code message receipt_committed
+  set +e
+  if [ -n "$expected_nonce" ] && [ -n "$expected_generation" ]; then
+    out="$(python3 "$AWA_FINISH_LIB" finish-execute --root "$here" --git-dir "$git_dir" \
+      --common-dir "$common_dir" --branch "$branch" --head "$head" \
+      --session-id "$session_id" --conversation-id "$conversation_id" \
+      --answer "$authorization" --expected-nonce "$expected_nonce" \
+      --expected-generation "$expected_generation" 2>/dev/null)"
+  else
+    out="$(python3 "$AWA_FINISH_LIB" finish-execute --root "$here" --git-dir "$git_dir" \
+      --common-dir "$common_dir" --branch "$branch" --head "$head" \
+      --session-id "$session_id" --conversation-id "$conversation_id" \
+      --answer "$authorization" 2>/dev/null)"
+  fi
+  rc=$?
+  set -e
+  # A child can disappear after Git has removed the worktree, or can truthfully report an
+  # uncertified post-removal namespace/state write. Reconcile in a fresh process immediately so the
+  # shell never narrates that removed root as present and never trusts in-process visibility.
+  if [ -z "$out" ] || [ -z "$(_finish_json_get "$out" outcome '')" ] || \
+     [ "$(_finish_json_get "$out" outcome '')" = "uncertain" ]; then
+    local recovered
+    set +e
+    if [ -n "$expected_nonce" ] && [ -n "$expected_generation" ]; then
+      recovered="$(python3 "$AWA_FINISH_LIB" finish-reconcile --root "$here" --git-dir "$git_dir" \
+        --common-dir "$common_dir" --branch "$branch" --head "$head" \
+        --session-id "$session_id" --conversation-id "$conversation_id" \
+        --expected-nonce "$expected_nonce" --expected-generation "$expected_generation" \
+        2>/dev/null)"
+    else
+      recovered="$(python3 "$AWA_FINISH_LIB" finish-reconcile --root "$here" --git-dir "$git_dir" \
+        --common-dir "$common_dir" --branch "$branch" --head "$head" \
+        --session-id "$session_id" --conversation-id "$conversation_id" 2>/dev/null)"
+    fi
+    rc=$?
+    set -e
+    out="$recovered"
+    if [ -z "$out" ]; then
+      clean_set_disposition error finish_error \
+        "finish removal outcome could not be reconciled (rc=$rc) — fail-safe uncertainty"
+      return 1
+    fi
+  fi
+  # A valid removed result can still report that its operation-bound receipt was deferred because
+  # the removed/branch state write failed. Retry reconciliation in a fresh kernel process before
+  # narration; never let the generic EXIT writer race ahead of the journal's durable branch result.
+  outcome="$(_finish_json_get "$out" outcome refused)"
+  receipt_committed="$(_finish_json_get "$out" receipt_committed false)"
+  if [ "$outcome" = "removed" ] && [ "$receipt_committed" != "True" ]; then
+    local recovered
+    set +e
+    if [ -n "$expected_nonce" ] && [ -n "$expected_generation" ]; then
+      recovered="$(python3 "$AWA_FINISH_LIB" finish-reconcile --root "$here" --git-dir "$git_dir" \
+        --common-dir "$common_dir" --branch "$branch" --head "$head" \
+        --session-id "$session_id" --conversation-id "$conversation_id" \
+        --expected-nonce "$expected_nonce" --expected-generation "$expected_generation" \
+        2>/dev/null)"
+    else
+      recovered="$(python3 "$AWA_FINISH_LIB" finish-reconcile --root "$here" --git-dir "$git_dir" \
+        --common-dir "$common_dir" --branch "$branch" --head "$head" \
+        --session-id "$session_id" --conversation-id "$conversation_id" 2>/dev/null)"
+    fi
+    rc=$?
+    set -e
+    if [ -n "$recovered" ] && \
+       [ "$(_finish_json_get "$recovered" outcome '')" = "removed" ]; then
+      out="$recovered"
+    fi
+  fi
+  outcome="$(_finish_json_get "$out" outcome refused)"
+  receipt_committed="$(_finish_json_get "$out" receipt_committed false)"
+  receipt_code="$(_finish_json_get "$out" receipt_code finish_error)"
+  message="$(_finish_json_get "$out" message 'finish-execute did not report a message')"
+  _CLEAN_BRANCH_ACTION="$(_finish_json_get "$out" branch_action '')"
+  _CLEAN_DISCARD_COUNT="$(_finish_json_get "$out" discard_count 0)"
+  _CLEAN_AUTH_NONCE="$(_finish_json_get "$out" authorization_nonce '')"
+  _CLEAN_CHALLENGE_FP="$(_finish_json_get "$out" challenge_fingerprint '')"
+  _CLEAN_OPERATION_ID=""
+  if [ "$outcome" = "removed" ]; then
+    _CLEAN_OPERATION_ID="$(_finish_json_get "$out" operation_id '')"
+  fi
+  if [ "$outcome" = "removed" ] && [ "$receipt_committed" != "True" ]; then
+    _CLEAN_FINISH_RECEIPT_DEFERRED=1
+  fi
+  if [ "$outcome" = "uncertain" ]; then
+    clean_set_disposition error finish_error "finish removal outcome is uncertain: $message"
+    if ! _finish_emit_public_projection uncertain; then
+      note "finish removal outcome is uncertain: $message" >&2
+    fi
+    return 1
+  fi
+
+  # Map the bounded receipt_code to a LITERAL clean_set_disposition call (the receipt-coverage
+  # meta-test locks the authored disposition/reason universe; Python remains the decision authority).
+  case "$receipt_code" in
+    finish_removed)              clean_set_disposition removed finish_removed "$message" ;;
+    finish_not_close)            clean_set_disposition refused finish_not_close "$message" ;;
+    finish_no_challenge)         clean_set_disposition refused finish_no_challenge "$message" ;;
+    finish_fingerprint_mismatch) clean_set_disposition refused finish_fingerprint_mismatch "$message" ;;
+    finish_target_mismatch)      clean_set_disposition refused finish_target_mismatch "$message" ;;
+    finish_session_blocked)      clean_set_disposition refused finish_session_blocked "$message" ;;
+    finish_recheck_failed)       clean_set_disposition refused finish_recheck_failed "$message" ;;
+    finish_inventory_unsafe)     clean_set_disposition refused finish_inventory_unsafe "$message" ;;
+    finish_lock_busy)            clean_set_disposition refused finish_lock_busy "$message" ;;
+    finish_remove_failed)        clean_set_disposition error finish_remove_failed "$message" ;;
+    *)                           clean_set_disposition error finish_error "$message" ;;
+  esac
+  if [ "$outcome" = "removed" ]; then
+    if ! _finish_emit_public_projection removed "$_CLEAN_BRANCH_ACTION"; then
+      note "$message"
+    fi
+    return 0
+  fi
+  if ! _finish_emit_public_projection refused; then
+    note "$message" >&2
+  fi
+  return 1
+}
+
 clean_worktree() {
   # Arm the receipt backstop FIRST so even an early arg-parse exit records a receipt.
   trap '_clean_exit_trap' EXIT
   local path="" force=0 delete_branch=0 bundle=0
+  local finish_current=0 preview=0 authorization="" conversation_id="" have_auth=0
+  local expected_nonce="" expected_generation=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --path) shift; path="${1:?--path requires a path}" ;;
       --force) force=1 ;;
       --bundle) bundle=1 ;;
       --delete-branch) delete_branch=1 ;;
+      --finish-current) finish_current=1 ;;
+      --preview) preview=1 ;;
+      --authorization) shift; authorization="${1?--authorization requires a value}"; have_auth=1 ;;
+      --conversation-id) shift; conversation_id="${1?--conversation-id requires a value}" ;;
+      --expected-nonce) shift; expected_nonce="${1?--expected-nonce requires a value}" ;;
+      --expected-generation) shift; expected_generation="${1?--expected-generation requires a value}" ;;
       *) clean_set_disposition refused unknown_option "unknown clean option: $1"; die "unknown clean option: $1" ;;
     esac
     shift
   done
-  _CLEAN_PATH="$path"; _CLEAN_BUNDLE="$bundle"; _CLEAN_FORCE="$force"; _CLEAN_DELETE_BRANCH="$delete_branch"
+  _CLEAN_BUNDLE="$bundle"; _CLEAN_FORCE="$force"; _CLEAN_DELETE_BRANCH="$delete_branch"
+
+  # Route the root-bound finish path (separate from the frozen `clean --path` flow, which keeps
+  # its v1 active-root + --force semantics UNCHANGED).
+  if [ "$finish_current" -eq 1 ]; then
+    clean_finish_current "$preview" "$have_auth" "$authorization" "$conversation_id" "$path" \
+      "$expected_nonce" "$expected_generation"
+    return $?
+  fi
+  # --preview / --authorization / --conversation-id are meaningful ONLY with --finish-current.
+  if [ "$preview" -eq 1 ] || [ "$have_auth" -eq 1 ] || [ -n "$conversation_id" ] || \
+     [ -n "$expected_nonce" ] || [ -n "$expected_generation" ]; then
+    clean_set_disposition refused finish_bad_args \
+      "--preview/--authorization/--conversation-id/--expected-* require --finish-current"
+    die "--preview/--authorization/--conversation-id/--expected-* require --finish-current"
+  fi
+
+  _CLEAN_PATH="$path"
   if [ -z "$path" ]; then
     clean_set_disposition refused missing_path "clean requires --path"
     die "clean requires --path"
@@ -739,7 +1091,7 @@ clean_worktree() {
     die "cannot canonicalize worktree path: $path"
   }
   _CLEAN_PATH="$path"
-  local dirty branch head git_dir common_dir safe_reason ignored ignored_rc
+  local dirty branch head git_dir common_dir safe_reason ignored ignored_rc _lockfile=""
   dirty="$(git -C "$path" status --porcelain 2>/dev/null || true)"
   if [ -n "$dirty" ]; then
     clean_set_disposition refused dirty "refusing to remove dirty worktree: $path"
@@ -826,6 +1178,46 @@ clean_worktree() {
     fi
   fi
   note "clean safety captured: path=$path branch=$branch head=${head:0:12} git-dir=$git_dir git-common-dir=$common_dir safe=$safe_reason"
+  # ADDITIVE-WITHIN-v1 (Fix 3): hold the SHARED per-common-dir advisory lock across the ORDINARY
+  # destructive section (TOCTOU disposition re-read + `git worktree remove` + branch-delete), the
+  # SAME lock ABI kernel finish + engine maintenance use, so an ordinary clean serializes against a
+  # concurrent finish/engine mutation on this git_common_dir. The lock is held on fd 200 (opened
+  # here, kept open across the section; the flock persists because THIS shell keeps the fd open —
+  # the standard flock(1) <fd> pattern) and released when this single-invocation process exits.
+  # Uncontended acquisition is transparent (instant). On contention within the bounded timeout we
+  # REFUSE fail-safe (clean_lock_busy) and preserve the worktree. Lock setup is part of destructive
+  # authorization: a missing helper, failed/empty/unsafe lock path, open failure, or acquisition
+  # failure can never degrade to an unlocked remove (including under --force).
+  if [ ! -f "$AWA_FINISH_LIB" ]; then
+    clean_set_disposition refused clean_lock_busy "finish lock helper unavailable — worktree preserved"
+    die "refusing to remove worktree — finish lock helper unavailable"
+  fi
+  if ! _lockfile="$(python3 "$AWA_FINISH_LIB" lock-ensure \
+      --common-dir "$common_dir" 2>/dev/null)"; then
+    clean_set_disposition refused clean_lock_busy "per-common-dir lock setup failed — worktree preserved"
+    die "refusing to remove worktree — per-common-dir lock setup failed"
+  fi
+  case "$_lockfile" in
+    ""|*$'\n'*)
+      clean_set_disposition refused clean_lock_busy "per-common-dir lock path invalid — worktree preserved"
+      die "refusing to remove worktree — per-common-dir lock path invalid"
+      ;;
+  esac
+  if [[ "$_lockfile" != /* ]] || [ ! -f "$_lockfile" ] || [ -L "$_lockfile" ] \
+      || [ ! -r "$_lockfile" ] || [ ! -w "$_lockfile" ]; then
+    clean_set_disposition refused clean_lock_busy "per-common-dir lock path unusable — worktree preserved"
+    die "refusing to remove worktree — per-common-dir lock path unusable"
+  fi
+  if ! { exec 200<>"$_lockfile"; } 2>/dev/null; then
+    clean_set_disposition refused clean_lock_busy "cannot open per-common-dir lockfile — worktree preserved"
+    die "refusing to remove worktree — cannot open per-common-dir lockfile"
+  fi
+  if ! python3 "$AWA_FINISH_LIB" flock-fd --fd 200 \
+      --timeout "${AWA_CLEAN_LOCK_TIMEOUT:-30}"; then
+    exec 200>&-
+    clean_set_disposition refused clean_lock_busy "per-common-dir lock busy or unavailable — worktree preserved"
+    die "refusing to remove worktree — the per-common-dir lock is busy or unavailable"
+  fi
   # MAJOR #2 (TOCTOU): the disposition read at the top ran BEFORE branch_is_cleanup_safe, the
   # git-ignored scan, and an optional --bundle tar (which can take minutes). RE-READ the canonical
   # disposition IMMEDIATELY before the destructive remove; if the root was re-activated in the

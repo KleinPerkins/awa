@@ -182,6 +182,35 @@ The §H1 copy-honesty gate: **all three capabilities are green** on the host (`o
 `kernel-guarantee-verify.sh` env matrix). Operator surfaces use the upgraded `strings[]` table;
 copy-honesty-check enforces gated verbs at build time.
 
+## Recovery retention lifecycle security (Phase 3)
+
+The retention lifecycle deletes ordinary recovery artifacts on a schedule, so it is treated as a
+destructive surface and inherits AWA's destructive-path discipline — while staying **off** the
+kernel finish/removal path.
+
+- **Strictly separate from finish authorization.** No retention logic runs on the exact-`Close`
+  authorization or worktree-removal path. Retention runs only in the engine; worktree cleanup and
+  kernel safety hold with the engine, hook, router, and MCP all absent (kernel-first).
+- **Protected artifacts never auto-removed, and survive uninstall.** A manifest `protected:true`
+  (whole-worktree archives + kernel Retain artifacts) is excluded from TTL and pressure pruning.
+  `install.sh --uninstall` preserves `protected-retain/` AND every protected artifact inside
+  `recovery/` (an unreadable manifest is preserved fail-safe), removing only ordinary state.
+- **Containment + fail-safe deletion.** Every deletion target must be a non-symlink file resolving
+  beneath the physical recovery root; symlink/path-escape targets are refused, including via a
+  tampered resume journal. Deletion is crash-resumable (transient `recovery/.trash` journal written
+  before any unlink; durable `awa_recovery_tombstone/v1` recorded; journal removed last) and
+  idempotent on resume. A failed archive unlink is an honest ERROR that PRESERVES the artifact and
+  writes no tombstone — destructive uncertainty never reports success. Bounded retry/backoff caps a
+  transient failure at 3 attempts.
+- **Zero network, local disk, owner-only perms.** No retention path performs any network call.
+  recovery dir + `.trash` are `0700`; ordinary archives/manifests/journals `0600`; a protected
+  artifact's archive + manifest `0400`. Legacy pairs are permission-repaired before evaluation (S4).
+- **One lock ABI.** Maintenance serializes on the single global state-root lock using the same
+  advisory-flock ABI + private-lockfile perms as the finish/clean/Retain per-common-dir lock; an
+  opportunistic trigger acquires non-blocking and skips rather than racing a concurrent pass.
+- **Never fails silently.** Failed maintenance, protected-storage growth, and watermark overage
+  surface in the dashboard (`environment.recovery`) and a bounded sessionStart context warning.
+
 ## Shell-gate interception scope (adversarial UATs)
 
 The `beforeShellExecution` gate (`worktree-guard.sh`) is AWA's pre-mutation gate — the only hook whose
@@ -236,6 +265,204 @@ helper, `test_mcp.py`, `kernel/checks/awa-contract-freeze.sh`, and the host's
 `workspace_roots` shape — a systemic fixture-realism gap, not just a code bug. Those fixtures still
 correctly prove the classifier itself; they just never exercised workspace *resolution* against a
 real payload.
+
+## Finish-session gate residual — pid-less session collapse (`DEV_SESSION_ID` unset)
+
+The root-bound finish path (`awa_finish.finish_session_gate`) is a **finish-only** gate, distinct
+from `disposition()`: it may **waive only the confirming session's own** pid-less, TTL-fresh
+heartbeat (when that session's recorded branch + `git_common_dir` match the finish target) and
+otherwise **blocks** (fail-safe). Session identity keys off
+`session_key = 's-'+sha256(session_id)[:20]` when a `session_id` is present, else a single stable
+**`unattributed`** bucket (so many pid-less hookless callers do not each inflate membership).
+
+**Residual (documented, not hidden).** When **no per-session id is set** — `DEV_SESSION_ID` unset
+*and* the caller is a pid-less, hookless invoker so no `session_id` is derived — every such caller
+collapses into the one shared `unattributed` bucket. Two **concurrent pid-less** sessions in the
+**same** worktree are therefore indistinguishable to the gate: the confirming session's waiver of
+"its own" pid-less, TTL-fresh heartbeat can waive what is in fact a *second* pid-less session's
+heartbeat, so the gate may **waive rather than block**. This sits **inside the explicitly
+unsupported one-writer-per-worktree boundary** (two writers sharing a single working tree is
+already unsupported — see the concurrency model in the operating docs); it is not a new exposure
+outside that boundary. The content-addressed challenge target-binding + fingerprint gates still
+independently protect against an unrelated or drifted worktree.
+
+**Scope bound — specifically two PID-LESS sessions.** A **live-pid** session on the same boot
+**still blocks** the finish regardless of session identity: `finish_session_gate` blocks on ANY
+live pid (including the confirming session's own). A real running agent process in the worktree is
+never waived. The residual is narrowly the case of *two or more concurrent pid-less* sessions
+colliding in the `unattributed` bucket.
+
+**Mitigation.** Propagate a real per-session id so each session lands in its own `s-<hash>` bucket
+instead of the shared `unattributed` one. The Phase 2 conversational surface does this
+automatically; an operator/harness can set **`DEV_SESSION_ID` per agent** to get the same
+separation today. With distinct session ids the gate correctly blocks a second session's fresh
+heartbeat. (Contract cross-ref: `active_root.finish_session_waiver` + `finish_session_residual`.)
+
+## Conversational finish boundary
+
+The Phase-2 recognizer, operator loop, installed skill, prompt hook, and dialogue dispatcher are
+recall/UX components, not removal authority. A false-positive recognizer can only show the fixed
+warning. Removal still requires the Phase-1 kernel, under the shared lock, to consume a live
+challenge after exact bytes `Close` and a byte-identical final fingerprint. Commit, Retain, Mixed,
+and Cancel are case-insensitive non-destructive dialogue choices; this relaxation never applies to
+Close. Trusted booleans, “yes”, approval UI, router/model assertions, attachments, Close case/trim
+variants, and extra words cannot substitute.
+
+The `beforeSubmitPrompt` hook is globally fail-open (`failClosed:false`) to avoid bricking all
+workspaces. Hook challenges are explicitly inactive until `dispatch --current` consumes one valid,
+attachment-free, root/session/conversation/generation/nonce-bound choice envelope. Invalid Close
+casing is consumed only as a non-activating correction and leaves the dialogue/challenge live. The hook has an
+internal deadline below Cursor's platform timeout; interruption after any partial write leaves
+unconfirmable forensic state. Every cleanup/delete is nonce+generation CAS, so stale cleanup cannot
+delete newer state. If the hook is absent, crashes, times out, or blocking is ignored, the unchanged
+direct Phase-1 preview→literal Close flow remains available and kernel-authoritative.
+The consumer mirrors guard context parsing across top-level and nested `tool_input` sources:
+empty and explicit false/0/no/off Cloud/background values remain Desktop-negative, while every
+other non-empty broker/background handle is unsupported and mints no challenge. The shell guard,
+engine mirror, and consumer apply that same rule to both fields and their environment forms,
+including opaque strings/objects rather than only boolean truth.
+
+An activated hook Close also carries its expected nonce/generation into the kernel. Exact binding is
+checked before an exclusive-created `close_claimed` terminal record makes that generation inert;
+the claim occurs before shared-lock acquisition, so contention and every later refusal/fault consume
+the attempt without weakening the one-lock removal ABI. Cancel similarly writes `cancelled` before
+bounded projection cleanup. Terminal records—not unlink success—are authority: stale dialogue,
+index, envelope, or challenge files cannot be resolved, and cleanup failures surface explicitly.
+Finish-only session validation exact-checks every member's keyset, identity, pid, target, boot, and
+timestamps; malformed evidence blocks finish while ordinary disposition/clean semantics remain
+unchanged. Heartbeat's existing-record reads/merges/writes and finish membership snapshots use the
+same common-dir lock. Malformed existing bytes are never normalized away: heartbeat refuses
+without rewriting, preview creates no challenge/dialogue, and the linked-root/common-dir/branch
+identity is rechecked inside the lock before a valid merge. Structurally valid prior-boot
+current-session/heartbeat projections are replaceable or prunable only after that live recheck;
+malformed mixed-boot evidence remains untouched. Dual timestamp writers sample once, and migration
+accepts only the known one-second legacy skew under the lock.
+
+The private finish fingerprint covers every filesystem object, not only Git-visible rows: encoded
+raw relative path, object type, permission bits, size, regular-file SHA-256, symlink target, exact
+Git status/index evidence, and every sorted descendant hidden behind one grouped ignored-directory
+row. Regular files use no-follow open plus lstat/fstat/re-lstat identity checks; directories are
+likewise opened and scanned by no-follow descriptors. Any drift, read error, mount boundary,
+escape, special file, or nested repository at any depth refuses. Private paths, link targets,
+content, and hashes never enter hook/operator diagnostics.
+The challenge also binds a non-empty install id and exact root/Git-admin physical incarnation.
+Execution rechecks all three under the shared lock; a reused path/branch/HEAD cannot alias the
+previewed physical worktree.
+
+Git index visibility is checked before every finish status/tree inventory and before any challenge
+is minted. The finish-only preflight refuses unchanged as well as modified assume-unchanged entries,
+skip-worktree entries, materialized or sparse-index checkouts, fsmonitor-valid state/extensions, and
+effective fsmonitor configuration. It also refuses malformed, ambiguous, unsupported split, or
+unreadable evidence. All such outcomes collapse to `index_visibility_flags`; paths, object ids,
+hashes, config values, hook stderr, and contents are never surfaced. The probe parses SHA-1 and
+SHA-256 index checksums/extensions directly, reads flags with NUL delimiters and
+`core.fsmonitor=false`, and sets `GIT_OPTIONAL_LOCKS=0` plus `GIT_NO_LAZY_FETCH=1`. It therefore
+cannot refresh/write the index, lazy-fetch, or invoke fsmonitor/clean/smudge hooks. A refusal mints
+no challenge/dialogue and leaves the physical root in place. This gate is deliberately absent from
+ordinary `clean --path`, whose frozen v1 semantics are unchanged.
+
+Dispatcher output is a separate fail-safe boundary. One typed builder handles every success,
+refusal, error, uncertain result, cancellation, and correction after the one-use authorization
+steps. It accepts only closed outcome/reason/branch values and fixed messages; child stdout/stderr,
+exception and kernel text, local paths, object ids, hashes, prompt bytes, unvalidated branch reasons,
+and extra child JSON are never copied. The clean shell's internal machine mode emits exactly one
+closed JSON projection; malformed, oversized, extra-field, or exit-status-contradictory output is
+uncertain, never heuristically trusted. A proven removal reports `workspace_removed:true`,
+agent-stopping/chat-open truth, and a validated conservative branch result. A proven pre-removal
+refusal reports false. Any exception or post-invocation ambiguity reports null and stops, so
+sanitization cannot turn uncertain removal into a false preservation claim or alter authorization.
+All finish-local Git processes discard every inherited `GIT_*` selector, config injection, object
+store, namespace, and alternate-index variable before applying the fixed locale,
+`GIT_OPTIONAL_LOCKS=0`, `GIT_NO_LAZY_FETCH=1`, and `GIT_TERMINAL_PROMPT=0` profile. Non-Git
+`HOME`/XDG/PATH survive so repository/global configuration and ordinary filters retain their
+documented semantics. Discovery is immediately checked against no-follow Git pointer/back-pointer,
+common-dir, and real-index validation, then every mutable identity is repeated through explicit
+Git-dir/worktree/index binding. Commit alone may add its contained validated temporary index.
+
+An active Git operation is never inferred from a label alone. The kernel privately binds a
+content-addressed, twice-identical no-follow scan of the complete supported operation admin tree,
+logical/pseudo/original refs resolved through Git, exact raw index and stages, worktree
+dependencies, and the locally reachable object closure. Public output receives only one fixed row
+per logical operation group—never an oid, message, todo, patch, or admin path. Unknown/ambiguous
+markers, links, special files, mounts, lockfiles, escapes, or read drift refuse preview. Detached
+HEAD is accepted only for recognized operation state with one validated original local branch, and
+that branch cannot be deleted.
+
+Physical removal is a local durable transaction. A file-and-parent-fsynced 0600
+`awa_finish_removal/v1` journal is `prepared` before Git removal, then reconciled through `removed`
+and `finalized` under the same lock. Recovery requires both exact root existence and local Git
+worktree registration; disagreement remains uncertain. Confirmed removal idempotently completes
+conditional branch handling, durably stores that result before one operation-bound receipt, and
+performs exact challenge/heartbeat/current-session cleanup. A superseding current-session record
+is never deleted. The shell immediately reconciles a child that exits after real removal, and a
+later invocation repairs power-loss state; a pre-removal interruption never reports removal. Git's
+return code is never the removal oracle: every result is physically classified under the lock.
+Absent plus unregistered finalizes removal even after a nonzero return; present plus registered can
+clear `prepared` only after the original incarnations and complete operation fingerprint still
+byte-match. Partial content deletion, unreadable proof, incarnation drift, or signal disagreement
+keeps the journal/challenge/branch state and emits only bounded uncertainty with no removed receipt.
+Prepared/current journals carry the same physical identities in their operation id. A same-path
+replacement is therefore uncertain and retained, never cleared as a pre-removal interruption.
+Legacy journals may finalize only when root-absent plus unregistered; legacy present state remains
+uncertain.
+Critical kernel state uses one stdlib durability primitive: complete writes, private atomic
+replacement/exclusive creation, durable unlink/adoption, and one-component-at-a-time private
+directory publication. Every fd is retried on `EINTR` and `fsync`ed; Darwin must additionally
+complete `F_FULLFSYNC` for both files and directories or the operation fails. A visible name after a
+failed parent sync is not trusted in-process—reconciliation explicitly re-adopts it. After Git
+logically removes the worktree, the root-parent and Git-admin-parent namespaces must sync before any
+branch action. Ref deletion uses explicit Git ref-fsync configuration and then syncs the concrete
+loose-ref/reflog/packed-refs or reftable backend. Failure leaves branch action empty and the journal
+retryable; no receipt/finalization or retained/deleted claim is fabricated.
+
+The removal, authorization, preview, Cancel, Retain, and branch-disposition paths contain no `gh`,
+fetch, push, or remote proof. Network is structurally limited to Commit/Mixed delivery before a
+fresh preview. Delivery requires merge commits (squash/rebase-only repositories are unsupported)
+and fails closed on ambiguous remotes, non-exact/missing merged PR head, default-branch
+non-incorporation, unstable/transient empty checks, incomplete/failed/unknown checks, missing `gh`/auth/network,
+timeouts, and malformed evidence. A failed delivery may leave a truthful local commit on the
+retained branch; it never authorizes Close.
+
+Protected Retain artifacts use collision-resistant ids, path containment, `0700` directories,
+`0600` regular files/manifests, explicit row selection, explicit secret inclusion, typed
+file/deletion/rename/conflict/staged/symlink metadata, and a disposable restore proof before success.
+They carry `protected:true`, are outside the worktree, survive normal uninstall, and require the
+exact artifact id for manual deletion. Artifact writes/deletes share the per-common-dir lock with
+finish. Retained-row suppression recomputes the same canonical selected snapshot and requires exact
+equality of status/index bytes, modes, hashes, links, absence, and all recursive directory
+descendants; malformed/error/drift evidence keeps the source row visible.
+Publication is crash-durable: complete write loops plus file/full sync, bottom-up directory sync,
+an unpublished `restore_proven:false` restore proof, then a `restore_proven:true` manifest written
+and synced while still hidden. A private pending marker binds artifact id to the exact final-manifest
+digest; staging is renamed to final and the Retain root is synced while readers still reject it;
+only atomic pending→committed marker rename latches trust. Any later root-sync/cleanup failure
+returns success with bounded warning because readers can already validate the latch. Every
+pre-latch fault remains pending or hidden/tombstoned; rollback attempts final→hidden plus root sync,
+and failure remains untrusted. Readers, restore, list, and kernel suppression independently require
+the committed marker and matching true-manifest digest for new artifacts. Markerless legacy v1
+artifacts remain bounded-status listable/restorable/deletable without data loss but never suppress
+source rows; owned pending/staging/publication-tombstone cleanup resumes only under its recorded
+common-dir lock. SHA-1/SHA-256 source format is recorded (legacy v1 is inferred), and raw proof
+blobs use `hash-object --no-filters`. Deletion renames final/staging to a parent-synced tombstone,
+keeps its identifying manifest until payload removal finishes, moves that manifest to a synced
+owner marker for the empty-directory boundary, and safely resumes after interruption.
+Operation Retain is atomic with the exact raw index/conflict state, all required worktree
+dependencies, recursive admin bytes/topology, logical refs, and a local pack sufficient after
+source ref deletion or GC. Secret/ignored dependencies require explicit acknowledgement. Proof
+imports into an isolated standalone repository of the same object format, verifies exact
+bytes/modes/refs/stages/reachability and the operation digest, and runs only operation-specific
+abort/reset on a separate copy—never continue, hooks, merge drivers, or rebase exec. Suppression
+requires the committed publication latch and exact current operation digest; legacy file-only
+artifacts remain readable without gaining operation authority.
+Ordinary destructive clean uses that same lock ABI and refuses—`--force` included—when its helper,
+lock path, open, or acquisition is unavailable; it never degrades to an unlocked remove.
+
+**Residuals.** This is normal-path accidental-loss protection, not authentication against a same-user
+process that can rewrite local state. Raw Terminal `git worktree remove`/`rm`, aliases/scripts that
+evade shell classification, Cursor-managed external cleanup, and Cloud workspaces remain outside a
+universal hook guarantee. Live Desktop verification of the current build's
+`beforeSubmitPrompt` blocking and exact `user_message` remains release UAT; unit/install tests prove
+the documented schema and hook-independent kernel refusal, not the UI behavior.
 
 ## §H3 threat model — repo-controlled setup execution (RCE/worm)
 

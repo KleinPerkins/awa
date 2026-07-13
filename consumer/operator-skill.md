@@ -1,15 +1,48 @@
-# AWA operator loop (consumer of the intent-router) — thin skill/rule
+# AWA operator entrypoint
 
-This is the agent-facing entrypoint for AWA's operator loop (phase A0). It is deliberately thin: the
-substance lives in `consumer/operator_loop.py` (the loop), `consumer/translators.py` (plain-language
-rendering), and the KERNEL (`kernel/lib/awa_consequence.py`, the consequence source). This document is
-a maintainer/agent rule, not a PM-facing surface — so it may name mechanism.
+This installed agent entrypoint routes operator language through `consumer/operator_loop.py`.
+Root-bound finish dialogue is implemented by the production stdlib CLI
+`consumer/finish_current.py`; the intent router remains optional and never authorizes removal.
 
 ## When to use
 
-When a non-technical operator speaks a request about protecting / checking / resuming / saving /
-cleaning up their work, run ONE turn of the loop rather than translating their words into a raw
-command yourself.
+Use it for protecting, checking, resuming, saving, old-copy cleanup, or finishing the current
+temporary workspace. Direct closeout wording is matched before generic routing.
+
+## Current-workspace finish
+
+1. Direct phrases such as “I'm done”, “remove worktree”, “can we close”, “end session”, “finish”,
+   and “finalize” start preview only. Negated, quoted, hypothetical, documentation, examples,
+   feature requests, and discussion do not.
+2. The installed `beforeSubmitPrompt` hook may perform that preview and block the initiating prompt
+   with the fixed warning. The hook is convenience only and fails open; unsupported Cloud,
+   background, primary, absent, and multi-root contexts create no challenge.
+3. A standalone `Commit`, `Retain`, `Mixed`, or `Cancel` is case-insensitive (and may have
+   surrounding whitespace normalized). Exact `Close` remains case-sensitive with no surrounding
+   whitespace. The hook captures submitted text and its canonical non-destructive choice in a
+   one-use root/session/generation-bound envelope, then dispatches without reconstructing the
+   user's answer:
+
+   ```text
+   python3 "$AWA_HOME/consumer/finish_current.py" dispatch --current
+   ```
+
+4. Reject attachments, extra words, booleans, “yes”, and approval clicks as choices. A case or trim
+   variant of Close returns `For safety, reply exactly: Close`, keeps the pending dialogue live, and
+   never activates or invokes kernel authorization. `Cancel` deletes pending state and changes no
+   repository/workspace content. Exact `Close` is the only dispatcher path that passes literal
+   `Close` to the Phase-1 kernel.
+5. `Commit`, `Retain`, and `Mixed` require explicit displayed row selections. Retain uses
+   `retain --rows 1,3` and creates a protected, restore-proven local artifact; secrets additionally
+   require `--allow-secrets`. List/restore/delete use `retain-list`, `retain-restore`, and
+   `retain-delete` (delete requires the exact artifact id again).
+6. Commit delivery is not a local-commit assertion: it requires one GitHub repository with merge
+   commits enabled, an exact-head merge-commit PR incorporated into the live default branch, and
+   complete passing checks. Squash/rebase-only repositories are unsupported by this action. Network is
+   allowed only in Commit/Mixed. After Commit/Retain/Mixed, run fresh reconnaissance and show the
+   full warning again; never infer or auto-run Close.
+7. After a successful Close, report workspace removal, branch retained/deleted result, that the
+   agent is stopping, and that the chat remains open. Issue no further task tools.
 
 ## The loop (never skip a step, never reorder)
 
@@ -57,11 +90,8 @@ pm = pm_view(result)   # PM-FACING subset ONLY. The raw router envelope (tool_pa
                        # (under result["_internal"] / result["feedback"]) — never render them to the PM.
 ```
 
-`confirm=True` is a trusted caller attestation by this API's compatibility contract. A stateless or
-untrusted UI must replay the original utterance and pass the previously returned internal
-`confirmation_fingerprint` as `expected_confirmation_fingerprint`; a mismatch re-opens the gate.
-Trusted in-process callers that already own the confirmation ceremony may continue to use
-`confirm=True` directly.
+`confirm=True` remains compatibility behavior for old-copy `cleanup`. It is never accepted for
+`finish_current`; finish authorization is a separate exact `Close` consumed by the kernel.
 
 ## A0 fix-pass hardening (review-swarm close-out)
 

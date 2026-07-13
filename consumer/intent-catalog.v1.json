@@ -1,13 +1,14 @@
 {
   "schema": "intent-catalog/v1",
   "consumer": "awa",
-  "_doc": "AWA's REAL intent-catalog/v1 (phase A0). Authored by AWA, read-only to the router. Every PM-facing string (plain_label, consequence_copy, verb, aliases, examples, start_point_rules values, param names) is deliberately jargon-free: zero Tier A/B/C banned terms, so a leak is a validation failure, not luck. This catalog passes the router's `intent catalog-verify`. Five operator outcomes are served by six verbs: (1) protect this work -> protect; (2) check on my work -> status, list_protected; (3) go back to earlier work -> resume; (4) save my progress -> save; (5) clean up an old copy -> cleanup.",
+  "_doc": "AWA's REAL intent-catalog/v1. Authored by AWA, read-only to the router. Every ordinary PM-facing string is deliberately jargon-free; the immutable finish warning has its own narrowly scoped egress exception. The original five operator outcomes remain unchanged, and additive finish_current is a separate sixth outcome whose deterministic recognizer runs before generic routing and only starts Phase-1 preview.",
   "outcomes": [
     {"outcome": "protect this work", "verbs": ["protect"]},
     {"outcome": "check on my work", "verbs": ["status", "list_protected"]},
     {"outcome": "go back to earlier work", "verbs": ["resume"]},
     {"outcome": "save my progress", "verbs": ["save"]},
-    {"outcome": "clean up an old copy", "verbs": ["cleanup"]}
+    {"outcome": "clean up an old copy", "verbs": ["cleanup"]},
+    {"outcome": "finish this temporary workspace", "verbs": ["finish_current"]}
   ],
   "verbs": [
     {
@@ -122,6 +123,24 @@
       "start_point_rules": {"default": "named-target"},
       "plain_label": "Remove an old safe copy",
       "consequence_copy": "Removes a safe copy you no longer need. Anything inside it that was not already saved somewhere else would be lost for good."
+    },
+    {
+      "verb": "finish_current",
+      "aliases": ["finish", "finalize", "end session", "wrap up", "close this workspace"],
+      "examples": [
+        "I'm done",
+        "can we close",
+        "end this session",
+        "finish this",
+        "finalize this"
+      ],
+      "param_schema": [],
+      "preconditions": ["the current workspace is a temporary safe copy"],
+      "safety_class": "destructive",
+      "tool_path": "cli",
+      "start_point_rules": {"default": "current"},
+      "plain_label": "Finish this temporary workspace",
+      "consequence_copy": "Prepares a complete warning and waits for one exact choice. It does not remove anything by itself."
     }
   ]
 }

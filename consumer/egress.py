@@ -121,3 +121,26 @@ def scan_object(obj) -> list[str]:
         if hits:
             offenders.append(f"{path}: {hits}")
     return offenders
+
+
+def scan_finish_warning(text: str) -> list[str]:
+    """Narrow exception for the immutable finish warning plus escaped Phase-1 data rows.
+
+    No other PM surface receives this exception. Import is local to avoid making the general
+    matcher depend on the finish surface.
+    """
+    try:
+        from .finish_current import WARNING_STATIC
+    except ImportError:
+        return ["<root>: finish warning template unavailable"]
+    prefix = WARNING_STATIC + "\n"
+    if not isinstance(text, str) or not text.startswith(prefix):
+        return scan_object(text)
+    rows = text[len(prefix):]
+    if rows == "None | No operator work will be deleted.":
+        return []
+    lines = rows.splitlines()
+    if not lines or any(not re.match(rf"^{idx}\. .+ \| .+$", line)
+                        for idx, line in enumerate(lines, 1)):
+        return ["<root>: malformed finish warning rows"]
+    return []

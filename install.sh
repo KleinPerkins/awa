@@ -31,6 +31,7 @@ STATE_DIR="$(awa_state_home)/awa"
 POINTER="$(awa_data_home)/awa/release-pointer.json"
 HOOKS_JSON="${AWA_HOOKS_JSON:-$HOME/.cursor/hooks.json}"
 MCP_JSON="${AWA_MCP_JSON:-$HOME/.cursor/mcp.json}"
+OPERATOR_RULE="${AWA_OPERATOR_RULE:-$HOME/.cursor/rules/awa-operator.mdc}"
 
 # Top-level items copied into the runtime (a self-describing, re-runnable install).
 COPY_TREES=(kernel engine dashboard contracts bin consumer)
@@ -78,7 +79,8 @@ do_install() {
   # Preserve executability of shims.
   chmod +x "$RUNTIME"/install.sh "$RUNTIME"/bootstrap.sh 2>/dev/null || true
   chmod +x "$RUNTIME"/kernel/bin/*.sh "$RUNTIME"/kernel/hooks/*.sh "$RUNTIME"/kernel/checks/*.sh 2>/dev/null || true
-  chmod +x "$RUNTIME"/kernel/lib/*.py "$RUNTIME"/bin/*.sh "$RUNTIME"/dashboard/*.py 2>/dev/null || true
+  chmod +x "$RUNTIME"/kernel/lib/*.py "$RUNTIME"/bin/*.sh "$RUNTIME"/dashboard/*.py \
+    "$RUNTIME"/consumer/finish_current.py 2>/dev/null || true
 
   local default_policy="$RUNTIME/kernel/policy/default-worktree-policy.yml"
   mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR" 2>/dev/null || true
@@ -100,6 +102,14 @@ EOF
 
   # Cursor hooks (merged, soft backstop) — the installed hooks reference the installed kernel.
   AWA_HOOKS_JSON="$HOOKS_JSON" "$RUNTIME/kernel/hooks/install-hooks.sh"
+
+  # Always-loaded user rule: makes the operator entrypoint and bare-choice dispatcher available
+  # even when beforeSubmitPrompt blocked the initiating closeout prompt from model context.
+  {
+    printf '%s\n' '---' 'description: AWA operator and finish dispatcher' 'alwaysApply: true' '---'
+    cat "$RUNTIME/consumer/operator-skill.md"
+  } | awa_write_backup "$OPERATOR_RULE"
+  awa_log "installed AWA operator entrypoint -> $OPERATOR_RULE"
 
   # Add-only MCP server (never clobbers other servers). Emit AWA_POLICY + AWA_GOVERNED_ROOT so
   # mode tools resolve the host-configured policy without patching _DEFAULT_POLICY at runtime.
@@ -162,13 +172,85 @@ do_uninstall() {
   awa_mcp_remove "$MCP_JSON" "awa"
   rm -rf "$RUNTIME"
   rm -f "$ENV_FILE" "$POINTER"
+  if [ -f "$OPERATOR_RULE" ] && \
+     grep -q '^description: AWA operator and finish dispatcher$' "$OPERATOR_RULE" && \
+     grep -q '^# AWA operator entrypoint$' "$OPERATOR_RULE"; then
+    rm -f "$OPERATOR_RULE"
+  elif [ -e "$OPERATOR_RULE" ]; then
+    awa_warn "preserving non-AWA rule at $OPERATOR_RULE"
+  fi
   rmdir "$CONFIG_DIR" 2>/dev/null || true
   if [ "$keep_state" = "1" ]; then
     awa_log "kept recovery/detection state at $STATE_DIR (--keep-state)"
   else
     if [ -d "$STATE_DIR" ]; then
-      awa_warn "removing state (recovery bundles/detections) at $STATE_DIR — pass --keep-state to preserve it"
-      rm -rf "$STATE_DIR"
+      awa_warn "removing ordinary state at $STATE_DIR; protected Retain + protected recovery artifacts survive normal uninstall"
+      STATE_DIR="$STATE_DIR" python3 - <<'PY'
+import json, os, shutil
+from pathlib import Path
+
+root = Path(os.environ["STATE_DIR"])
+protected_retain = root / "protected-retain"   # kernel Retain artifacts (already protected)
+recovery = root / "recovery"                    # engine recovery artifacts (some protected)
+
+
+def protected_recovery_files(recovery_dir):
+    """Resolved paths of every file belonging to a PROTECTED recovery artifact (its manifest +
+    archive). Fail-safe: an unreadable manifest is PRESERVED (never delete under uncertainty)."""
+    keep = set()
+    if not recovery_dir.is_dir():
+        return keep
+    for m in recovery_dir.iterdir():
+        if not (m.is_file() and m.name.endswith(".manifest.json")):
+            continue
+        try:
+            doc = json.loads(m.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            keep.add(str(m.resolve()))
+            continue
+        if isinstance(doc, dict) and doc.get("protected"):
+            keep.add(str(m.resolve()))
+            if doc.get("archive"):
+                keep.add(str(Path(str(doc["archive"])).resolve()))
+            if doc.get("archive_name"):
+                keep.add(str((recovery_dir / str(doc["archive_name"])).resolve()))
+    return keep
+
+
+keep = protected_recovery_files(recovery)
+
+for child in list(root.iterdir()):
+    if child == protected_retain:
+        continue
+    if child == recovery and keep:
+        # Prune ONLY ordinary artifacts; preserve every protected archive + manifest.
+        for f in list(recovery.rglob("*")):
+            if f.is_dir() or f.is_symlink():
+                continue
+            if str(f.resolve()) in keep:
+                continue
+            try:
+                f.unlink()
+            except OSError:
+                pass
+        for d in sorted((p for p in recovery.rglob("*") if p.is_dir()), reverse=True):
+            try:
+                d.rmdir()
+            except OSError:
+                pass
+        continue
+    if child.is_dir() and not child.is_symlink():
+        shutil.rmtree(child)
+    else:
+        child.unlink()
+
+# Remove the state root only when NOTHING protected survived.
+if not protected_retain.exists() and not (recovery.is_dir() and any(recovery.iterdir())):
+    try:
+        root.rmdir()
+    except OSError:
+        pass
+PY
     fi
   fi
   awa_log "uninstall complete."
@@ -177,21 +259,32 @@ do_uninstall() {
 _remove_hooks() {
   [ -f "$HOOKS_JSON" ] || return 0
   local tmp; tmp="$(mktemp)"
-  python3 - "$HOOKS_JSON" > "$tmp" <<'PY'
-import json, os, sys
+  RUNTIME="$RUNTIME" python3 - "$HOOKS_JSON" > "$tmp" <<'PY'
+import json, os, pathlib, sys
 try:
-    data = json.load(open(sys.argv[1]))
-except Exception:
-    data = {}
-hooks = data.get("hooks", {}) if isinstance(data, dict) else {}
-AWA = {"worktree-guard.sh", "worktree-session.sh"}
-def base(cmd):
-    for tok in str(cmd).split():
-        if tok.endswith(".sh"):
-            return os.path.basename(tok)
-    return ""
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception as exc:
+    print(f"uninstall: refusing malformed hooks JSON: {exc}", file=sys.stderr)
+    sys.exit(1)
+if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("hooks"), dict):
+    print("uninstall: refusing malformed hooks object/version/hooks", file=sys.stderr)
+    sys.exit(1)
+hooks = data["hooks"]
+owned = {
+    (pathlib.Path(os.environ["RUNTIME"]) / "kernel" / "hooks" / name).resolve()
+    for name in ("worktree-guard.sh", "worktree-session.sh", "before-submit-prompt.sh",
+                 "awa-recovery-maintenance.sh")
+}
+def is_owned(entry):
+    command = str(entry.get("command", ""))
+    return len(command.split()) == 1 and pathlib.Path(command).expanduser().resolve() in owned
 for event in list(hooks.keys()):
-    hooks[event] = [e for e in hooks[event] if not (isinstance(e, dict) and base(e.get("command","")) in AWA)]
+    if not isinstance(hooks[event], list):
+        print("uninstall: refusing malformed hook event", file=sys.stderr)
+        sys.exit(1)
+    hooks[event] = [e for e in hooks[event]
+                    if not (isinstance(e, dict) and is_owned(e))]
     if not hooks[event]:
         hooks.pop(event, None)
 print(json.dumps(data, indent=2))
@@ -221,6 +314,9 @@ do_doctor() {
   if AWA_HOOKS_JSON="$HOOKS_JSON" "$RUNTIME/kernel/hooks/install-hooks.sh" --check >/dev/null 2>&1; then
     echo "  PASS  Cursor hooks reference installed AWA (no failClosed drift)"
   else echo "  FAIL  Cursor hook deployment drift"; rc=1; fi
+  if [ -f "$OPERATOR_RULE" ] && grep -q '^alwaysApply: true$' "$OPERATOR_RULE"; then
+    echo "  PASS  AWA operator entrypoint installed (always-loaded dispatcher)"
+  else echo "  FAIL  AWA operator entrypoint missing/drifted"; rc=1; fi
   if "$RUNTIME/bin/awa-engine.sh" doctor >/dev/null 2>&1; then
     echo "  PASS  engine runnable (engine doctor)"
   else echo "  WARN  engine not runnable (kernel guarantee holds engine-off)"; fi
@@ -254,6 +350,9 @@ PY
   if python3 "$SRC_ROOT/kernel/lib/awa_policy.py" dump --policy "$SRC_ROOT/kernel/policy/default-worktree-policy.yml" >/dev/null 2>&1; then
     echo "  PASS  policy resolver loads"
   else echo "  FAIL  policy resolver failed"; rc=1; fi
+  if [ -f "$SRC_ROOT/consumer/operator-skill.md" ] && [ -f "$SRC_ROOT/consumer/finish_current.py" ]; then
+    echo "  PASS  finish operator entrypoint sources present"
+  else echo "  FAIL  finish operator entrypoint sources missing"; rc=1; fi
   if [ -f "$SRC_ROOT/dashboard/seed.canvas.tsx" ] && ! grep -q '/Users/' "$SRC_ROOT/dashboard/seed.canvas.tsx"; then
     echo "  PASS  dashboard seed is data-free (no machine path)"
   else echo "  FAIL  dashboard seed carries data / missing"; rc=1; fi

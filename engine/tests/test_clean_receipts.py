@@ -19,6 +19,7 @@ per-path discipline a future edit can forget:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -29,6 +30,19 @@ from .helpers import EngineTestCase, commit_all, git
 
 _IDENT = ("-c", "user.email=49759187+KleinPerkins@users.noreply.github.com",
           "-c", "user.name=KleinPerkins")
+
+_FINISH_PY = Path(__file__).resolve().parents[2] / "kernel" / "lib" / "awa_finish.py"
+
+
+def _load_finish():
+    """Load the stdlib-only finish kernel lib by path (for the shared per-common-dir lock ABI)."""
+    spec = importlib.util.spec_from_file_location("awa_finish_for_clean_receipts", _FINISH_PY)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+FIN = _load_finish()
 
 
 class CleanReceiptsTest(EngineTestCase):
@@ -255,6 +269,105 @@ class CleanReceiptsTest(EngineTestCase):
         ref = git(repo, "show-ref", "--verify", "--quiet", "refs/heads/feat/del", check=False)
         self.assertNotEqual(ref.returncode, 0)
 
+    # ---- ordinary clean holds the shared per-common-dir lock (Fix 3) --------
+    def test_lock_busy_refuses_and_preserves(self) -> None:
+        """Fix 3: the ordinary `clean --path` destructive section runs under the SAME per-common-dir
+        advisory lock as kernel finish + engine maintenance. A HELD lock makes the clean refuse
+        (clean_lock_busy) fail-safe and preserves the worktree. Held here via a second open of the
+        byte-identical lockfile in the test process (a different process from the clean shell)."""
+        _, wt = self.safe_worktree("lockbusy")
+        wt_real = str(Path(wt).resolve())
+        common_dir = git(wt_real, "rev-parse", "--path-format=absolute",
+                         "--git-common-dir").stdout.strip()
+        # Hold the shared lock, then a concurrent ordinary clean must refuse within the short timeout.
+        with FIN.common_dir_lock(common_dir, blocking=True, timeout=5.0):
+            r = self.run_clean("--path", wt, env={"AWA_CLEAN_LOCK_TIMEOUT": "1"})
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        rec = self.only_receipt(r)
+        self.assertEqual((rec["disposition"], rec["reason_code"]), ("refused", "clean_lock_busy"))
+        self.assertTrue(Path(wt).exists(), "a lock-busy refusal MUST preserve the worktree")
+
+    def test_uncontended_clean_still_removes_under_lock(self) -> None:
+        """Fix 3 transparency: with NO contender the lock is acquired instantly and the ordinary
+        clean removes exactly as before (the lock is write-serialization, not a worktree lock)."""
+        _, wt = self.safe_worktree("lockfree")
+        r = self.run_clean("--path", wt)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rec = self.only_receipt(r)
+        self.assertEqual(rec["disposition"], "removed")
+        self.assertFalse(Path(wt).exists())
+
+    def _finish_lock_fault_helper(self, mode: str) -> str:
+        helper = self.data_home / f"finish-lock-{mode}.py"
+        lock_file = self.data_home / f"finish-lock-{mode}.lock"
+        nonregular = self.data_home / f"finish-lock-{mode}.dir"
+        nonregular.mkdir(exist_ok=True)
+        symlink = self.data_home / f"finish-lock-{mode}.symlink"
+        if mode == "symlink":
+            lock_file.touch()
+            symlink.symlink_to(lock_file)
+        helper.write_text(
+            "import os, sys\n"
+            f"mode={mode!r}\n"
+            f"lock={str(lock_file)!r}\n"
+            f"nonregular={str(nonregular)!r}\n"
+            f"symlink={str(symlink)!r}\n"
+            "cmd=sys.argv[1] if len(sys.argv)>1 else ''\n"
+            "if cmd == 'lock-ensure':\n"
+            "    if mode == 'nonzero': raise SystemExit(23)\n"
+            "    if mode == 'empty': raise SystemExit(0)\n"
+            "    if mode == 'nonregular': print(nonregular); raise SystemExit(0)\n"
+            "    if mode == 'symlink': print(symlink); raise SystemExit(0)\n"
+            "    open(lock, 'a').close(); print(lock); raise SystemExit(0)\n"
+            "if cmd == 'flock-fd':\n"
+            "    raise SystemExit(75 if mode == 'acquire' else 0)\n"
+            "raise SystemExit(2)\n",
+            encoding="utf-8")
+        return str(helper)
+
+    def test_every_lock_setup_failure_refuses_even_with_force(self) -> None:
+        bash_env = self.data_home / "fail-lock-exec.bash"
+        bash_env.write_text("exec() { return 1; }\n", encoding="utf-8")
+        scenarios = {
+            "missing": (str(self.data_home / "missing-finish-helper.py"), {}),
+            "nonzero": (self._finish_lock_fault_helper("nonzero"), {}),
+            "empty": (self._finish_lock_fault_helper("empty"), {}),
+            "nonregular": (self._finish_lock_fault_helper("nonregular"), {}),
+            "symlink": (self._finish_lock_fault_helper("symlink"), {}),
+            "open": (
+                self._finish_lock_fault_helper("open"),
+                {"BASH_ENV": str(bash_env)}),
+            "acquire": (self._finish_lock_fault_helper("acquire"), {}),
+        }
+        for mode, (helper, extra_env) in scenarios.items():
+            with self.subTest(mode=mode):
+                _, wt = self.safe_worktree("lock-fault-" + mode)
+                before = len(self.receipts())
+                result = self.run_clean(
+                    "--path", wt, "--force",
+                    env={
+                        "AWA_FINISH_LIB": helper, "AWA_CLEAN_LOCK_TIMEOUT": "0.01",
+                        **extra_env,
+                    })
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                receipts = self.receipts()
+                self.assertEqual(len(receipts), before + 1)
+                matching = [
+                    receipt for receipt in receipts
+                    if receipt.get("path") == str(Path(wt).resolve())]
+                self.assertEqual(len(matching), 1, receipts)
+                self.assertEqual(
+                    (matching[0]["disposition"], matching[0]["reason_code"]),
+                    ("refused", "clean_lock_busy"))
+                self.assertTrue(Path(wt).exists(), mode)
+
+    def test_lock_open_failure_has_explicit_fail_closed_branch(self) -> None:
+        source = Path(self.dev_worktree).read_text(encoding="utf-8")
+        self.assertIn('if ! { exec 200<>"$_lockfile"; } 2>/dev/null; then', source)
+        self.assertIn(
+            'clean_set_disposition refused clean_lock_busy "cannot open per-common-dir lockfile',
+            source)
+
     # ---- exactly-one-receipt-per-invocation ---------------------------------
     def test_exactly_one_receipt_per_invocation(self) -> None:
         _, wt = self.safe_worktree("one")
@@ -288,6 +401,21 @@ class CleanReceiptsTest(EngineTestCase):
             # fail-CLOSED hardening reason codes (BLOCKER #1 / MAJOR #2 / MINOR #4)
             ("refused", "roots_lib_missing"), ("refused", "disposition_unavailable"),
             ("refused", "reactivated_during_clean"),
+            # ordinary `clean --path` per-common-dir lock (Fix 3, additive-within-v1 2026-07-10):
+            # the shared write-serialization lock held across the destructive section; on contention
+            # the clean refuses fail-safe and preserves the worktree (covered behaviorally below).
+            ("refused", "clean_lock_busy"),
+            # Root-Bound Worktree Finish (Phase 1) terminal paths — additive-within-v1 (2026-07-10).
+            # Each is a receipt-bearing `clean --finish-current` outcome; covered behaviorally in
+            # engine/tests/test_finish_kernel.py.
+            ("refused", "finish_bad_args"), ("refused", "finish_lib_missing"),
+            ("refused", "finish_not_linked"), ("refused", "finish_preview"),
+            ("refused", "finish_no_authorization"), ("refused", "finish_not_close"),
+            ("refused", "finish_no_challenge"), ("refused", "finish_fingerprint_mismatch"),
+            ("refused", "finish_target_mismatch"), ("refused", "finish_session_blocked"),
+            ("refused", "finish_recheck_failed"), ("refused", "finish_inventory_unsafe"),
+            ("refused", "finish_lock_busy"), ("removed", "finish_removed"),
+            ("error", "finish_remove_failed"), ("error", "finish_error"),
         }
         # every disposition is a valid clean_receipt/v1 disposition value
         for disp, _reason in authored:

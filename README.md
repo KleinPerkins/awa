@@ -135,6 +135,127 @@ the referenced file forward to `on`.
 Equivalent `make` targets exist (`make install|repair|doctor|check|uninstall`); `make help` lists
 them. `make verify-install` exercises the whole install lifecycle in a throwaway `HOME`.
 
+## Finish the current Safe Workspace
+
+Direct closeout language (“I'm done”, “remove worktree”, “can we close”, “end session”, “finish”,
+“finalize”) starts a deterministic local preview before generic intent routing. It never removes
+anything. A user-level `beforeSubmitPrompt` hook may block that initiating prompt and display the
+fixed warning, but the hook is convenience only and fails open globally.
+
+The warning offers exactly five standalone choices:
+
+- **Commit / Retain / Mixed / Cancel input** — case-insensitive; surrounding whitespace is
+  normalized to the canonical title-case choice. Attachments and extra words still reject.
+- **Commit** — select only the displayed items to deliver. A local commit is not delivery proof:
+  AWA requires one GitHub repository with merge commits enabled, the exact preserved head in a
+  merge-commit PR and live default branch, and complete passing checks. A stable repeated empty
+  check rollup proves a genuine zero-check repository; the first empty result never does.
+  Squash/rebase-only repositories are unsupported. Network calls exist only in Commit/Mixed.
+- **Retain** — select displayed items for a typed, protected artifact under AWA local state.
+  Creation is crash-durable and restore-proven before publication; unproven/tombstoned artifacts
+  remain invisible, and interrupted deletion resumes safely. SHA-1 and SHA-256 sources are
+  preserved without running configured filters over raw proof blobs. Artifacts are
+  listed/restored/deleted explicitly, excluded from automatic pruning, and survive normal
+  uninstall. Every displayed Git-ignored file/directory is Retain-only; secret-named items require
+  an additional explicit selection flag.
+- **Mixed** — choose Commit or Retain for each selected row. Its Commit partition rejects
+  Retain-only rows before dialogue claim, Git mutation, artifact creation, or delivery; ignored
+  rows can be retained while ordinary rows are committed. AWA never force-adds ignored paths.
+- **Cancel** — make the selected generation inert, then clear pending dialogue/challenge/index/envelope
+  state; no repository, archive, or workspace change. Incomplete local-state cleanup is reported.
+- **Close** — the only choice routed to the Phase-1 kernel authorization. It must be exact,
+  case-sensitive, standalone `Close` with no surrounding whitespace; casing/trim variants receive
+  a non-destructive correction and leave the dialogue live. Yes, booleans, approval clicks,
+  attachments, and extra words do not substitute.
+
+Commit/Retain/Mixed always require full fresh reconnaissance and a fresh warning. In hook mode the
+completed action stores a retry-safe latch but creates no replacement challenge itself: the next
+submitted prompt is discarded before choice/intent recognition and used only to show that warning,
+whose exact generation is published after complete output. Even if that trigger is `Close`, a
+second exact `Close` is required. They never auto-close. The later Close is content-addressed to the
+current root, branch/HEAD, complete visible and hidden inventory, session membership, warning
+version, install identity, and root/Git-admin physical incarnations; the private proof includes
+every filesystem object and grouped-directory descendant, while warnings never expose content or
+hashes.
+Any read, metadata, link, nested-repository, or membership drift preserves the workspace.
+Before finish runs Git status or scans the tree, a read-only NUL-safe preflight refuses any
+assume-unchanged, skip-worktree/sparse, or fsmonitor-hidden index state—including unchanged flagged
+entries—with one generic `index_visibility_flags` reason. It also refuses malformed or unavailable
+inspection, creates no challenge/dialogue, leaves the index and workspace unchanged, and reveals no
+flagged path or private value. This check is finish-only; ordinary `clean --path` behavior is
+unchanged.
+Active merge, cherry-pick/revert sequence, rebase (merge/apply), `git am`, bisect, and notes-merge
+state is represented by one content-safe synthetic row per logical operation. Privately, AWA scans
+the complete per-worktree operation administration twice without following links and binds its
+content-addressed manifest, Git logical refs, exact raw index, worktree dependencies, and reachable
+object closure into the challenge. Unknown, ambiguous, changing, linked, special-file, mounted, or
+live-lock state refuses preview. Recognized detached rebase/bisect state is bound to its validated
+original local branch and forces branch retention; an otherwise detached HEAD still refuses.
+Finish strips ambient `GIT_*` variables from the first target probe through removal/ref cleanup,
+then explicitly binds the validated Git dir, worktree, and real index. It retains normal
+`HOME`/XDG/PATH configuration; only Commit's contained selected-path flow may bind its own validated
+temporary index.
+Desktop choices use `dispatch --current`: `sessionStart` binds the physical root to the actual
+session/conversation, while `beforeSubmitPrompt` records the exact one-use choice and attachment
+provenance. An activated Close generation is claimed before the shared-lock attempt, so every
+kernel attempt—including contention or refusal—is one-use and a retry requires a fresh preview and
+envelope. Expected nonce/generation fields must be a complete exact pair naming the current hook
+challenge; they can never authorize a replacement direct challenge. A partial/timed-out hook
+preview remains inert and cannot confirm Close. All dispatcher outcomes pass through one typed
+public builder after authorization: fixed messages and validated outcome/reason/branch values only,
+with no child output, exception/kernel text, local paths, object ids, hashes, prompt bytes, or extra
+child fields. Its clean child emits one exact machine JSON shape; malformed, extra, oversized, or
+exit-status-contradictory output becomes uncertainty. Proven removal stops the agent while the chat
+remains open; proven refusal reports preservation; post-invocation ambiguity reports unknown
+removal and stops.
+Removal and local branch disposition remain zero-network. Local-only commits retain the branch;
+uncertainty also retains it. A successful Close removes the workspace and stops the agent, but
+Cursor provides no API for AWA to close the chat, so the chat remains open.
+The kernel fsyncs a local removal journal before Git removal and reconciles every Git result from
+both physical root existence and local Git registration. Complete absence finalizes even after a
+nonzero Git return. A present original clears the prepared journal only when its complete
+operation-bound fingerprint still byte-matches; partial deletion, unreadable inspection, signal
+disagreement, or a same-path replacement is uncertain and preserves the journal and branch.
+One shared stdlib durability primitive complete-writes and syncs every critical file and containing
+namespace; Darwin additionally requires successful `F_FULLFSYNC` for files and directories. After
+Git removes a worktree, AWA syncs the surviving worktree-parent and Git-admin-parent namespaces
+before branch handling. Branch deletion asks Git to fsync ref updates and then syncs the actual
+files or reftable backend. Any failure after logical removal leaves the journal retryable and reports
+unknown/uncertain removal or branch truth until reconciliation explicitly re-adopts those visible
+namespaces; it never invents retained/deleted.
+If the finish child exits immediately after removal,
+the shell repairs and reports that removed outcome; later invocation can idempotently finish
+branch/state/receipt cleanup. The branch result comes from the validated durable journal or the
+actual closed in-memory finalization result, never a prefilled retained default. Dialogue/envelopes
+may be cleaned first, but the exact current index stays through complete removed/uncertain output
+as the journal-bound recovery anchor and is CAS-deleted only after stdout flush; interruption or
+deletion failure can repeat a truthful result, while a superseding generation is untouched. A crash
+before removal never reports success.
+
+New Retain artifacts publish through an explicit durable trust latch. Payloads, proof blobs, and the
+final `restore_proven:true` manifest are fully synced in hidden staging; a pending marker binds the
+artifact id to that exact manifest digest; staging is renamed to final and the Retain root synced;
+then pending is atomically renamed committed. List, restore, and finish-row suppression trust a new
+artifact only when the committed marker and manifest digest match. Markerless older artifacts remain
+discoverable, restorable, and explicitly deletable with `legacy_unlatched` status, but do not hide
+source rows. A failure before the latch remains hidden/untrusted and is safely resumed; a failure
+after the latch returns success with a bounded cleanup warning.
+Selecting an operation row is atomic with its raw index, conflict stages, required worktree
+dependencies, recursive admin state, logical refs, and a local object pack. Secret or ignored
+dependencies require their explicit flags. Proof restores a standalone repository in the same
+object format, compares exact bytes/modes/refs/reachability and the operation digest, then proves the
+operation-specific abort/reset on a separate copy without running continue, hooks, merge drivers,
+or rebase exec. Only a committed artifact with the exact current operation digest suppresses that
+row; older file-only artifacts remain readable.
+
+Cloud/background, primary-checkout, absent, and multi-root contexts mint no local challenge.
+Empty or explicit false/0/no/off Cloud fields remain normal Desktop context; any other non-empty
+top-level or nested broker/background handle is unsupported. Raw terminal
+`git worktree remove`/`rm`, aliases that evade classification, and Cursor-managed external
+cleanup remain outside this conversational guarantee. Live Desktop proof that the current Cursor
+build displays and blocks the exact `beforeSubmitPrompt` `user_message` is a release UAT item; the
+kernel's literal-Close refusal is already hook-independent.
+
 ## Command surface
 
 The kernel worktree CLI (`dev-worktree.sh`, frozen verbs): `status`, `ensure`, `list`, `clean`,
@@ -143,11 +264,21 @@ The kernel worktree CLI (`dev-worktree.sh`, frozen verbs): `status`, `ensure`, `
 
 The engine (`awa-engine <verb>`, launched by `bin/awa-engine.sh`): `doctor`, lifecycle
 (`adopt`/`attest`/`apply-back`/`publish`/`retire`/`lease-read`), recovery
-(`recover patch|bundle|restore-patch|list`), guard (`guard shell`/`guard can-clean` — engine-off
-advisory; `guard can-clean` may refuse when kernel `clean` succeeds after squash-merge detection
-because engine cleanup remains ancestry-stricter until fast-follow B), `daemon` (`status`/`run-once`),
-`events`, and `mcp-serve` (a stdio JSON-RPC MCP server exposing nine tools plus the fixed advisory
-operator guide).
+(`recover patch|bundle|archive|restore-patch|restore-bundle|list|prune|status`), guard
+(`guard shell`/`guard can-clean` — engine-off advisory; `guard can-clean` may refuse when kernel
+`clean` succeeds after squash-merge detection because engine cleanup remains ancestry-stricter until
+fast-follow B), `daemon` (`status`/`run-once`), `events`, and `mcp-serve` (a stdio JSON-RPC MCP
+server exposing nine tools plus the fixed advisory operator guide).
+
+## Recovery retention
+
+Recovery artifacts (git-ignored bundles, patches, and protected whole-worktree archives) are kept in
+the engine state dir and pruned by ONE evaluator: ordinary artifacts expire at a **7-day TTL**, with
+a **1-GiB / 24-hour** soft-watermark pressure policy; **protected** archives are never auto-removed
+and survive uninstall. Pruning runs off the finish/removal path — deterministically **on every
+artifact write**, plus opportunistic (throttled ≤1/24h, non-blocking) passes from a fail-open
+sessionStart hook and `daemon run-once`. Inspect with `awa-engine recover status`; force a canonical
+pass with `awa-engine recover prune --maintenance`.
 
 ## Layout
 

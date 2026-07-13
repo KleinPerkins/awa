@@ -315,6 +315,53 @@ def engine_status(timeout: float) -> dict:
     return off("engine off — kernel guard active")
 
 
+def recovery_status(timeout: float) -> dict:
+    """READ-ONLY probe of engine recovery-retention health (Phase-3 additive dashboard visibility):
+    protected-storage growth, watermark overage, artifacts needing repair, and the last maintenance
+    outcome — so automatic cleanup never fails silently.
+
+    Kernel-first: retention is engine-side (never a safety dependency), so any absence/failure
+    degrades to ``{available: false, reason}``. It ONLY probes when the engine state db already
+    exists, so a dashboard render never CREATES engine state (a status read may apply the engine's
+    idempotent additive schema migration to that existing db, but never a new db / artifact / git
+    change).
+    """
+    def unavailable(reason: str) -> dict:
+        return {"recovery": {"available": False, "reason": reason}}
+    if not ENGINE_LAUNCHER.exists():
+        return unavailable("engine launcher not present")
+    # Do not create engine state from a read-only dashboard render — probe only if it already exists.
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    if not (Path(base) / "awa" / "state.db").exists():
+        return unavailable("no engine recovery state yet")
+    try:
+        proc = subprocess.run(
+            [str(ENGINE_LAUNCHER), "recover", "status"],
+            text=True, capture_output=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return unavailable("engine recover status timed out")
+    except OSError as exc:
+        return unavailable(f"engine recover status error: {exc}")
+    try:
+        d = json.loads(proc.stdout)
+    except (ValueError, AttributeError):
+        return unavailable("engine recover status unparseable")
+    return {"recovery": {
+        "available": True,
+        "protected_bytes": d.get("protected_bytes", 0),
+        "ordinary_bytes": d.get("ordinary_bytes", 0),
+        "watermark_bytes": d.get("watermark_bytes", 0),
+        "watermark_overage_bytes": d.get("watermark_overage_bytes", 0),
+        "artifact_count": d.get("artifact_count", 0),
+        "protected_count": d.get("protected_count", 0),
+        "needs_repair": len(d.get("needs_repair", []) or []),
+        "last_status": d.get("last_status"),
+        "last_error": d.get("last_error"),
+        "tombstone_count": d.get("tombstone_count", 0),
+    }}
+
+
 # ---- PM-facing plain rendering (dashboard + status honest-confidence surface) ---------------
 # These map the read-only mechanism facts above into jargon-free, HONEST operator language. No
 # Tier A/B/C term ever appears in a `plain_*` value; the system-wide egress gate scans the REAL
@@ -587,6 +634,7 @@ def build(root: Path, timeout: float) -> dict:
         summary["orphan_branches"] += len(orphan_branches)
 
     environment = engine_status(timeout)
+    environment.update(recovery_status(timeout))  # additive Phase-3 recovery-retention visibility
     return {
         "schema": SCHEMA,
         "generated_at": now_iso(),
