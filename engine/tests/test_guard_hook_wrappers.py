@@ -200,6 +200,19 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         })
         self.assertEqual(resp.get("permission"), "allow")
 
+    def test_cloud_push_allow_response_contains_no_instruction_or_authorization(self):
+        """Cloud is outside the primary-checkout gate: AWA returns only permission=allow.
+
+        It does not prompt the model to push, represent operator authorization, or originate any
+        commit/push reminder. Prompt provenance and the agent's later command choice are host-side.
+        """
+        resp = self._guard_payload({
+            "command": "git push origin main",
+            "cwd": str(self.repo),
+            "is_background_agent": True,
+        })
+        self.assertEqual(resp, {"permission": "allow"})
+
     def test_cloud_identity_broker_payload_allows(self):
         """Same degrade-to-allow, signalled by a present cloud_agent_identity_broker handle."""
         resp = self._guard_payload({

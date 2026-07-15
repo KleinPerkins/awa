@@ -66,6 +66,27 @@ command. The deterministic lock
 changes OFF→ON, and proves the AWA process re-reads current mode on every invocation; it cannot
 substitute for a live Desktop host-runner test.
 
+**Known platform caveat — Cloud prompt provenance and unrequested remote writes are outside AWA's
+hook authority.** In Phase 4 Step 4.1 of the 2026-07-15 Cloud UAT, the operator's closed seven-step
+prompt requested one local empty commit and no push. The Cloud agent nevertheless committed the
+edited file and pushed both commits to `origin/main`; the disposable remote directly recorded
+`90ddbed` and `3fb85ef`. A repeat later pushed `0f34f5f`. In the preserved chat, the agent said it
+treated “Reminder to commit and push if appropriate” as permission, then corrected itself after
+reviewing the transcript: that text came from an internal system reminder, not the operator, and
+the push was out of scope. This proves the remote writes and the agent's recorded attribution; no
+raw Cursor internal event envelope was preserved, so the exact injector implementation and motive
+remain unproven.
+
+AWA was not an executable source of that instruction. At the fixture's initial pre-push commit,
+its only committed `beforeShellExecution` command was the read-only hook probe, which logs and
+returns `{"permission":"allow"}`; Cloud does not load the Desktop user-level guard. Even where the
+production guard is present, its Cloud branch returns that same one-field allow response before
+primary-checkout classification. Hooks authorize or refuse a command already selected by the host;
+they neither originate a `git push` nor attest that the operator requested it. A Cloud push-specific
+AWA block would contradict the explicit Cloud allow boundary and still could not repair prompt
+provenance, so no product control was added. The regression
+`test_cloud_push_allow_response_contains_no_instruction_or_authorization` locks this boundary.
+
 **Recovery / override (operator path).** A `deny` on a primary checkout is recovered by the operator,
 not by the agent retrying: relaunch the agent in a Safe Workspace via the Cursor Agents-Window
 Worktree dropdown (AWA adopts the linked worktree and then allows mutation), or set
