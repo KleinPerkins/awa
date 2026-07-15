@@ -14,7 +14,6 @@ import {
   Callout,
   Button,
   useCanvasState,
-  useCanvasAction,
 } from "cursor/canvas";
 
 // ---------------------------------------------------------------------------
@@ -29,7 +28,7 @@ import {
 // is authored jargon-free. All static display copy lives in the PM_COPY block (scanned verbatim by
 // engine/tests/test_egress_surfaces.py), and every dynamic line is rendered from the emitter's
 // jargon-free `plain` / `plain_*` fields (scanned in Python over a real tree). Raw git commands and
-// mechanism detail live ONLY in the AGENT_PROMPTS + TECHNICAL blocks below — agent/maintainer-facing,
+// mechanism detail lives outside PM_COPY and in the TECHNICAL block below — maintainer-facing,
 // shown only behind an explicit "Show technical details" disclosure, and deliberately OUT of the PM
 // egress scope. Keeping raw/mechanism text out of the default view is the whole point of the gate.
 // ---------------------------------------------------------------------------
@@ -135,6 +134,14 @@ type RefreshUi = {
   nonce: number;
 };
 
+type RefreshRequest = {
+  jobId: string;
+  type: "command";
+  nonce: string;
+  at: number;
+  snapshotGeneratedAt: string;
+};
+
 // >>> PM_COPY_START — every string here is PM-facing and MUST be jargon-free (Tier A/B/C).
 // The system-wide operator egress test reads this block verbatim and fails on any banned term.
 // If you add a PM-facing string to the dashboard, add it HERE — never inline.
@@ -189,7 +196,7 @@ const PM_COPY = {
   emptyBody: "Ask me to refresh and I will take a fresh look at your work and fill this in.",
   refreshPendingTitle: "Refresh asked for",
   refreshPendingBody:
-    "I can't look things up from this view on my own — ask me in chat and I will refresh it for you.",
+    "I asked the helper to refresh this view quietly. It will update here when the new look is ready.",
   refreshDoneTitle: "Updated",
 
   sectionAttention: "Needs a look",
@@ -234,14 +241,9 @@ const PM_COPY = {
 } as const;
 // <<< PM_COPY_END
 
-// >>> AGENT_PROMPTS_START — agent-facing instructions (NOT PM display copy). Excluded from the PM
-// egress scope: these are messages the canvas hands to an agent/chat to act on, not text the
-// operator is meant to read as guidance.
-const AGENT_PROMPTS = {
-  refresh:
-    "Refresh the AWA worktree dashboard: run `dev-worktree.sh dashboard-data`, inject the snapshot between the AWA_DATA markers, and report the new snapshot time.",
-} as const;
-// <<< AGENT_PROMPTS_END
+// Fixed read-only action registered through the optional local-jobs Canvas bridge. The Canvas
+// persists this closed request in its sidecar; it never opens or pivots to a foreground chat.
+const REFRESH_JOB_ID = "awa-dashboard-refresh";
 
 // >>> TECHNICAL_RAW_START — raw git / mechanism detail for engineers. Shown ONLY behind the explicit
 // "Show technical details" disclosure, and deliberately OUT of the PM egress scope (the PM default
@@ -451,13 +453,13 @@ function StatusCard({
 }
 
 export default function AwaWorktreeDashboard() {
-  const dispatch = useCanvasAction();
   const raw = INITIAL_RAW;
   const [refreshUi, setRefreshUi] = useCanvasState<RefreshUi>("awa.refreshUi", {
     requestedAt: 0,
     baselineGeneratedAt: "",
     nonce: 0,
   });
+  const [, setRefreshRequest] = useCanvasState<RefreshRequest | null>("dash.runRequest", null);
   const [showTech, setShowTech] = useCanvasState<boolean>("awa.showTech", false);
 
   const populated = raw.repos.length > 0 && !!raw.generated_at;
@@ -467,15 +469,21 @@ export default function AwaWorktreeDashboard() {
     refreshUi.requestedAt > 0 && (raw.generated_at ?? "") !== refreshUi.baselineGeneratedAt;
   const staleSnapshot = populated && snapshotAgeHours(raw.generated_at) > 1;
 
-  const refreshInChat = () =>
-    dispatch({ type: "newComposerChat", userPrompt: AGENT_PROMPTS.refresh });
   const onRefresh = () => {
+    const requestedAt = Date.now();
+    const nonce = refreshUi.nonce + 1;
     setRefreshUi({
-      requestedAt: Date.now(),
+      requestedAt,
       baselineGeneratedAt: raw.generated_at ?? "",
-      nonce: refreshUi.nonce + 1,
+      nonce,
     });
-    refreshInChat();
+    setRefreshRequest({
+      jobId: REFRESH_JOB_ID,
+      type: "command",
+      nonce: `${requestedAt}-${nonce}`,
+      at: requestedAt,
+      snapshotGeneratedAt: raw.generated_at ?? new Date(requestedAt).toISOString(),
+    });
   };
   const onDismissRefresh = () => {
     setRefreshUi({ requestedAt: 0, baselineGeneratedAt: "", nonce: refreshUi.nonce });
@@ -540,7 +548,7 @@ export default function AwaWorktreeDashboard() {
         <Callout tone="info" title={PM_COPY.refreshPendingTitle}>
           {PM_COPY.refreshPendingBody}
           <Row gap={8} wrap style={{ marginTop: 8 }}>
-            <Button variant="secondary" onClick={refreshInChat}>{PM_COPY.btnRefresh}</Button>
+            <Button variant="secondary" onClick={onRefresh}>{PM_COPY.btnRefresh}</Button>
             <Button variant="secondary" onClick={onDismissRefresh}>{PM_COPY.btnCancel}</Button>
           </Row>
         </Callout>

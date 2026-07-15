@@ -32,8 +32,10 @@ make verify             # tests + contract freeze + zero-link + install --check
 `install.sh` copies a self-contained runtime into `$XDG_DATA_HOME/awa/current`, writes a config env
 (`$XDG_CONFIG_HOME/awa/env`), merges the Cursor hooks (a fail-open soft backstop) into
 `~/.cursor/hooks.json`, registers an add-only `awa` MCP server in `~/.cursor/mcp.json`, and writes a
-self-describing release pointer. There is **no** sibling-repo dependency — a fresh clone installs on
-its own. `bootstrap.sh` is a one-command "clone + install" convenience.
+self-describing release pointer. When `AWA_GOVERNED_ROOT` is configured it also publishes the
+product-owned dashboard seed into Cursor's machine-local Canvas directory. There is **no required**
+sibling-repo dependency — a fresh clone installs on its own. `bootstrap.sh` is a one-command
+"clone + install" convenience.
 
 To put AWA on your `PATH`, source the generated env (or add it to your shell profile):
 
@@ -47,6 +49,26 @@ AWA ships a **generic** default policy with zero governed roots. To govern your 
 `AWA_GOVERNED_ROOT` (or supply a full policy file via `AWA_POLICY`) that names your governed
 root(s), include/exclude globs, and detectors. The product stays generic; your policy is the only
 place org/host literals live, and it is never vendored or published.
+
+### Dashboard refresh
+
+The dashboard's **Refresh** button never opens a chat. It writes a closed
+`awa-dashboard-refresh` request to the Canvas sidecar. If the machine has already adopted the
+optional `local-jobs` Canvas bridge, install/repair registers that fixed job (disabled for
+scheduling) and the existing bridge runs the read-only renderer in the background. The renderer
+accepts only its fixed root/policy arguments, reads repo status, and writes the derived Canvas plus
+one validated same-directory sidecar alias; it never writes in a governed repo.
+
+AWA does not silently opt a machine into the shared bridge. An agent can explicitly enable and
+register it with:
+
+```bash
+AWA_GOVERNED_ROOT=/path/to/root AWA_POLICY=/path/to/policy \
+  dashboard/install_actions.sh --enable-bridge
+```
+
+Without that optional bridge, refresh from the CLI with
+`dashboard/render.py --root /path/to/root --policy /path/to/policy`.
 
 ### Per-repo mode (ON / OFF)
 

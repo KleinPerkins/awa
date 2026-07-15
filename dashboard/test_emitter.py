@@ -27,6 +27,7 @@ from pathlib import Path
 _DASHBOARD_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_DASHBOARD_DIR))
 import emitter  # noqa: E402
+import render as dashboard_render  # noqa: E402
 
 _IDENT = (
     "-c", "user.email=awa-test@example.invalid",
@@ -203,6 +204,157 @@ class TestEmitterModeFreeBackCompat(_EmitterModeTestBase):
         for repo in doc["repos"]:
             self.assertEqual(repo["mode"], "")
             self.assertEqual(repo["mode_error"], "")
+
+
+class TestCanvasRefreshBridge(_EmitterModeTestBase):
+    def setUp(self) -> None:
+        super().setUp()
+        _make_repo(self.root, "included/alpha")
+        self._write_policy(
+            "version: 1\n"
+            "default: advisory\n"
+            "default_mode: on\n"
+            "include:\n"
+            "  - included/*\n"
+        )
+
+    def test_seed_uses_background_request_and_never_opens_chat(self) -> None:
+        source = (_DASHBOARD_DIR / "seed.canvas.tsx").read_text(encoding="utf-8")
+        self.assertIn('"dash.runRequest"', source)
+        self.assertIn('const REFRESH_JOB_ID = "awa-dashboard-refresh"', source)
+        for field in ("jobId:", "nonce:", "at:", "snapshotGeneratedAt:"):
+            self.assertIn(field, source)
+        self.assertNotIn("newComposerChat", source)
+        self.assertNotIn("useCanvasAction", source)
+
+    def test_renderer_publishes_owned_bridge_alias(self) -> None:
+        canvas_dir = Path(self._tmp.name) / "canvases"
+        result = dashboard_render.publish(
+            self.root,
+            policy=Path(os.environ["AWA_POLICY"]),
+            timeout=30.0,
+            canvas_dir=canvas_dir,
+        )
+        canvas = Path(result["canvas"])
+        alias = Path(result["bridge_alias"])
+        self.assertTrue(canvas.is_file())
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(
+            os.readlink(alias),
+            "awa-worktree-dashboard.canvas.data.json",
+        )
+        rendered = canvas.read_text(encoding="utf-8")
+        self.assertIn('"schema": "awa-worktree/v1"', rendered)
+        self.assertIn('"rel": "included/alpha"', rendered)
+        self.assertNotIn("/Users/", rendered)
+
+    def test_renderer_refuses_unowned_bridge_alias(self) -> None:
+        canvas = Path(self._tmp.name) / "canvases" / dashboard_render.CANVAS_NAME
+        canvas.parent.mkdir(parents=True)
+        alias = canvas.parent / dashboard_render.BRIDGE_ALIAS_NAME
+        alias.write_text("operator data\n", encoding="utf-8")
+        with self.assertRaises(dashboard_render.RenderError):
+            dashboard_render.ensure_bridge_alias(canvas)
+        self.assertEqual(alias.read_text(encoding="utf-8"), "operator data\n")
+
+    def _fake_local_jobs(self, bridge_enabled: bool) -> tuple[Path, Path]:
+        fake = Path(self._tmp.name) / "local-jobs.sh"
+        log = Path(self._tmp.name) / "local-jobs.log"
+        fake.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' \"$*\" >> \"$FAKE_LOCAL_JOBS_LOG\"\n"
+            "if [[ \"${1:-}\" == dashboard ]]; then\n"
+            f"  printf '%s\\n' '{{\"run_bridge_enabled\":{str(bridge_enabled).lower()}}}'\n"
+            "elif [[ \"${1:-}\" == explain-job ]]; then\n"
+            "  [[ \"${FAKE_JOB_EXISTS:-0}\" == 1 ]] || exit 1\n"
+            "fi\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o700)
+        return fake, log
+
+    def test_action_installer_registers_fixed_disabled_job(self) -> None:
+        fake, log = self._fake_local_jobs(True)
+        env = {
+            **os.environ,
+            "AWA_HOME": str(_DASHBOARD_DIR.parent),
+            "AWA_LOCAL_JOBS_CLI": str(fake),
+            "FAKE_LOCAL_JOBS_LOG": str(log),
+        }
+        proc = subprocess.run(
+            [
+                "bash",
+                str(_DASHBOARD_DIR / "install_actions.sh"),
+                "--root",
+                str(self.root),
+                "--policy",
+                os.environ["AWA_POLICY"],
+            ],
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        calls = log.read_text(encoding="utf-8")
+        self.assertIn("add-job --type command --id awa-dashboard-refresh", calls)
+        self.assertIn("--interval-seconds 2147483647", calls)
+        self.assertIn("--enabled false", calls)
+        self.assertIn("run-job --id awa-dashboard-refresh", calls)
+        self.assertNotIn("enable-canvas-runs", calls)
+
+    def test_action_installer_preserves_existing_schedule_and_enabled_state(self) -> None:
+        fake, log = self._fake_local_jobs(True)
+        proc = subprocess.run(
+            [
+                "bash",
+                str(_DASHBOARD_DIR / "install_actions.sh"),
+                "--root",
+                str(self.root),
+                "--policy",
+                os.environ["AWA_POLICY"],
+            ],
+            text=True,
+            capture_output=True,
+            env={
+                **os.environ,
+                "AWA_HOME": str(_DASHBOARD_DIR.parent),
+                "AWA_LOCAL_JOBS_CLI": str(fake),
+                "FAKE_LOCAL_JOBS_LOG": str(log),
+                "FAKE_JOB_EXISTS": "1",
+            },
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        update = next(
+            line for line in log.read_text(encoding="utf-8").splitlines()
+            if line.startswith("update-job ")
+        )
+        self.assertNotIn("--interval-seconds", update)
+        self.assertNotIn("--enabled", update)
+
+    def test_action_installer_does_not_adopt_shared_bridge(self) -> None:
+        fake, log = self._fake_local_jobs(False)
+        proc = subprocess.run(
+            [
+                "bash",
+                str(_DASHBOARD_DIR / "install_actions.sh"),
+                "--root",
+                str(self.root),
+                "--policy",
+                os.environ["AWA_POLICY"],
+            ],
+            text=True,
+            capture_output=True,
+            env={
+                **os.environ,
+                "AWA_HOME": str(_DASHBOARD_DIR.parent),
+                "AWA_LOCAL_JOBS_CLI": str(fake),
+                "FAKE_LOCAL_JOBS_LOG": str(log),
+            },
+        )
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        calls = log.read_text(encoding="utf-8")
+        self.assertNotIn("add-job", calls)
+        self.assertNotIn("enable-canvas-runs", calls)
 
 
 if __name__ == "__main__":
