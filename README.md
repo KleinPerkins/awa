@@ -32,8 +32,10 @@ make verify             # tests + contract freeze + zero-link + install --check
 `install.sh` copies a self-contained runtime into `$XDG_DATA_HOME/awa/current`, writes a config env
 (`$XDG_CONFIG_HOME/awa/env`), merges the Cursor hooks (a fail-open soft backstop) into
 `~/.cursor/hooks.json`, registers an add-only `awa` MCP server in `~/.cursor/mcp.json`, and writes a
-self-describing release pointer. There is **no** sibling-repo dependency — a fresh clone installs on
-its own. `bootstrap.sh` is a one-command "clone + install" convenience.
+self-describing release pointer. When `AWA_GOVERNED_ROOT` is configured it also publishes the
+product-owned dashboard seed into Cursor's machine-local Canvas directory. There is **no required**
+sibling-repo dependency — a fresh clone installs on its own. `bootstrap.sh` is a one-command
+"clone + install" convenience.
 
 To put AWA on your `PATH`, source the generated env (or add it to your shell profile):
 
@@ -47,6 +49,32 @@ AWA ships a **generic** default policy with zero governed roots. To govern your 
 `AWA_GOVERNED_ROOT` (or supply a full policy file via `AWA_POLICY`) that names your governed
 root(s), include/exclude globs, and detectors. The product stays generic; your policy is the only
 place org/host literals live, and it is never vendored or published.
+
+### Dashboard refresh
+
+The dashboard's **Refresh** button never opens a chat. It writes a closed
+`awa-dashboard-refresh` request to the Canvas sidecar. If the machine has already adopted the
+optional `local-jobs` Canvas bridge, install/repair registers that fixed job (disabled for
+scheduling) and the existing bridge runs the read-only renderer in the background. The renderer
+accepts only its fixed root/policy arguments, reads repo status, and writes the derived Canvas plus
+one validated same-directory sidecar alias; it never writes in a governed repo. A dedicated marker
+binds the fixed job to AWA: install/repair and uninstall refuse to replace or remove a same-named
+job whose ownership is not proven.
+
+AWA does not silently opt a machine into the shared bridge. An agent can explicitly enable and
+register it with:
+
+```bash
+AWA_GOVERNED_ROOT=/path/to/root AWA_POLICY=/path/to/policy \
+  dashboard/install_actions.sh --enable-bridge
+```
+
+Without that optional bridge, refresh from the CLI with
+`dashboard/render.py --root /path/to/root --policy /path/to/policy`.
+
+Every worktree row includes its allocated on-disk size in adaptive KB, MB, or GB units. The
+read-only measurement uses the same bounded timeout posture as repo inspection and reports
+`not available` instead of delaying the whole dashboard when a directory cannot be measured.
 
 ### Per-repo mode (ON / OFF)
 
@@ -107,6 +135,13 @@ bundle-or-refuse removal. Use `awa-engine` for adopt/attest/apply-back/publish/r
 Engine status is not full health, guard output is diagnostic, and lease reads check only contract
 fields/hash; cleanup uses the active-root heartbeat plus git/content checks. The kernel guarantee
 continues with the engine off.
+
+Adoption's in-worktree `.awa/lease.json` does not make an otherwise removable worktree permanently
+dirty. Ordinary `clean --path` tolerates and removes that file only after proving `.awa/` contains
+exactly one private, regular lease whose identity matches the live worktree path, branch, and Git
+common directory. A malformed/mismatched lease, link, permission drift, tracked `.awa` path, sibling
+file, or any unrelated untracked content retains the existing refuse/preserve behavior. Ignored
+operator content still follows the independent bundle-or-refuse gate.
 
 **Live evidence: RETAIN, narrowly.** A real Cursor Desktop explicit on-demand read returned the
 fixed guide; that read alone satisfies the plan's explicit-utility alternative. The resource added
@@ -182,8 +217,8 @@ Before finish runs Git status or scans the tree, a read-only NUL-safe preflight 
 assume-unchanged, skip-worktree/sparse, or fsmonitor-hidden index state—including unchanged flagged
 entries—with one generic `index_visibility_flags` reason. It also refuses malformed or unavailable
 inspection, creates no challenge/dialogue, leaves the index and workspace unchanged, and reveals no
-flagged path or private value. This check is finish-only; ordinary `clean --path` behavior is
-unchanged.
+flagged path or private value. This check is finish-only; ordinary `clean --path` uses its separate
+active-root, commit-safety, dirty/ignored-state, and validated AWA-lease checks.
 Active merge, cherry-pick/revert sequence, rebase (merge/apply), `git am`, bisect, and notes-merge
 state is represented by one content-safe synthetic row per logical operation. Privately, AWA scans
 the complete per-worktree operation administration twice without following links and binds its

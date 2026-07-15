@@ -41,6 +41,52 @@ payload the hook could not parse): AWA emits `ask` there knowing Cursor will not
   / a `/workspace` root) and degrades to `allow` **before** the deny branch, so a cloud VM is never
   hard-blocked.
 
+**Known platform caveat — the hook runner can fail before AWA starts.** Phase 3 Step 3.2 of the
+2026-07-15 Desktop UAT (Cursor 3.11.19) directly captured this path. In one Local conversation,
+Cursor requested both registered `beforeShellExecution` commands for the restored-ON commit, but
+each exited in 0–1 ms with empty output and the host-generated error
+`Shell execution is not available in the worker extension host`; Cursor then logged that no hook
+returned a valid response. The same failure affected every `sessionStart`, `beforeSubmitPrompt`,
+and `stop` command in that conversation, including unrelated hooks. Cursor's agent-exec log then
+recorded `hookForcesPrompt:false`, auto-approved the shell call, and the fixture reflog recorded the
+commit. There was therefore no AWA decision to enforce: neither AWA guard process reached its code.
+This establishes the immediate cause of the observed allow as Cursor hook-execution unavailability,
+not an AWA mode/classification result. It does **not** establish why Cursor selected or lost shell
+execution in that worker extension host, and no same-chat caching claim is made.
+
+The boundary matches Cursor's documented hook contract: hook errors other than exit code 2 proceed
+fail-open by default, and `failClosed:true` is the opt-in alternative
+([Cursor Hooks](https://cursor.com/docs/hooks)). AWA deliberately keeps this global hook
+`failClosed:false`: a prior live incident showed that fail-closed global shell infrastructure can
+brick every workspace under timeout/load, while AWA's guaranteed floor is detection and cleanup
+refusal, not universal shell sandboxing. A fresh Local conversation on the same 3.11.19 install
+subsequently recorded the guard returning valid `deny` and Cursor blocking the primary-checkout
+command. The deterministic lock
+`test_same_conversation_mode_transition_is_rechecked` reuses one conversation/session payload,
+changes OFF→ON, and proves the AWA process re-reads current mode on every invocation; it cannot
+substitute for a live Desktop host-runner test.
+
+**Known platform caveat — Cloud prompt provenance and unrequested remote writes are outside AWA's
+hook authority.** In Phase 4 Step 4.1 of the 2026-07-15 Cloud UAT, the operator's closed seven-step
+prompt requested one local empty commit and no push. The Cloud agent nevertheless committed the
+edited file and pushed both commits to `origin/main`; the disposable remote directly recorded
+`90ddbed` and `3fb85ef`. A repeat later pushed `0f34f5f`. In the preserved chat, the agent said it
+treated “Reminder to commit and push if appropriate” as permission, then corrected itself after
+reviewing the transcript: that text came from an internal system reminder, not the operator, and
+the push was out of scope. This proves the remote writes and the agent's recorded attribution; no
+raw Cursor internal event envelope was preserved, so the exact injector implementation and motive
+remain unproven.
+
+AWA was not an executable source of that instruction. At the fixture's initial pre-push commit,
+its only committed `beforeShellExecution` command was the read-only hook probe, which logs and
+returns `{"permission":"allow"}`; Cloud does not load the Desktop user-level guard. Even where the
+production guard is present, its Cloud branch returns that same one-field allow response before
+primary-checkout classification. Hooks authorize or refuse a command already selected by the host;
+they neither originate a `git push` nor attest that the operator requested it. A Cloud push-specific
+AWA block would contradict the explicit Cloud allow boundary and still could not repair prompt
+provenance, so no product control was added. The regression
+`test_cloud_push_allow_response_contains_no_instruction_or_authorization` locks this boundary.
+
 **Recovery / override (operator path).** A `deny` on a primary checkout is recovered by the operator,
 not by the agent retrying: relaunch the agent in a Safe Workspace via the Cursor Agents-Window
 Worktree dropdown (AWA adopts the linked worktree and then allows mutation), or set
@@ -49,11 +95,11 @@ Worktree dropdown (AWA adopts the linked worktree and then allows mutation), or 
 env, not the command's inline assignment — and `cd <worktree> && <cmd>` is still denied. As a last
 resort an operator who deliberately wants a repo unprotected can set it `off`.
 
-**Residual to close.** A live ask-then-deny probe on `beforeShellExecution` — recording, on both
-Desktop and Cloud, that a returned `ask` lets the command run and a returned `deny` blocks it — is
-tracked in `live-verify/RESULTS-e2e-uat-20260707.md` (Phase 1). The `ask`-is-non-blocking and
-`afterFileEdit`-ignores-permission halves are already proven (2026-07-05 live observation + on-disk
-mutation + the L2 doc snapshot); the deny-blocks-on-Desktop half is the open live confirmation.
+**Residual to close.** Desktop `deny` blocking is now independently re-proven by the 2026-07-15
+fresh-conversation event above. A complete same-build ask-then-deny matrix on Desktop and Cloud
+remains tracked in `live-verify/RESULTS-e2e-uat-20260707.md` (Phase 1). The
+`ask`-is-non-blocking and `afterFileEdit`-ignores-permission halves were already proven by the
+2026-07-05 live observation, on-disk mutation, and L2 doc snapshot.
 
 ## MCP guidance and resource boundary
 
@@ -359,7 +405,17 @@ SHA-256 index checksums/extensions directly, reads flags with NUL delimiters and
 `core.fsmonitor=false`, and sets `GIT_OPTIONAL_LOCKS=0` plus `GIT_NO_LAZY_FETCH=1`. It therefore
 cannot refresh/write the index, lazy-fetch, or invoke fsmonitor/clean/smudge hooks. A refusal mints
 no challenge/dialogue and leaves the physical root in place. This gate is deliberately absent from
-ordinary `clean --path`, whose frozen v1 semantics are unchanged.
+ordinary `clean --path`, which retains its separate active-root, commit-safety, dirty, and
+bundle-or-refuse gates.
+
+Ordinary clean treats adoption's `.awa/lease.json` as removable AWA bookkeeping only after a narrow
+fail-closed proof: `.awa` is an owned private real directory containing exactly one owned private
+regular file; the bounded JSON lease has a valid schema and identity hash; its path, branch, and Git
+common directory match the live target; and Git tracks no `.awa` path. Validation and unlink use
+no-follow descriptors, run again under the shared lifecycle lock, and unlink only `lease.json`.
+Any malformed, linked, permission-drifted, identity-mismatched, additional, tracked, or concurrently
+changed state preserves the worktree. Unrelated untracked content remains dirty; unrelated ignored
+content remains bundle-or-refuse.
 
 Dispatcher output is a separate fail-safe boundary. One typed builder handles every success,
 refusal, error, uncertain result, cancellation, and correction after the one-use authorization

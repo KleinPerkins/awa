@@ -65,6 +65,39 @@ ensure_modes_file() {
   fi
 }
 
+configure_dashboard_refresh() {
+  local root="${AWA_GOVERNED_ROOT:-}"
+  local policy="${AWA_POLICY:-$1}"
+  [ -n "$root" ] || {
+    awa_log "dashboard publication skipped (no AWA_GOVERNED_ROOT configured)"
+    return 0
+  }
+
+  # Publish the product-owned seed first. This writes only derived machine-local Canvas output plus
+  # its narrowly named bridge alias; governed repositories remain read-only.
+  if "$RUNTIME/dashboard/render.py" --root "$root" --policy "$policy" >/dev/null; then
+    awa_log "published AWA dashboard from the product-owned seed"
+  else
+    awa_warn "dashboard publication reported an issue (non-fatal; kernel guarantee holds)"
+    return 0
+  fi
+
+  # Reuse local-jobs only when its operator-adopted Canvas bridge is already enabled. AWA never
+  # silently opts a machine into that shared bridge. The fixed job only re-runs the read-only
+  # renderer and remains disabled for scheduling.
+  local rc=0
+  AWA_HOME="$RUNTIME" AWA_GOVERNED_ROOT="$root" AWA_POLICY="$policy" \
+    "$RUNTIME/dashboard/install_actions.sh" --root "$root" --policy "$policy" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    awa_log "registered dashboard Refresh with the existing background Canvas bridge"
+  elif [ "$rc" -eq 3 ]; then
+    awa_log "background Canvas bridge not enabled; dashboard remains refreshable from the CLI"
+  else
+    awa_warn "background dashboard refresh unavailable (optional local-jobs integration not ready)"
+  fi
+  return 0
+}
+
 do_install() {
   local force="${1:-0}"
   awa_log "installing AWA runtime -> $RUNTIME"
@@ -80,6 +113,7 @@ do_install() {
   chmod +x "$RUNTIME"/install.sh "$RUNTIME"/bootstrap.sh 2>/dev/null || true
   chmod +x "$RUNTIME"/kernel/bin/*.sh "$RUNTIME"/kernel/hooks/*.sh "$RUNTIME"/kernel/checks/*.sh 2>/dev/null || true
   chmod +x "$RUNTIME"/kernel/lib/*.py "$RUNTIME"/bin/*.sh "$RUNTIME"/dashboard/*.py \
+    "$RUNTIME"/dashboard/*.sh \
     "$RUNTIME"/consumer/finish_current.py 2>/dev/null || true
 
   local default_policy="$RUNTIME/kernel/policy/default-worktree-policy.yml"
@@ -120,6 +154,8 @@ EOF
 AWA_GOVERNED_ROOT=${governed_root}"
   AWA_MCP_ENV="$mcp_env" awa_mcp_add "$MCP_JSON" "awa" "$RUNTIME/bin/awa-engine.sh" "mcp-serve"
   awa_log "registered MCP server 'awa' -> $MCP_JSON"
+
+  configure_dashboard_refresh "$default_policy"
 
   # Self-describing release pointer. `installed_at` is preserved across re-installs whose
   # identity (version/commit/runtime/source/policy) is unchanged, so a re-install is a no-op.
@@ -170,6 +206,13 @@ do_uninstall() {
   awa_log "uninstalling AWA"
   AWA_HOOKS_JSON="$HOOKS_JSON" _remove_hooks
   awa_mcp_remove "$MCP_JSON" "awa"
+  if [ -x "$RUNTIME/dashboard/install_actions.sh" ]; then
+    if AWA_HOME="$RUNTIME" "$RUNTIME/dashboard/install_actions.sh" --remove >/dev/null; then
+      awa_log "reconciled background dashboard refresh job removal"
+    else
+      awa_warn "preserved background dashboard job because its AWA ownership was not proven"
+    fi
+  fi
   rm -rf "$RUNTIME"
   rm -f "$ENV_FILE" "$POINTER"
   if [ -f "$OPERATOR_RULE" ] && \
@@ -353,9 +396,12 @@ PY
   if [ -f "$SRC_ROOT/consumer/operator-skill.md" ] && [ -f "$SRC_ROOT/consumer/finish_current.py" ]; then
     echo "  PASS  finish operator entrypoint sources present"
   else echo "  FAIL  finish operator entrypoint sources missing"; rc=1; fi
-  if [ -f "$SRC_ROOT/dashboard/seed.canvas.tsx" ] && ! grep -q '/Users/' "$SRC_ROOT/dashboard/seed.canvas.tsx"; then
-    echo "  PASS  dashboard seed is data-free (no machine path)"
-  else echo "  FAIL  dashboard seed carries data / missing"; rc=1; fi
+  if [ -f "$SRC_ROOT/dashboard/seed.canvas.tsx" ] && \
+     [ -f "$SRC_ROOT/dashboard/render.py" ] && \
+     [ -f "$SRC_ROOT/dashboard/install_actions.sh" ] && \
+     ! grep -q '/Users/' "$SRC_ROOT/dashboard/seed.canvas.tsx"; then
+    echo "  PASS  dashboard seed + background refresh sources present and data-free"
+  else echo "  FAIL  dashboard refresh sources carry data / are missing"; rc=1; fi
   if AWA_HOME="$SRC_ROOT" "$SRC_ROOT/kernel/checks/awa-contract-freeze.sh" >/dev/null 2>&1; then
     echo "  PASS  kernel satisfies the frozen behavior contract"
   else echo "  FAIL  kernel drifted from frozen contract"; rc=1; fi

@@ -31,6 +31,10 @@ AWA_ROOTS_LIB="${AWA_ROOTS_LIB:-$KERNEL_DIR/lib/awa_roots.py}"
 # `clean --finish-current`. Its ABSENCE is fail-CLOSED on the finish path (refuse, never remove).
 # Export AWA_ROOTS_LIB so the finish lib loads the SAME sibling awa_roots.py this script uses.
 AWA_FINISH_LIB="${AWA_FINISH_LIB:-$KERNEL_DIR/lib/awa_finish.py}"
+# Narrow validator/remover for engine-authored `.awa/lease.json`. Ordinary clean may tolerate this
+# one in-worktree file only when the helper proves the private directory contains no other content
+# and the lease identity matches the live worktree path + branch + common dir.
+AWA_BOOKKEEPING_LIB="$KERNEL_DIR/lib/awa_bookkeeping.py"
 export AWA_ROOTS_LIB
 
 # X3: agent-created worktrees live on a DURABLE root, not ~/.cursor/worktrees (which Cursor
@@ -1057,8 +1061,7 @@ clean_worktree() {
   done
   _CLEAN_BUNDLE="$bundle"; _CLEAN_FORCE="$force"; _CLEAN_DELETE_BRANCH="$delete_branch"
 
-  # Route the root-bound finish path (separate from the frozen `clean --path` flow, which keeps
-  # its v1 active-root + --force semantics UNCHANGED).
+  # Route the root-bound finish path separately from the ordinary `clean --path` lifecycle flow.
   if [ "$finish_current" -eq 1 ]; then
     clean_finish_current "$preview" "$have_auth" "$authorization" "$conversation_id" "$path" \
       "$expected_nonce" "$expected_generation"
@@ -1091,12 +1094,8 @@ clean_worktree() {
     die "cannot canonicalize worktree path: $path"
   }
   _CLEAN_PATH="$path"
-  local dirty branch head git_dir common_dir safe_reason ignored ignored_rc _lockfile=""
-  dirty="$(git -C "$path" status --porcelain 2>/dev/null || true)"
-  if [ -n "$dirty" ]; then
-    clean_set_disposition refused dirty "refusing to remove dirty worktree: $path"
-    die "refusing to remove dirty worktree: $path"
-  fi
+  local dirty dirty_rc branch head git_dir common_dir safe_reason ignored ignored_rc _lockfile=""
+  local tracked_awa tracked_awa_rc owned_awa=0 status_line dirty_without_owned
   branch="$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   if [ -z "$branch" ]; then
     clean_set_disposition error no_branch "cannot determine worktree branch: $path"
@@ -1121,6 +1120,45 @@ clean_worktree() {
     die "cannot determine git common-dir for $path"
   }
   _CLEAN_COMMON_DIR="$common_dir"
+
+  # Adoption writes `.awa/lease.json` inside the worktree. That file is AWA's own lifecycle
+  # bookkeeping, not operator work, but it may be tolerated only under a deliberately narrow proof:
+  # no tracked `.awa` path; exactly one private, regular file; valid lease contract + identity bound
+  # to this live path/branch/common-dir. Any missing helper, malformed/mismatched lease, symlink,
+  # permission drift, or sibling content falls through to the ordinary dirty/ignored gates.
+  set +e
+  tracked_awa="$(git -C "$path" ls-files -- .awa 2>/dev/null)"
+  tracked_awa_rc=$?
+  set -e
+  if [ "$tracked_awa_rc" -eq 0 ] && [ -z "$tracked_awa" ] && \
+     [ -f "$AWA_BOOKKEEPING_LIB" ] && \
+     python3 "$AWA_BOOKKEEPING_LIB" validate --root "$path" --branch "$branch" \
+       --common-dir "$common_dir" >/dev/null 2>&1; then
+    owned_awa=1
+  fi
+
+  set +e
+  dirty="$(git -C "$path" -c core.untrackedCache=false -c core.fsmonitor=false \
+    status --porcelain=v1 --untracked-files=all 2>/dev/null)"
+  dirty_rc=$?
+  set -e
+  if [ "$dirty_rc" -ne 0 ]; then
+    clean_set_disposition refused dirty "refusing to remove worktree whose dirty state cannot be read: $path"
+    die "refusing to remove worktree whose dirty state cannot be read: $path"
+  fi
+  if [ "$owned_awa" -eq 1 ]; then
+    dirty_without_owned=""
+    while IFS= read -r status_line; do
+      [ "$status_line" = "?? .awa/lease.json" ] && continue
+      [ -z "$status_line" ] && continue
+      dirty_without_owned="${dirty_without_owned}${dirty_without_owned:+$'\n'}${status_line}"
+    done <<< "$dirty"
+    dirty="$dirty_without_owned"
+  fi
+  if [ -n "$dirty" ]; then
+    clean_set_disposition refused dirty "refusing to remove dirty worktree: $path"
+    die "refusing to remove dirty worktree: $path"
+  fi
 
   # K1: an ACTIVE root (a live session's Safe Workspace) blocks removal (canonical disposition).
   clean_active_root_gate "$path" || return 1
@@ -1149,6 +1187,16 @@ clean_worktree() {
     return 1
   fi
   ignored="$(printf '%s\n' "$ignored" | sed -n 's/^!! //p' || true)"
+  if [ "$owned_awa" -eq 1 ]; then
+    local ignored_without_owned="" ignored_path
+    while IFS= read -r ignored_path; do
+      case "$ignored_path" in
+        .awa/|.awa/lease.json|"") continue ;;
+      esac
+      ignored_without_owned="${ignored_without_owned}${ignored_without_owned:+$'\n'}${ignored_path}"
+    done <<< "$ignored"
+    ignored="$ignored_without_owned"
+  fi
   if [ -n "$ignored" ]; then
     _CLEAN_IGNORED_PRESENT=1
     _CLEAN_IGNORED_COUNT="$(printf '%s\n' "$ignored" | grep -c . || true)"
@@ -1224,6 +1272,29 @@ clean_worktree() {
   # window, REFUSE (reason_code reactivated_during_clean). There is no OS lock (a deliberate
   # non-goal) — this shrinks the race window from minutes to ~microseconds, fail-closed.
   clean_active_root_gate "$path" recheck || return 1
+  # Remove only the already-proven AWA lease, under the shared lifecycle lock, and revalidate it in
+  # the helper immediately before unlink. The helper uses a no-follow directory fd and unlinks only
+  # `lease.json`; it deliberately leaves the now-empty `.awa/` directory for Git to remove with the
+  # worktree. If anything changed since classification, preserve the worktree.
+  if [ "$owned_awa" -eq 1 ]; then
+    if [ ! -f "$AWA_BOOKKEEPING_LIB" ] || \
+       ! python3 "$AWA_BOOKKEEPING_LIB" remove --root "$path" --branch "$branch" \
+         --common-dir "$common_dir" >/dev/null 2>&1; then
+      clean_set_disposition refused dirty \
+        "AWA-owned bookkeeping changed before removal — worktree preserved"
+      die "refusing to remove worktree — AWA-owned bookkeeping changed"
+    fi
+    set +e
+    dirty="$(git -C "$path" -c core.untrackedCache=false -c core.fsmonitor=false \
+      status --porcelain=v1 --untracked-files=all 2>/dev/null)"
+    dirty_rc=$?
+    set -e
+    if [ "$dirty_rc" -ne 0 ] || [ -n "$dirty" ]; then
+      clean_set_disposition refused dirty \
+        "worktree changed after AWA bookkeeping removal — worktree preserved"
+      die "refusing to remove worktree — dirty state changed before removal"
+    fi
+  fi
   if [ "$force" -eq 1 ]; then
     git --git-dir="$common_dir" worktree remove --force "$path"
   else
