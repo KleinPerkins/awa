@@ -271,6 +271,13 @@ class TestCanvasRefreshBridge(_EmitterModeTestBase):
             f"  printf '%s\\n' '{{\"run_bridge_enabled\":{str(bridge_enabled).lower()}}}'\n"
             "elif [[ \"${1:-}\" == explain-job ]]; then\n"
             "  [[ \"${FAKE_JOB_EXISTS:-0}\" == 1 ]] || exit 1\n"
+            "elif [[ \"${1:-}\" == view-jobs ]]; then\n"
+            "  owner=\"\"\n"
+            "  if [[ \"${FAKE_JOB_OWNED:-1}\" == 1 ]]; then\n"
+            "    owner='\"AWA_DASHBOARD_REFRESH_OWNER\":\"awa-dashboard-refresh/v1\"'\n"
+            "  fi\n"
+            "  printf '%s\\n' \"{\\\"instances\\\":[{\\\"id\\\":\\\"awa-dashboard-refresh\\\","
+            "\\\"type\\\":\\\"command\\\",\\\"role\\\":\\\"instance\\\",\\\"env\\\":{${owner}}}]}\"\n"
             "fi\n",
             encoding="utf-8",
         )
@@ -303,6 +310,10 @@ class TestCanvasRefreshBridge(_EmitterModeTestBase):
         self.assertIn("add-job --type command --id awa-dashboard-refresh", calls)
         self.assertIn("--interval-seconds 2147483647", calls)
         self.assertIn("--enabled false", calls)
+        self.assertIn(
+            "--env AWA_DASHBOARD_REFRESH_OWNER=awa-dashboard-refresh/v1",
+            calls,
+        )
         self.assertIn("run-job --id awa-dashboard-refresh", calls)
         self.assertNotIn("enable-canvas-runs", calls)
 
@@ -334,6 +345,63 @@ class TestCanvasRefreshBridge(_EmitterModeTestBase):
         )
         self.assertNotIn("--interval-seconds", update)
         self.assertNotIn("--enabled", update)
+
+    def test_action_installer_refuses_existing_unowned_job(self) -> None:
+        fake, log = self._fake_local_jobs(True)
+        proc = subprocess.run(
+            [
+                "bash",
+                str(_DASHBOARD_DIR / "install_actions.sh"),
+                "--root",
+                str(self.root),
+                "--policy",
+                os.environ["AWA_POLICY"],
+            ],
+            text=True,
+            capture_output=True,
+            env={
+                **os.environ,
+                "AWA_HOME": str(_DASHBOARD_DIR.parent),
+                "AWA_LOCAL_JOBS_CLI": str(fake),
+                "FAKE_LOCAL_JOBS_LOG": str(log),
+                "FAKE_JOB_EXISTS": "1",
+                "FAKE_JOB_OWNED": "0",
+            },
+        )
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("not AWA-owned", proc.stderr)
+        self.assertNotIn("update-job", log.read_text(encoding="utf-8"))
+
+    def test_action_installer_removes_only_owned_job(self) -> None:
+        fake, log = self._fake_local_jobs(True)
+        base_env = {
+            **os.environ,
+            "AWA_HOME": str(_DASHBOARD_DIR.parent),
+            "AWA_LOCAL_JOBS_CLI": str(fake),
+            "FAKE_LOCAL_JOBS_LOG": str(log),
+            "FAKE_JOB_EXISTS": "1",
+        }
+        owned = subprocess.run(
+            ["bash", str(_DASHBOARD_DIR / "install_actions.sh"), "--remove"],
+            text=True,
+            capture_output=True,
+            env=base_env,
+        )
+        self.assertEqual(owned.returncode, 0, owned.stderr)
+        self.assertIn(
+            "delete-job --type command --id awa-dashboard-refresh --confirm",
+            log.read_text(encoding="utf-8"),
+        )
+
+        log.write_text("", encoding="utf-8")
+        unowned = subprocess.run(
+            ["bash", str(_DASHBOARD_DIR / "install_actions.sh"), "--remove"],
+            text=True,
+            capture_output=True,
+            env={**base_env, "FAKE_JOB_OWNED": "0"},
+        )
+        self.assertEqual(unowned.returncode, 1, unowned.stderr)
+        self.assertNotIn("delete-job", log.read_text(encoding="utf-8"))
 
     def test_action_installer_does_not_adopt_shared_bridge(self) -> None:
         fake, log = self._fake_local_jobs(False)

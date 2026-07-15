@@ -57,7 +57,9 @@ The dashboard's **Refresh** button never opens a chat. It writes a closed
 optional `local-jobs` Canvas bridge, install/repair registers that fixed job (disabled for
 scheduling) and the existing bridge runs the read-only renderer in the background. The renderer
 accepts only its fixed root/policy arguments, reads repo status, and writes the derived Canvas plus
-one validated same-directory sidecar alias; it never writes in a governed repo.
+one validated same-directory sidecar alias; it never writes in a governed repo. A dedicated marker
+binds the fixed job to AWA: install/repair and uninstall refuse to replace or remove a same-named
+job whose ownership is not proven.
 
 AWA does not silently opt a machine into the shared bridge. An agent can explicitly enable and
 register it with:

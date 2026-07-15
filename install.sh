@@ -206,6 +206,13 @@ do_uninstall() {
   awa_log "uninstalling AWA"
   AWA_HOOKS_JSON="$HOOKS_JSON" _remove_hooks
   awa_mcp_remove "$MCP_JSON" "awa"
+  if [ -x "$RUNTIME/dashboard/install_actions.sh" ]; then
+    if AWA_HOME="$RUNTIME" "$RUNTIME/dashboard/install_actions.sh" --remove >/dev/null; then
+      awa_log "reconciled background dashboard refresh job removal"
+    else
+      awa_warn "preserved background dashboard job because its AWA ownership was not proven"
+    fi
+  fi
   rm -rf "$RUNTIME"
   rm -f "$ENV_FILE" "$POINTER"
   if [ -f "$OPERATOR_RULE" ] && \
