@@ -23,6 +23,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _DASHBOARD_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_DASHBOARD_DIR))
@@ -184,6 +185,9 @@ class TestEmitterModeSurface(_EmitterModeTestBase):
             for key in ("path", "rel", "name", "classification", "reason", "mode",
                         "mode_error", "owner_repo", "has_base", "worktrees"):
                 self.assertIn(key, repo)
+            for worktree in repo["worktrees"]:
+                self.assertIn("size_bytes", worktree)
+                self.assertIn("plain_size", worktree)
 
 
 class TestEmitterModeFreeBackCompat(_EmitterModeTestBase):
@@ -355,6 +359,47 @@ class TestCanvasRefreshBridge(_EmitterModeTestBase):
         calls = log.read_text(encoding="utf-8")
         self.assertNotIn("add-job", calls)
         self.assertNotIn("enable-canvas-runs", calls)
+
+
+class TestWorktreeDiskSize(unittest.TestCase):
+    def test_adaptive_size_labels(self) -> None:
+        cases = (
+            (None, "not available"),
+            (0, "0 KB"),
+            (512 * 1024, "512 KB"),
+            (1024 ** 2, "1 MB"),
+            (1536 * 1024, "1.5 MB"),
+            (1536 * 1024 ** 2, "1.5 GB"),
+        )
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(emitter.format_disk_size(value), expected)
+
+    def test_measurement_is_bounded_and_parses_du_kib(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["du", "-sk", "/tmp/worktree"],
+            0,
+            stdout="1536\t/tmp/worktree\n",
+            stderr="",
+        )
+        with mock.patch.object(emitter.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(
+                emitter.disk_usage_bytes("/tmp/worktree", timeout=1.25),
+                1536 * 1024,
+            )
+        self.assertEqual(run.call_args.kwargs["timeout"], 1.25)
+
+        with mock.patch.object(
+            emitter.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["du"], 0.1),
+        ):
+            self.assertIsNone(emitter.disk_usage_bytes("/tmp/worktree", timeout=0.1))
+
+    def test_seed_displays_size_on_every_worktree_row(self) -> None:
+        source = (_DASHBOARD_DIR / "seed.canvas.tsx").read_text(encoding="utf-8")
+        self.assertIn('"Size on disk"', source)
+        self.assertIn("wt.plain_size || PM_COPY.sizeUnavailable", source)
 
 
 if __name__ == "__main__":

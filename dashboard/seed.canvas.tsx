@@ -48,6 +48,7 @@ type Worktree = {
   head: string;
   dirty: boolean;
   dirty_count: number;
+  size_bytes?: number | null;
   ahead: number;
   behind: number;
   ab_status: WtStatus;
@@ -57,6 +58,7 @@ type Worktree = {
   // Additive, optional jargon-free operator fields (emitter-authored, egress-scanned in Python).
   plain_status?: string;
   plain_next?: string;
+  plain_size?: string;
 };
 
 type OrphanBranch = {
@@ -210,7 +212,7 @@ const PM_COPY = {
     "Safe copies that are not open anywhere right now — usually fine to tidy away after a quick check.",
   excludedHint: "I leave these projects alone — they look after themselves.",
 
-  headersMain: ["Project", "What you were doing", "Where", "Unsaved", "Compared to the shared version", "Last saved", "What to do"],
+  headersMain: ["Project", "What you were doing", "Where", "Size on disk", "Unsaved", "Compared to the shared version", "Last saved", "What to do"],
   headersLeftover: ["Project", "Compared to the shared version", "Last saved", "What to do"],
   headersExcluded: ["Project", "Why", "What to do"],
 
@@ -219,6 +221,7 @@ const PM_COPY = {
   workUnknown: "your work",
   unsavedNone: "saved",
   unsavedSome: "unsaved",
+  sizeUnavailable: "not available",
 
   vsOnShared: "this is the shared version",
   vsEven: "up to date",
@@ -417,6 +420,7 @@ function worktreeRows(rows: WtRow[], showTech: boolean) {
       {showTech ? <Code>{technicalWhere(wt)}</Code> : null}
     </Stack>,
     <Pill size="sm" active={wt.is_linked}>{roleLabel(wt)}</Pill>,
+    <Text size="small" tone="secondary">{wt.plain_size || PM_COPY.sizeUnavailable}</Text>,
     wt.dirty
       ? <Pill size="sm" active>{wt.dirty_count} {PM_COPY.unsavedSome}</Pill>
       : <Text size="small" tone="quaternary">{PM_COPY.unsavedNone}</Text>,

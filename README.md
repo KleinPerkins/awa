@@ -70,6 +70,10 @@ AWA_GOVERNED_ROOT=/path/to/root AWA_POLICY=/path/to/policy \
 Without that optional bridge, refresh from the CLI with
 `dashboard/render.py --root /path/to/root --policy /path/to/policy`.
 
+Every worktree row includes its allocated on-disk size in adaptive KB, MB, or GB units. The
+read-only measurement uses the same bounded timeout posture as repo inspection and reports
+`not available` instead of delaying the whole dashboard when a directory cannot be measured.
+
 ### Per-repo mode (ON / OFF)
 
 Each governed repo has an explicit AWA **mode** you can set and inspect:

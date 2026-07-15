@@ -202,7 +202,8 @@ class TestEgressSurfaces(_EgressBase):
             repos.append({
                 "plain_next": r.get("plain_next", ""),
                 "worktrees": [{"plain_status": w.get("plain_status", ""),
-                               "plain_next": w.get("plain_next", "")} for w in r.get("worktrees", [])],
+                               "plain_next": w.get("plain_next", ""),
+                               "plain_size": w.get("plain_size", "")} for w in r.get("worktrees", [])],
                 "orphan_branches": [{"plain_status": b.get("plain_status", ""),
                                      "plain_next": b.get("plain_next", "")}
                                     for b in r.get("orphan_branches", [])],

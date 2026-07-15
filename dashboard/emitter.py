@@ -171,12 +171,51 @@ def worktree_role(wt_path: str, timeout: float) -> tuple[bool, bool]:
     return gd == cd, bool(gd and cd and gd != cd)
 
 
+def disk_usage_bytes(wt_path: str, timeout: float) -> int | None:
+    """Return allocated bytes for one worktree directory, bounded and side-effect-free."""
+
+    try:
+        proc = subprocess.run(
+            ["du", "-sk", wt_path],
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    first = proc.stdout.split(maxsplit=1)[0] if proc.stdout.strip() else ""
+    if not first.isdigit():
+        return None
+    return int(first) * 1024
+
+
+def format_disk_size(size_bytes: int | None) -> str:
+    """Format a measured worktree size using the operator-requested adaptive units."""
+
+    if size_bytes is None or size_bytes < 0:
+        return "not available"
+    gib = 1024 ** 3
+    mib = 1024 ** 2
+    kib = 1024
+    if size_bytes >= gib:
+        value, unit = size_bytes / gib, "GB"
+    elif size_bytes >= mib:
+        value, unit = size_bytes / mib, "MB"
+    else:
+        return f"{round(size_bytes / kib)} KB"
+    return f"{value:.1f}".rstrip("0").rstrip(".") + f" {unit}"
+
+
 def worktree_detail(wt_path: str, block: dict, base: str | None, timeout: float) -> dict:
     branch_ref = block.get("branch_ref", "")
     branch = branch_ref[len("refs/heads/"):] if branch_ref.startswith("refs/heads/") else ""
     detached = bool(block.get("detached")) or (not branch and not block.get("bare"))
 
     is_primary, is_linked = worktree_role(wt_path, timeout)
+    size_bytes = disk_usage_bytes(wt_path, timeout)
 
     head_short = ""
     rc, out = git(wt_path, "rev-parse", "--short", "HEAD", timeout=timeout)
@@ -238,6 +277,8 @@ def worktree_detail(wt_path: str, block: dict, base: str | None, timeout: float)
         "is_base_branch": base_branch,
         "last_commit_ts": last_commit_ts,
         "last_commit_subject": last_commit_subject,
+        "size_bytes": size_bytes,
+        "plain_size": format_disk_size(size_bytes),
     }
 
 
