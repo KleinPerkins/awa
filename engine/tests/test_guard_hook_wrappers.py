@@ -152,6 +152,43 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         })
         self.assertEqual(resp.get("permission"), "allow")
 
+    def test_same_conversation_mode_transition_is_rechecked(self):
+        """Incident 2026-07-15 classification lock: AWA has no per-chat guard cache.
+
+        Reuse the exact conversation/session payload while changing only the tool-owned
+        mode file. Each hook process must resolve current policy again: OFF allows, then
+        restored ON denies. This does not simulate Cursor spawning the hook; it proves
+        the AWA code path cannot preserve the earlier OFF decision in chat-local state.
+        """
+        modes = self.root / "modes.yml"
+        self.policy.write_text(
+            _POLICY.format(root=self.root) + "modes_file: modes.yml\n",
+            encoding="utf-8",
+        )
+        payload = {
+            "conversation_id": "same-conversation",
+            "session_id": "same-conversation",
+            "generation_id": "mode-transition",
+            "command": "git commit --allow-empty -m mode-transition",
+            "cwd": "",
+            "workspace_roots": [str(self.repo)],
+        }
+
+        modes.write_text(
+            "schema: awa-modes/v1\ndefault_mode: on\nmodes:\n  proj: off\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(self._guard_payload(payload).get("permission"), "allow")
+
+        modes.write_text(
+            "schema: awa-modes/v1\ndefault_mode: on\nmodes:\n  proj: on\n",
+            encoding="utf-8",
+        )
+        response = self._guard_payload(payload)
+        self.assertEqual(response.get("permission"), "deny")
+        self.assertIn("user_message", response)
+        self.assertIn("agent_message", response)
+
     def test_cloud_background_agent_payload_allows(self):
         """Cloud/background agent degrades to ALLOW *before* the deny branch: a Cursor Cloud VM
         is an already-isolated, own-branch clone — a mutating command there must not be blocked.
