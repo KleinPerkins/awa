@@ -6,7 +6,7 @@ name: ci
 # COST CONTROL (see KleinPerkins/dev _ops/plans/local-ci-migration.md): push/PR runs the PRIMARY
 # interpreter only; the full {3.9,3.12} matrix AND the credentialed router-seam job run on release
 # tags (v*) only. The per-interpreter × seam fan-out on every push was the dominant Actions-minute
-# consumer, and merge gating never depended on this workflow (only on `pr-automation / verify`).
+# consumer, and merge gating never depended on this workflow (only on the verifier App's required Check).
 #
 # HEADLESS-SAFE: every step runs with HOME pointed at a throwaway dir under $RUNNER_TEMP, so CI
 # never mutates a real home. stdlib + sqlite3 only — no third-party deps to install. Scratch git
