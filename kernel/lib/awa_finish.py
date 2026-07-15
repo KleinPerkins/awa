@@ -14,7 +14,8 @@ with no conversational surface installed. This module is the deterministic core 
   * ONE content-addressed pending CHALLENGE (0600, atomic write-and-rename) with a single coarse
     staleness backstop and NO separate execution-permit window; consumed exactly once (replay-safe);
   * LITERAL-``Close`` authorization: only an exact, case-sensitive, standalone ``Close`` AND a
-    byte-equal re-derived fingerprint under the lock authorizes removal;
+    byte-equal re-derived full or path-granularity structural fingerprint under the lock authorizes
+    removal;
   * a per-common-dir LOCK ABI byte-identical to engine/lock.py (shared write-serialization —
     it does NOT lock a worktree against removal), so kernel finish/clean and engine maintenance
     mutually exclude;
@@ -22,11 +23,11 @@ with no conversational surface installed. This module is the deterministic core 
   * a FINAL RECHECK immediately before removal.
 
 FAIL-SAFE on the destructive path: any uncertainty (unreadable state, ambiguous target,
-fingerprint drift, lock contention, missing tool, another fresh session, traversal/mount/
-nested-repo risk) PRESERVES the worktree with a precise refusal. Removal happens ONLY when, under
-the lock, a freshly recomputed fingerprint byte-equals the challenge AND the answer is exactly
-``Close``. Nothing probabilistic authorizes removal, and the removal path performs ZERO network
-calls (no gh / fetch / ls-remote).
+deletion-scope/structural drift, lock contention, missing tool, another fresh session,
+traversal/mount/nested-repo risk) PRESERVES the worktree with a precise refusal. Removal happens
+ONLY when, under the lock, a freshly recomputed full or path-granularity structural fingerprint
+byte-equals the challenge AND the answer is exactly ``Close``. Nothing probabilistic authorizes
+removal, and the removal path performs ZERO network calls (no gh / fetch / ls-remote).
 
 Storage lives under ``${XDG_STATE_HOME:-~/.local/state}/awa`` on local disk (dirs 700, files 600).
 """
@@ -67,6 +68,7 @@ CRUFT_ALLOWLIST_VERSION = "1"
 WARNING_VERSION = "1"
 RETAIN_CLASSIFICATION_VERSION = "3"
 INVENTORY_FINGERPRINT_VERSION = "2"
+INVENTORY_STRUCTURE_VERSION = "1"
 OPERATION_CLASSIFICATION_VERSION = "1"
 SELECTED_DISPOSITION_FULL_DISCARD = "full-discard"
 GENERATION_TRANSITIONS = frozenset({"close_claimed", "cancelled"})
@@ -76,12 +78,14 @@ INDEX_VISIBILITY_REFUSAL = "index_visibility_flags"
 CHALLENGE_KEYS = frozenset({
     "schema", "nonce", "generation", "conversation_id", "session_key", "boot_id",
     "install_id", "root", "git_dir", "common_dir", "branch", "head", "fingerprint",
+    "structure_fingerprint",
     "root_incarnation", "git_dir_incarnation",
     "operation_markers", "operation_digest", "heartbeat_membership", "warning_version",
     "cruft_allowlist_version", "selected_disposition", "hook_mode",
     "hook_requires_envelope", "hook_warning_published", "hook_activated",
     "activated_choice", "activated_envelope_digest", "created_at_epoch", "created_at",
 })
+LEGACY_CHALLENGE_KEYS = CHALLENGE_KEYS - {"structure_fingerprint"}
 GENERATION_STATE_KEYS = frozenset({
     "schema", "transition", "conversation_id", "nonce", "generation", "root",
     "common_dir", "session_key", "created_at_epoch", "created_at",
@@ -90,11 +94,13 @@ REMOVAL_JOURNAL_KEYS = frozenset({
     "schema", "operation_id", "phase", "root", "git_dir", "common_dir", "branch",
     "head", "conversation_id", "nonce", "generation", "session_id", "session_key",
     "boot_id", "install_id", "root_incarnation", "git_dir_incarnation",
-    "fingerprint", "claim", "branch_disposition", "discard_count",
+    "fingerprint", "execution_fingerprint", "claim", "branch_disposition", "discard_count",
     "branch_action", "cleanup_warnings", "receipt_committed", "created_at_epoch",
     "updated_at_epoch",
 })
-LEGACY_REMOVAL_JOURNAL_KEYS = REMOVAL_JOURNAL_KEYS - {
+PRE_EXECUTION_FINGERPRINT_JOURNAL_KEYS = (
+    REMOVAL_JOURNAL_KEYS - {"execution_fingerprint"})
+LEGACY_REMOVAL_JOURNAL_KEYS = PRE_EXECUTION_FINGERPRINT_JOURNAL_KEYS - {
     "install_id", "root_incarnation", "git_dir_incarnation",
 }
 PHYSICAL_INCARNATION_KEYS = frozenset({
@@ -102,9 +108,9 @@ PHYSICAL_INCARNATION_KEYS = frozenset({
 })
 
 # Single coarse staleness backstop for an ABANDONED challenge. This is a BACKSTOP, never the
-# authorization mechanism: authorization is content-addressed (fingerprint byte-equality), and
-# there is NO separate short-lived execution-permit window to race. Tunable, floored so a stray
-# tiny value cannot create a race window.
+# authorization mechanism: authorization is content-addressed (full or structural fingerprint
+# byte-equality), and there is NO separate short-lived execution-permit window to race. Tunable,
+# floored so a stray tiny value cannot create a race window.
 DEFAULT_CHALLENGE_TTL_SECONDS = 900
 MIN_CHALLENGE_TTL_SECONDS = 60
 
@@ -2712,6 +2718,196 @@ def compute_fingerprint(inv: dict, *, root: str, git_dir: str, common_dir: str,
     return hashlib.sha256(blob.encode("ascii")).hexdigest()
 
 
+def _index_fingerprint_records(index_hex: str, *, include_oid: bool) -> list[dict]:
+    """Canonical index records with an optional content identity.
+
+    Structural authorization binds paths, modes, and stages but deliberately omits blob ids.
+    Per-row Retain fingerprints include blob ids so a selected staged value remains byte-exact.
+    """
+    try:
+        data = bytes.fromhex(index_hex)
+    except (TypeError, ValueError):
+        raise FinishError("malformed git index listing") from None
+    _index_paths(data)
+    if not data:
+        return []
+    records = []
+    for raw in data[:-1].split(b"\x00"):
+        meta, _sep, path = raw.partition(b"\t")
+        mode, oid, stage = meta.split()
+        record = {
+            "mode": mode.decode("ascii"),
+            "stage": int(stage),
+            "path_hex": path.hex(),
+        }
+        if include_oid:
+            record["oid"] = oid.decode("ascii")
+        records.append(record)
+    return records
+
+
+def _structure_entry(entry: dict, object_map: dict[str, dict]) -> dict:
+    """Path-granularity row identity in the exact displayed inventory order."""
+    root_objects = []
+    for value in entry.get("paths_hex") or []:
+        normalized = bytes.fromhex(value).rstrip(b"/").hex()
+        root_objects.append(_structure_object(
+            object_map.get(normalized, {
+                "path_hex": normalized, "type": "absent", "mode": 0,
+            })))
+    return {
+        "p": [
+            bytes.fromhex(value).rstrip(b"/").hex()
+            for value in entry.get("paths_hex") or []
+        ],
+        "code": entry.get("code", ""),
+        "class": entry.get("class", ""),
+        "root_objects": root_objects,
+        "hidden": bool(entry.get("hidden")),
+        "retained": bool(entry.get("retained")),
+        "commit_eligible": bool(entry.get("commit_eligible", True)),
+        "retain_eligible": bool(entry.get("retain_eligible", True)),
+        "operation_group": entry.get("operation_group", ""),
+        "operation_digest": entry.get("operation_digest", ""),
+        "operation_manifest": entry.get("operation_manifest") or {},
+        "dependency_paths_hex": list(entry.get("dependency_paths_hex") or []),
+        "operation_atomic": bool(entry.get("operation_atomic")),
+        "contains_secret_dependencies": bool(
+            entry.get("contains_secret_dependencies")),
+        "contains_ignored_dependencies": bool(
+            entry.get("contains_ignored_dependencies")),
+    }
+
+
+def _structure_object(item: dict) -> dict:
+    """Bind every object path/type/mode and every symlink target, but not regular-file bytes."""
+    projected = {
+        "path_hex": item.get("path_hex", ""),
+        "type": item.get("type", ""),
+        "mode": item.get("mode", 0),
+    }
+    if item.get("type") == "symlink":
+        projected["target_hex"] = item.get("target_hex", "")
+    return projected
+
+
+def _structure_objects(inv: dict) -> list[dict]:
+    """Bind physical structure outside opaque contents of displayed directory rows.
+
+    A warning names a directory as one deletion scope. Regular-file additions, removals, renames,
+    mode changes, and byte changes below that scope do not expand it. Directories, symlinks,
+    special types, and every object outside such a scope remain exact.
+    """
+    objects = list(inv.get("objects") or [])
+    object_map = {str(item.get("path_hex") or ""): item for item in objects}
+    directory_scopes = []
+    for entry in inv.get("entries") or []:
+        for value in entry.get("paths_hex") or []:
+            normalized = bytes.fromhex(value).rstrip(b"/")
+            item = object_map.get(normalized.hex())
+            if item is not None and item.get("type") == "dir":
+                directory_scopes.append(normalized)
+
+    projected = []
+    for item in objects:
+        path = bytes.fromhex(str(item.get("path_hex") or ""))
+        if (item.get("type") == "file"
+                and any(path.startswith(scope + b"/") for scope in directory_scopes)):
+            continue
+        projected.append(_structure_object(item))
+    return projected
+
+
+def compute_structure_fingerprint(
+        inv: dict, *, root: str, git_dir: str, common_dir: str,
+        branch: str, head: str, membership: list,
+        root_incarnation: dict | None = None,
+        git_dir_incarnation: dict | None = None) -> str:
+    """Fingerprint path-granularity deletion authority without volatile row content.
+
+    Ordered row deletion scopes, each row-root type/mode/link target, non-content descendant
+    structure, Git index path/mode/stage structure, active operation state, target identity, and
+    session membership remain exact. Regular files below a displayed directory scope are opaque
+    row content; their additions/removals/renames/modes/bytes and ordinary index blob ids are
+    omitted.
+    """
+    if root_incarnation is None or git_dir_incarnation is None:
+        root_incarnation, git_dir_incarnation = capture_physical_incarnations(
+            root, git_dir)
+    operation = inv.get("operation_manifest") or {}
+    structural_operation = (
+        operation if operation.get("active") is True
+        else {"active": False, "groups": []})
+    object_map = {
+        str(item.get("path_hex") or ""): item
+        for item in inv.get("objects") or []
+    }
+    payload = {
+        "schema": SCHEMA_CHALLENGE,
+        "versions": {
+            "structure": INVENTORY_STRUCTURE_VERSION,
+            "operation": OPERATION_CLASSIFICATION_VERSION,
+            "cruft": CRUFT_ALLOWLIST_VERSION,
+            "warning": WARNING_VERSION,
+            "retain": RETAIN_CLASSIFICATION_VERSION,
+        },
+        "root": canon(root),
+        "git_dir": os.path.abspath(git_dir),
+        "common_dir": os.path.abspath(common_dir),
+        "branch": branch or "",
+        "head": head or "",
+        "root_incarnation": root_incarnation,
+        "git_dir_incarnation": git_dir_incarnation,
+        "markers": list(inv.get("markers") or []),
+        "hb_members": sorted(membership),
+        # Preserve list order: a displayed-row reorder is authorization drift.
+        "manifest": [
+            _structure_entry(entry, object_map)
+            for entry in inv.get("entries") or []
+        ],
+        "objects": _structure_objects(inv),
+        "index": _index_fingerprint_records(
+            str(inv.get("index_hex") or ""), include_oid=False),
+        "operation_manifest": structural_operation,
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(blob.encode("ascii")).hexdigest()
+
+
+def compute_row_fingerprints(inv: dict) -> list[str]:
+    """Return one exact content fingerprint per inventory row, in displayed row order."""
+    index_records = _index_fingerprint_records(
+        str(inv.get("index_hex") or ""), include_oid=True)
+    objects = list(inv.get("objects") or [])
+    fingerprints = []
+    for entry in inv.get("entries") or []:
+        roots = [
+            bytes.fromhex(value).rstrip(b"/")
+            for value in (
+                list(entry.get("paths_hex") or [])
+                + list(entry.get("dependency_paths_hex") or []))
+            if value
+        ]
+
+        def selected(path_hex: str) -> bool:
+            path = bytes.fromhex(path_hex)
+            return any(path == root or path.startswith(root + b"/") for root in roots)
+
+        payload = {
+            "entry": entry,
+            "objects": [item for item in objects if selected(item.get("path_hex", ""))],
+            "index": [
+                item for item in index_records if selected(item.get("path_hex", ""))],
+            "operation_manifest": (
+                inv.get("operation_manifest") or {}
+                if entry.get("template_id") == "operation" else {}),
+        }
+        blob = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        fingerprints.append(hashlib.sha256(blob.encode("ascii")).hexdigest())
+    return fingerprints
+
+
 # ---- content-addressed pending challenge ------------------------------------------------
 def _conversation_key(conversation_id: str) -> str:
     return hashlib.sha256((conversation_id or "").encode("utf-8")).hexdigest()[:24]
@@ -2895,8 +3091,9 @@ def _operation_identity_payload(*, root: str, git_dir: str, common_dir: str, bra
                                 boot_id_value: str, install_id_value: str,
                                 root_incarnation_value: dict, git_dir_incarnation_value: dict,
                                 fingerprint: str, claim: str,
-                                branch_disposition_value: dict, discard_count: int) -> dict:
-    return {
+                                branch_disposition_value: dict, discard_count: int,
+                                execution_fingerprint: str | None = None) -> dict:
+    identity = {
         "root": canon(root),
         "git_dir": os.path.abspath(git_dir),
         "common_dir": os.path.abspath(common_dir),
@@ -2916,6 +3113,9 @@ def _operation_identity_payload(*, root: str, git_dir: str, common_dir: str, bra
         "branch_disposition": branch_disposition_value,
         "discard_count": discard_count,
     }
+    if execution_fingerprint is not None:
+        identity["execution_fingerprint"] = execution_fingerprint
+    return identity
 
 
 def _operation_binding_payload(identity: dict) -> dict:
@@ -2927,7 +3127,9 @@ def _operation_binding_payload(identity: dict) -> dict:
             "nonce", "generation", "session_id", "session_key", "boot_id",
             "fingerprint", "claim", "branch_disposition", "discard_count")
     }
-    for key in ("install_id", "root_incarnation", "git_dir_incarnation"):
+    for key in (
+            "install_id", "root_incarnation", "git_dir_incarnation",
+            "execution_fingerprint"):
         if key in identity:
             payload[key] = identity[key]
     return payload
@@ -2957,7 +3159,9 @@ def _journal_identity(rec: dict) -> dict:
         "branch_disposition": rec["branch_disposition"],
         "discard_count": rec["discard_count"],
     }
-    for key in ("install_id", "root_incarnation", "git_dir_incarnation"):
+    for key in (
+            "install_id", "root_incarnation", "git_dir_incarnation",
+            "execution_fingerprint"):
         if key in rec:
             identity[key] = rec[key]
     return identity
@@ -2982,8 +3186,10 @@ def _valid_branch_disposition(value: object) -> bool:
 def _validate_removal_journal(rec: object, operation_id: str) -> bool:
     keys = set(rec) if isinstance(rec, dict) else set()
     current_shape = keys == REMOVAL_JOURNAL_KEYS
+    pre_execution_shape = keys == PRE_EXECUTION_FINGERPRINT_JOURNAL_KEYS
     legacy_shape = keys == LEGACY_REMOVAL_JOURNAL_KEYS
-    if (not isinstance(rec, dict) or not (current_shape or legacy_shape)
+    modern_shape = current_shape or pre_execution_shape
+    if (not isinstance(rec, dict) or not (modern_shape or legacy_shape)
             or rec.get("schema") != SCHEMA_REMOVAL_JOURNAL
             or rec.get("operation_id") != operation_id
             or rec.get("phase") not in REMOVAL_PHASES
@@ -3003,12 +3209,16 @@ def _validate_removal_journal(rec: object, operation_id: str) -> bool:
             or not isinstance(rec.get("session_key"), str) or not rec.get("session_key")
             or rec.get("session_key") != _roots_module().session_key(rec.get("session_id"))
             or not isinstance(rec.get("boot_id"), str) or not rec.get("boot_id")
-            or (current_shape and (
+            or (modern_shape and (
                 not isinstance(rec.get("install_id"), str) or not rec.get("install_id")
                 or not _valid_incarnation(rec.get("root_incarnation"))
                 or not _valid_incarnation(rec.get("git_dir_incarnation"))))
             or not isinstance(rec.get("fingerprint"), str)
             or re.fullmatch(r"[0-9a-f]{64}", rec.get("fingerprint")) is None
+            or (current_shape and (
+                not isinstance(rec.get("execution_fingerprint"), str)
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", rec.get("execution_fingerprint")) is None))
             or rec.get("claim") not in {"direct", "close_claimed"}
             or not _valid_branch_disposition(rec.get("branch_disposition"))
             or type(rec.get("discard_count")) is not int or rec.get("discard_count") < 0
@@ -3137,10 +3347,11 @@ def _physical_removal_state(rec: dict) -> dict:
 def _prove_prepared_root_unchanged_locked(rec: dict) -> dict:
     """Prove a prepared operation never altered the exact operation-bound workspace.
 
-    This is intentionally the same content proof used for authorization: status, the real index,
-    every filesystem object, operation markers, protected-Retain suppression, and heartbeat
-    membership all fold into the fingerprint.  Only byte equality permits a prepared journal to
-    be cleared as a definitely-not-removed attempt.
+    This is intentionally the exact full content proof captured at execution: status, the real
+    index, every filesystem object, operation markers, protected-Retain suppression, and heartbeat
+    membership all fold into the fingerprint. Only byte equality with execution_fingerprint permits
+    a prepared journal to be cleared as a definitely-not-removed attempt. Legacy journals retain
+    their original full-fingerprint comparison.
     """
     try:
         before = capture_physical_incarnations(rec["root"], rec["git_dir"])
@@ -3171,7 +3382,8 @@ def _prove_prepared_root_unchanged_locked(rec: dict) -> dict:
             common_dir=rec["common_dir"], branch=rec["branch"], head=rec["head"],
             membership=membership, root_incarnation=after[0],
             git_dir_incarnation=after[1])
-        if not hmac.compare_digest(fingerprint, rec["fingerprint"]):
+        expected = rec.get("execution_fingerprint") or rec["fingerprint"]
+        if not hmac.compare_digest(fingerprint, expected):
             return {"state": "uncertain", "reason": "operation_proof_mismatch"}
         return {"state": "intact", "reason": "operation_fingerprint_unchanged"}
     except (FinishError, LockBusy, OSError, subprocess.SubprocessError, TypeError, ValueError):
@@ -3667,6 +3879,7 @@ def _challenge_ttl(override: int | None = None) -> int:
 def create_challenge(*, conversation_id: str, root: str, git_dir: str, common_dir: str,
                      branch: str, head: str, fingerprint: str, markers: list,
                      membership: list, operation_digest: str = "",
+                     structure_fingerprint: str = "",
                      root_incarnation: dict | None = None,
                      git_dir_incarnation: dict | None = None, session_id: str = "",
                      hook_mode: bool = False) -> dict:
@@ -3702,6 +3915,7 @@ def create_challenge(*, conversation_id: str, root: str, git_dir: str, common_di
         "branch": branch or "",
         "head": head or "",
         "fingerprint": fingerprint,
+        "structure_fingerprint": structure_fingerprint,
         "root_incarnation": root_incarnation,
         "git_dir_incarnation": git_dir_incarnation,
         "operation_markers": sorted(markers),
@@ -3734,7 +3948,12 @@ def _read_challenge_raw(conversation_id: str) -> tuple:
         return None, "absent"
     except (OSError, json.JSONDecodeError):
         return None, "malformed"
-    if (not isinstance(rec, dict) or set(rec) != CHALLENGE_KEYS
+    actual_keys = set(rec) if isinstance(rec, dict) else set()
+    if actual_keys == LEGACY_CHALLENGE_KEYS:
+        rec = dict(rec)
+        rec["structure_fingerprint"] = ""
+        actual_keys = set(rec)
+    if (not isinstance(rec, dict) or actual_keys != CHALLENGE_KEYS
             or rec.get("schema") != SCHEMA_CHALLENGE
             or not isinstance(rec.get("nonce"), str) or not rec.get("nonce")
             or type(rec.get("generation")) is not int or rec.get("generation") < 1
@@ -3751,6 +3970,10 @@ def _read_challenge_raw(conversation_id: str) -> tuple:
             or not isinstance(rec.get("branch"), str)
             or not isinstance(rec.get("head"), str)
             or not isinstance(rec.get("fingerprint"), str) or not rec.get("fingerprint")
+            or not isinstance(rec.get("structure_fingerprint"), str)
+            or (rec.get("structure_fingerprint")
+                and re.fullmatch(
+                    r"[0-9a-f]{64}", rec.get("structure_fingerprint")) is None)
             or not _valid_incarnation(rec.get("root_incarnation"))
             or not _valid_incarnation(rec.get("git_dir_incarnation"))
             or not isinstance(rec.get("operation_markers"), list)
@@ -3996,15 +4219,20 @@ def is_literal_close(answer) -> bool:
     return isinstance(answer, str) and answer == "Close"
 
 
-def authorize(answer, challenge: dict, *, current_fingerprint: str) -> tuple:
-    """(ok, reason). Requires the exact literal Close AND a byte-equal re-derived fingerprint."""
+def authorize(answer, challenge: dict, *, current_fingerprint: str,
+              current_structure_fingerprint: str = "") -> tuple:
+    """Require exact Close plus strict legacy equality or current path-granularity equality."""
     if not is_literal_close(answer):
         return False, "not_close"
     if not isinstance(challenge, dict) or "fingerprint" not in challenge:
         return False, "no_challenge"
-    if current_fingerprint != challenge.get("fingerprint"):
-        return False, "fingerprint_mismatch"
-    return True, "authorized"
+    if current_fingerprint == challenge.get("fingerprint"):
+        return True, "authorized"
+    expected_structure = challenge.get("structure_fingerprint")
+    if (isinstance(expected_structure, str) and expected_structure
+            and current_structure_fingerprint == expected_structure):
+        return True, "authorized"
+    return False, "fingerprint_mismatch"
 
 
 # ---- network-free local-ref branch disposition ------------------------------------------
@@ -4170,13 +4398,13 @@ def _finish_execute_impl(*, root: str, git_dir: str, common_dir: str, branch: st
                          expected_nonce: str | None = None,
                          expected_generation: int | None = None,
                          challenge_ttl: int | None = None, lock_timeout: float = 30.0) -> dict:
-    """The one destructive path. Under the per-common-dir lock: re-derive the fingerprint and
-    require BYTE-EQUAL to the challenge + an exact literal Close, run the per-session gate + final
-    recheck, then `git worktree remove --force`, apply the network-free branch disposition,
-    claim an activated hook generation exactly once BEFORE lock acquisition/validation, and clear
-    the heartbeat after removal. Any uncertainty PRESERVES the worktree. Direct non-hook Phase-1
-    calls remain compatible without expected nonce/generation. A branch-cleanup failure NEVER
-    misreports the removed root as surviving."""
+    """The one destructive path. Under the per-common-dir lock: re-derive the full and structural
+    fingerprints and require one matching challenge proof + an exact literal Close, run the
+    per-session gate + final recheck, then `git worktree remove --force`, apply the network-free
+    branch disposition, claim an activated hook generation exactly once BEFORE lock
+    acquisition/validation, and clear the heartbeat after removal. Any uncertainty PRESERVES the
+    worktree. Direct non-hook Phase-1 calls remain compatible without expected nonce/generation.
+    A branch-cleanup failure NEVER misreports the removed root as surviving."""
     roots = _roots_module()
     ckey = roots.session_key(session_id)
 
@@ -4390,7 +4618,14 @@ def _finish_execute_impl(*, root: str, git_dir: str, common_dir: str, branch: st
                 branch=branch, head=head, membership=membership,
                 root_incarnation=physical_after[0],
                 git_dir_incarnation=physical_after[1])
-            ok, why = authorize(answer, ch, current_fingerprint=fp)
+            structure_fp = compute_structure_fingerprint(
+                inv, root=root, git_dir=git_dir, common_dir=common_dir,
+                branch=branch, head=head, membership=membership,
+                root_incarnation=physical_after[0],
+                git_dir_incarnation=physical_after[1])
+            ok, why = authorize(
+                answer, ch, current_fingerprint=fp,
+                current_structure_fingerprint=structure_fp)
             if not ok:
                 return {"outcome": "refused", "reason": why,
                         "message": f"authorization failed: {why}"}
@@ -4408,9 +4643,9 @@ def _finish_execute_impl(*, root: str, git_dir: str, common_dir: str, branch: st
             # fingerprint authorized above were computed BEFORE finish_session_gate + final_recheck +
             # branch_disposition ran their ~7 git subprocesses; a file created in THAT window would
             # otherwise be discarded though it was never authorized. Rebuild the inventory + recompute
-            # the fingerprint here and require inv.safe AND byte-equality to the challenge — any drift
-            # (a new file, a newly-unsafe tree, a new concurrent session in membership) PRESERVES the
-            # worktree, reusing the fingerprint_mismatch / inventory_unsafe receipts (fail-safe).
+            # both fingerprints here and require inv.safe plus the same authorization semantics.
+            # Path/type/mode/symlink/row/session drift PRESERVES the worktree; only opaque
+            # regular-file churn inside an already displayed directory scope may proceed.
             gate = roots.finish_session_gate(
                 root, confirming_session_key=ckey,
                 branch=branch, common_dir=common_dir, lock_held=True)
@@ -4429,15 +4664,23 @@ def _finish_execute_impl(*, root: str, git_dir: str, common_dir: str, branch: st
             if physical_after != physical_before:
                 return {"outcome": "refused", "reason": "recheck_physical_incarnation_changed",
                         "message": "physical workspace identity changed before removal"}
+            final_membership = heartbeat_membership(
+                root, ckey, branch=branch,
+                common_dir=common_dir, lock_held=True)
             fp = compute_fingerprint(
                 inv, root=root, git_dir=git_dir, common_dir=common_dir,
-                branch=branch, head=head,
-                membership=heartbeat_membership(
-                    root, ckey, branch=branch,
-                    common_dir=common_dir, lock_held=True),
+                branch=branch, head=head, membership=final_membership,
                 root_incarnation=physical_after[0],
                 git_dir_incarnation=physical_after[1])
-            if fp != ch["fingerprint"]:
+            structure_fp = compute_structure_fingerprint(
+                inv, root=root, git_dir=git_dir, common_dir=common_dir,
+                branch=branch, head=head, membership=final_membership,
+                root_incarnation=physical_after[0],
+                git_dir_incarnation=physical_after[1])
+            authorized, _why = authorize(
+                answer, ch, current_fingerprint=fp,
+                current_structure_fingerprint=structure_fp)
+            if not authorized:
                 return {"outcome": "refused", "reason": "fingerprint_mismatch",
                         "message": "inventory changed between authorization and removal (final gate)"}
             discard_count = len(inv["entries"])
@@ -4451,7 +4694,8 @@ def _finish_execute_impl(*, root: str, git_dir: str, common_dir: str, branch: st
                 install_id_value=ch["install_id"],
                 root_incarnation_value=ch["root_incarnation"],
                 git_dir_incarnation_value=ch["git_dir_incarnation"],
-                fingerprint=fp, claim="close_claimed" if hook_claimed else "direct",
+                fingerprint=ch["fingerprint"], execution_fingerprint=fp,
+                claim="close_claimed" if hook_claimed else "direct",
                 branch_disposition_value=bdisp, discard_count=discard_count)
             # PREPARED is file+directory fsynced before the physical operation. Failure here is
             # strictly pre-removal and preserves the worktree.
@@ -4675,9 +4919,15 @@ def preview(*, root: str, git_dir: str, common_dir: str, branch: str, head: str,
                                      branch=branch, head=head, membership=membership,
                                      root_incarnation=root_incarnation,
                                      git_dir_incarnation=git_dir_incarnation)
+            structure_fp = compute_structure_fingerprint(
+                inv, root=root, git_dir=git_dir, common_dir=common_dir,
+                branch=branch, head=head, membership=membership,
+                root_incarnation=root_incarnation,
+                git_dir_incarnation=git_dir_incarnation)
             ch = create_challenge(
                 conversation_id=conversation_id, root=root, git_dir=git_dir,
                 common_dir=common_dir, branch=branch, head=head, fingerprint=fp,
+                structure_fingerprint=structure_fp,
                 markers=inv["markers"], operation_digest=inv["operation_digest"],
                 membership=membership, session_id=session_id,
                 root_incarnation=root_incarnation,
@@ -4691,6 +4941,7 @@ def preview(*, root: str, git_dir: str, common_dir: str, branch: str, head: str,
         "ok": True,
         "reason": "preview",
         "fingerprint": fp,
+        "structure_fingerprint": structure_fp,
         "nonce": ch["nonce"],
         "generation": ch["generation"],
         "hook_mode": bool(hook_mode),
@@ -4950,7 +5201,15 @@ def main(argv: list | None = None) -> int:
                                       head=args.head, membership=mem,
                                       root_incarnation=physical[0],
                                       git_dir_incarnation=physical[1])
-            ok, why = authorize(args.answer, ch, current_fingerprint=fpv)
+            structure_fpv = compute_structure_fingerprint(
+                i, root=args.root, git_dir=args.git_dir,
+                common_dir=args.common_dir, branch=args.branch,
+                head=args.head, membership=mem,
+                root_incarnation=physical[0],
+                git_dir_incarnation=physical[1])
+            ok, why = authorize(
+                args.answer, ch, current_fingerprint=fpv,
+                current_structure_fingerprint=structure_fpv)
             _print({"authorized": ok, "reason": why, "fingerprint": fpv})
             return 0 if ok else 1
         if args.cmd == "branch-disposition":

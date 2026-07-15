@@ -45,6 +45,28 @@ done
 for f in trial-runner/provision-live-uat.sh trial-runner/teardown-live-uat.sh; do
   if [ -x "$SELF/$f" ]; then echo "  PASS  $f executable"; else echo "  FAIL  $f not executable"; fail=1; fi
 done
+if python3 - "$SELF/trial-runner/LIVE-OPERATOR-RUNBOOK.md" <<'PY'
+import pathlib
+import re
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+if re.search(r"--(?:rows|commit-rows|retain-rows)\s+[0-9]", text):
+    raise SystemExit("hard-coded finish row number")
+required = (
+    "live-number-next-to-UAT-RETAIN-SENTINEL.txt",
+    "live-comma-separated-Commit-row-numbers",
+    "live-comma-separated-Retain-row-numbers",
+    "never assume an",
+)
+if any(value not in text for value in required):
+    raise SystemExit("dynamic finish row guidance missing")
+PY
+then
+  echo "  PASS  live finish row selection is display-derived"
+else
+  echo "  FAIL  live finish row selection must be display-derived"; fail=1
+fi
 # The trial runner must at least be import/parse clean + discover its transitions (no sandboxes).
 if python3 "$SELF/trial-runner/run_trial.py" --list >/dev/null 2>&1; then
   echo "  PASS  trial-runner --list (transitions discoverable)"

@@ -28,13 +28,19 @@ ever regressing a green verifier.
 ### Root-bound finish: kernel authority, consumer ergonomics
 
 `kernel/lib/awa_finish.py` and `kernel/bin/dev-worktree.sh clean --finish-current` own inventory,
-challenge, literal-`Close`, lock, final fingerprint, session, removal, reconciliation, and local
-branch-disposition decisions. The private proof covers every physical object (encoded raw path,
+challenge, literal-`Close`, lock, final proof, session, removal, reconciliation, and local
+branch-disposition decisions. The private full proof covers every physical object (encoded raw path,
 type, mode, size, regular-file hash, link target, grouped-directory descendants, and exact Git
 status/index evidence), plus the root and per-worktree Git-admin physical incarnations, with
-no-follow before/after identity checks; operator output remains one
-escaped row per Git item and exposes none of that private proof. That path imports no
-consumer/router/engine code and invokes no network.
+no-follow before/after identity checks. The challenge also carries a path-granularity proof that
+keeps ordered displayed deletion scopes, each row-root type/mode/link target, directory and symlink
+descendants, all structure outside displayed directory scopes, Git path/mode/stage structure,
+operation state, target identity, and session membership exact. Regular files below an already
+displayed directory are opaque contents of that displayed scope; their
+creation/removal/rename/mode/bytes and ordinary index blob ids are omitted. Operator output remains
+one escaped row per Git item and
+exposes none of either private proof. That path imports no consumer/router/engine code and invokes
+no network.
 
 Inventory starts with a finish-only index-visibility preflight, before any Git status or physical
 tree scan and before challenge creation. It reads SHA-1/SHA-256 index structure and NUL-delimited
@@ -80,8 +86,11 @@ binding. Only Commit's contained temporary-index operation may substitute its va
    bytes.
 5. `dispatch --current` resolves exactly one root/session/generation, consumes exactly one envelope,
    and activates that same challenge by nonce/generation CAS. Partial/timeout state, reconstruction,
-   attachment, replay, ambiguity, and drift cannot activate it. A Close casing/trim variant returns
-   a correction without activation. Only exact activated Close invokes the kernel CLI with literal
+   attachment, replay, ambiguity, and target/row/path/type/mode/link/Git-structure drift cannot
+   activate it. For Retain only, regular files below an unselected displayed directory may be
+   created, removed, renamed, have modes changed, or be rewritten when the displayed scope and
+   non-content structure remain exact and every selected row's content proof still matches. A Close
+   casing/trim variant returns a correction without activation. Only exact activated Close invokes the kernel CLI with literal
    authorization plus the envelope's complete expected nonce/generation pair. That pair can name
    only the exact still-current hook challenge; a direct replacement cannot inherit it. Before any shared-lock or destructive
    attempt, the kernel exclusive-creates a nonce/generation-bound `awa_finish_generation_state/v1`
@@ -89,10 +98,22 @@ binding. Only Commit's contained temporary-index operation may substitute its va
    and envelope. One closed typed builder projects every dispatcher result after authorization
    handling: it emits fixed copy and validated outcome/reason/branch values only, never child
    output, exceptions, kernel messages, paths, object ids, hashes, prompt bytes, or extra fields.
+   Known inventory drift reasons add only fixed plain-language recovery copy; arbitrary exception
+   text remains generic.
    The clean child emits one exact machine-mode JSON shape; extra, malformed, oversized, or
    exit-status-contradictory output is treated as uncertainty rather than parsed heuristically.
    Proven removal reports removal plus agent stop/chat-open truth; proven refusal reports
    preservation; any post-invocation ambiguity reports unknown removal and stops.
+   At exact Close, the under-lock full proof may differ only when the under-lock structural proof
+   still byte-matches the warning-time proof. This permits a normal hook to create, remove, rename,
+   change modes on, or rewrite regular files below an already displayed directory without changing
+   the deletion scope that the path-granularity warning authorizes. Every displayed-row
+   insertion/removal/reorder/path/root-type/root-mode/root-link change, directory or symlink
+   descendant change, structure change outside such a scope, Git path/mode/stage change,
+   operation-state change, target/incarnation change, or session-membership change refuses. Legacy
+   challenges without the additive structural proof remain full-proof-only. The prepared removal
+   journal binds both warning-time and execution-time full proofs so failed-removal recovery
+   compares the actual pre-execution tree, not stale warning bytes.
 6. Commit's GitHub delivery adapter is the only network-bearing finish component. Retain writes a
    typed protected artifact outside the worktree and verifies a disposable restore under the same
    per-common-dir lock. Its kernel-owned selected snapshot is reused for exact source suppression,

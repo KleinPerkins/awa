@@ -95,8 +95,9 @@ clean options:
   --preview              (with --finish-current) READ-ONLY: render the inventory of work that a
                          discard would destroy + create a pending challenge; performs NO mutation.
   --authorization ANS    (with --finish-current) consume the pending challenge and remove ONLY when
-                         ANS is the exact literal 'Close' AND the re-derived fingerprint byte-equals
-                         the challenge. Also accepted via AWA_FINISH_AUTHORIZATION.
+                         ANS is the exact literal 'Close' AND the re-derived full or path-granularity
+                         structural fingerprint byte-equals the challenge. Also accepted via
+                         AWA_FINISH_AUTHORIZATION.
   --conversation-id ID   (with --finish-current) stable id keying the pending challenge across the
                          preview->authorize round-trip (default: AWA_FINISH_CONVERSATION_ID /
                          DEV_SESSION_ID / 'cli').
@@ -809,10 +810,11 @@ _finish_emit_public_projection() {
 
 # clean --finish-current: discard + remove the CURRENT linked worktree. The kernel refusal is the
 # ENTIRE safety guarantee in Phase 1 — removal happens ONLY when awa_finish.py, under the shared
-# per-common-dir lock, re-derives a fingerprint that byte-equals the pending challenge AND the
-# authorization is the exact literal 'Close'. The flag is NOT authorization. Any uncertainty
-# PRESERVES the worktree with a precise receipt. Uses finish_session_gate (inside finish-execute),
-# NOT the ordinary active-root gate, so the confirming session's own heartbeat does not self-block.
+# per-common-dir lock, re-derives a full or path-granularity structural fingerprint that byte-equals
+# the matching pending challenge proof AND the authorization is the exact literal 'Close'. The flag
+# is NOT authorization. Any uncertainty PRESERVES the worktree with a precise receipt. Uses
+# finish_session_gate (inside finish-execute), NOT the ordinary active-root gate, so the confirming
+# session's own heartbeat does not self-block.
 clean_finish_current() {
   local preview="$1" have_auth="$2" authorization="$3" conversation_id="$4" path_given="$5"
   local expected_nonce="$6" expected_generation="$7"
