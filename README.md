@@ -134,6 +134,13 @@ Engine status is not full health, guard output is diagnostic, and lease reads ch
 fields/hash; cleanup uses the active-root heartbeat plus git/content checks. The kernel guarantee
 continues with the engine off.
 
+Adoption's in-worktree `.awa/lease.json` does not make an otherwise removable worktree permanently
+dirty. Ordinary `clean --path` tolerates and removes that file only after proving `.awa/` contains
+exactly one private, regular lease whose identity matches the live worktree path, branch, and Git
+common directory. A malformed/mismatched lease, link, permission drift, tracked `.awa` path, sibling
+file, or any unrelated untracked content retains the existing refuse/preserve behavior. Ignored
+operator content still follows the independent bundle-or-refuse gate.
+
 **Live evidence: RETAIN, narrowly.** A real Cursor Desktop explicit on-demand read returned the
 fixed guide; that read alone satisfies the plan's explicit-utility alternative. The resource added
 no metadata routing coverage beyond inline guidance, and no authenticated model-output matrix ran;
@@ -208,8 +215,8 @@ Before finish runs Git status or scans the tree, a read-only NUL-safe preflight 
 assume-unchanged, skip-worktree/sparse, or fsmonitor-hidden index state—including unchanged flagged
 entries—with one generic `index_visibility_flags` reason. It also refuses malformed or unavailable
 inspection, creates no challenge/dialogue, leaves the index and workspace unchanged, and reveals no
-flagged path or private value. This check is finish-only; ordinary `clean --path` behavior is
-unchanged.
+flagged path or private value. This check is finish-only; ordinary `clean --path` uses its separate
+active-root, commit-safety, dirty/ignored-state, and validated AWA-lease checks.
 Active merge, cherry-pick/revert sequence, rebase (merge/apply), `git am`, bisect, and notes-merge
 state is represented by one content-safe synthetic row per logical operation. Privately, AWA scans
 the complete per-worktree operation administration twice without following links and binds its

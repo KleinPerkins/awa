@@ -384,7 +384,17 @@ SHA-256 index checksums/extensions directly, reads flags with NUL delimiters and
 `core.fsmonitor=false`, and sets `GIT_OPTIONAL_LOCKS=0` plus `GIT_NO_LAZY_FETCH=1`. It therefore
 cannot refresh/write the index, lazy-fetch, or invoke fsmonitor/clean/smudge hooks. A refusal mints
 no challenge/dialogue and leaves the physical root in place. This gate is deliberately absent from
-ordinary `clean --path`, whose frozen v1 semantics are unchanged.
+ordinary `clean --path`, which retains its separate active-root, commit-safety, dirty, and
+bundle-or-refuse gates.
+
+Ordinary clean treats adoption's `.awa/lease.json` as removable AWA bookkeeping only after a narrow
+fail-closed proof: `.awa` is an owned private real directory containing exactly one owned private
+regular file; the bounded JSON lease has a valid schema and identity hash; its path, branch, and Git
+common directory match the live target; and Git tracks no `.awa` path. Validation and unlink use
+no-follow descriptors, run again under the shared lifecycle lock, and unlink only `lease.json`.
+Any malformed, linked, permission-drifted, identity-mismatched, additional, tracked, or concurrently
+changed state preserves the worktree. Unrelated untracked content remains dirty; unrelated ignored
+content remains bundle-or-refuse.
 
 Dispatcher output is a separate fail-safe boundary. One typed builder handles every success,
 refusal, error, uncertain result, cancellation, and correction after the one-use authorization

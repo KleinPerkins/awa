@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
 import subprocess
 from pathlib import Path
 
+from engine import lifecycle
 from .helpers import EngineTestCase, commit_all, git
 
 _IDENT = (
@@ -167,6 +169,134 @@ class CleanKernelTest(EngineTestCase):
         self.assertFalse(Path(wt).exists())
         ref = git(repo, "show-ref", "--verify", "--quiet", "refs/heads/feat/delete", check=False)
         self.assertNotEqual(ref.returncode, 0)
+
+    def test_adopted_merged_worktree_bundle_clean_owns_only_validated_lease(self) -> None:
+        """Regression: adoption's exact lease must not make a fully merged worktree unclean."""
+        repo = self.make_repo("adopted")
+        Path(repo, ".gitignore").write_text("scratch/\n", encoding="utf-8")
+        commit_all(repo, "ignore local scratch")
+        wt = self.add_worktree(repo, "feat/adopted")
+        self.commit_file(wt, "feature.txt", "feature\n", "feature")
+        self.squash_branch_to_main(repo, "feat/adopted")
+        lifecycle.adopt(wt)
+        scratch = Path(wt, "scratch", "cache.db")
+        scratch.parent.mkdir()
+        scratch.write_text("preserve me\n", encoding="utf-8")
+
+        result = self.run_clean(wt, "--bundle", "--delete-branch")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(Path(wt).exists())
+        ref = git(
+            repo,
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/feat/adopted",
+            check=False,
+        )
+        self.assertNotEqual(ref.returncode, 0)
+        manifests = list((self.state_home / "awa" / "recovery").glob("*.manifest.json"))
+        self.assertEqual(len(manifests), 1)
+        manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+        self.assertEqual(manifest["included"], ["scratch/"])
+        self.assertNotIn(".awa", "\n".join(manifest["included"]))
+
+    def test_adopted_unmerged_worktree_preserves_lease_on_commit_safety_refusal(self) -> None:
+        repo = self.make_repo("adopted-unmerged")
+        wt = self.add_worktree(repo, "feat/adopted-unmerged")
+        self.commit_file(wt, "feature.txt", "feature\n", "feature")
+        lifecycle.adopt(wt)
+
+        result = self.run_clean(wt, "--bundle", "--delete-branch")
+
+        self.assert_clean_refused(result)
+        self.assertTrue(Path(wt, ".awa", "lease.json").is_file())
+
+    def test_ignored_validated_lease_is_removed_not_recovery_bundled(self) -> None:
+        repo = self.make_repo("adopted-ignored")
+        Path(repo, ".gitignore").write_text(".awa/\nscratch/\n", encoding="utf-8")
+        commit_all(repo, "ignore AWA state and local scratch")
+        wt = self.add_worktree(repo, "feat/adopted-ignored")
+        self.commit_file(wt, "feature.txt", "feature\n", "feature")
+        self.squash_branch_to_main(repo, "feat/adopted-ignored")
+        lifecycle.adopt(wt)
+        scratch = Path(wt, "scratch", "cache.db")
+        scratch.parent.mkdir()
+        scratch.write_text("preserve me\n", encoding="utf-8")
+
+        result = self.run_clean(wt, "--bundle", "--delete-branch")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifests = list((self.state_home / "awa" / "recovery").glob("*.manifest.json"))
+        self.assertEqual(len(manifests), 1)
+        manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+        self.assertEqual(manifest["included"], ["scratch/"])
+
+    def test_adopted_worktree_with_extra_awa_content_refuses_and_preserves_all(self) -> None:
+        _, wt = self.single_commit_squash("adopted-extra", "feat/adopted-extra")
+        lifecycle.adopt(wt)
+        extra = Path(wt, ".awa", "operator-note.txt")
+        extra.write_text("not AWA-owned\n", encoding="utf-8")
+
+        result = self.run_clean(wt, "--bundle", "--delete-branch")
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("dirty worktree", result.stderr)
+        self.assertTrue(Path(wt, ".awa", "lease.json").is_file())
+        self.assertEqual(extra.read_text(encoding="utf-8"), "not AWA-owned\n")
+
+    def test_adopted_worktree_with_unrelated_untracked_file_refuses_and_preserves_all(self) -> None:
+        _, wt = self.single_commit_squash("adopted-untracked", "feat/adopted-untracked")
+        lifecycle.adopt(wt)
+        unrelated = Path(wt, "operator-note.txt")
+        unrelated.write_text("preserve me\n", encoding="utf-8")
+
+        result = self.run_clean(wt, "--bundle", "--delete-branch")
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("dirty worktree", result.stderr)
+        self.assertTrue(Path(wt, ".awa", "lease.json").is_file())
+        self.assertEqual(unrelated.read_text(encoding="utf-8"), "preserve me\n")
+
+    def test_malformed_or_identity_mismatched_lease_is_never_owned(self) -> None:
+        for case in ("malformed", "branch-mismatch"):
+            with self.subTest(case=case):
+                _, wt = self.single_commit_squash(
+                    f"adopted-{case}",
+                    f"feat/adopted-{case}",
+                )
+                lifecycle.adopt(wt)
+                lease_path = Path(wt, ".awa", "lease.json")
+                if case == "malformed":
+                    lease_path.write_text("{not-json\n", encoding="utf-8")
+                else:
+                    lease = json.loads(lease_path.read_text(encoding="utf-8"))
+                    lease["branch"] = "feat/some-other-branch"
+                    lease_path.write_text(json.dumps(lease), encoding="utf-8")
+                lease_path.chmod(0o600)
+
+                result = self.run_clean(wt, "--bundle", "--delete-branch")
+
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("dirty worktree", result.stderr)
+                self.assertTrue(lease_path.is_file())
+
+    def test_symlinked_lease_is_never_owned_or_followed(self) -> None:
+        _, wt = self.single_commit_squash("adopted-symlink", "feat/adopted-symlink")
+        lifecycle.adopt(wt)
+        lease_path = Path(wt, ".awa", "lease.json")
+        outside = Path(self._tmp.name, "outside-lease.json")
+        lease_path.replace(outside)
+        lease_path.symlink_to(outside)
+        before = outside.read_bytes()
+
+        result = self.run_clean(wt, "--bundle", "--delete-branch")
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("dirty worktree", result.stderr)
+        self.assertTrue(lease_path.is_symlink())
+        self.assertEqual(outside.read_bytes(), before)
 
     def test_atomic_delete_is_bound_to_captured_head(self) -> None:
         repo, wt = self.single_commit_squash("atomic", "feat/atomic")
