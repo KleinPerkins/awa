@@ -1230,7 +1230,8 @@ class RemovalJournalTest(FinishBase):
             install_id_value=challenge["install_id"],
             root_incarnation_value=challenge["root_incarnation"],
             git_dir_incarnation_value=challenge["git_dir_incarnation"],
-            fingerprint=challenge["fingerprint"], claim="direct",
+            fingerprint=challenge["fingerprint"],
+            execution_fingerprint=challenge["fingerprint"], claim="direct",
             branch_disposition_value=disposition,
             discard_count=len(inventory["entries"]))
         with FIN.common_dir_lock(target["common_dir"]):
@@ -1240,7 +1241,9 @@ class RemovalJournalTest(FinishBase):
     def _downgrade_journal_to_legacy(self, journal: dict) -> dict:
         legacy = dict(journal)
         old_path = Path(FIN.removal_journal_path(legacy["operation_id"]))
-        for key in ("install_id", "root_incarnation", "git_dir_incarnation"):
+        for key in (
+                "install_id", "root_incarnation", "git_dir_incarnation",
+                "execution_fingerprint"):
             legacy.pop(key)
         legacy["operation_id"] = FIN.finish_operation_id(
             **FIN._journal_identity(legacy))
@@ -1276,6 +1279,27 @@ class RemovalJournalTest(FinishBase):
         self.assertEqual(result["operation_id"], journal["operation_id"])
         self.assertTrue(Path(wt, "draft").exists())
         self.assertEqual(self.receipts(), [])
+
+    def test_pre_execution_fingerprint_journal_remains_compatible(self) -> None:
+        _, wt, _ = self.ephemeral_wt("prepared-pre-execution", {"draft": "keep"})
+        target, journal = self._prepare_only(wt, "prepared-pre-execution")
+        old_path = Path(FIN.removal_journal_path(journal["operation_id"]))
+        prior = dict(journal)
+        prior.pop("execution_fingerprint")
+        prior["operation_id"] = FIN.finish_operation_id(
+            **FIN._journal_identity(prior))
+        old_path.unlink()
+        FIN._write_removal_journal(prior)
+        read_back, status = FIN.read_removal_journal(prior["operation_id"])
+        self.assertEqual(status, "ok")
+        self.assertEqual(read_back, prior)
+        result = FIN.reconcile_removal(
+            root=wt, git_dir=target["git_dir"], common_dir=target["common_dir"],
+            branch=target["branch"], head=target["head"],
+            conversation_id="prepared-pre-execution", session_id="sess")
+        self.assertEqual(result["outcome"], "not_removed", result)
+        self.assertEqual(result["reason"], "pre_removal_interrupted")
+        self.assertTrue(Path(wt, "draft").exists())
 
     def test_same_path_replacement_is_uncertain_and_preserves_journal(self) -> None:
         repo, wt, _ = self.ephemeral_wt("same-path-replacement", {"draft": "discard"})
@@ -1584,7 +1608,9 @@ class RemovalJournalTest(FinishBase):
             root=wt, git_dir=target["git_dir"], common_dir=target["common_dir"],
             branch=target["branch"], head=target["head"], session_id="new",
             conversation_id="new-conversation")
-        Path(wt, "draft").write_text("two", encoding="utf-8")
+        # A new row is structural drift and must still refuse; content-only drift within the
+        # already displayed draft path is intentionally allowed by path-granularity Close.
+        Path(wt, "new-after-preview").write_text("two", encoding="utf-8")
         refused = FIN.finish_execute(
             root=wt, git_dir=target["git_dir"], common_dir=target["common_dir"],
             branch=target["branch"], head=target["head"], session_id="new",

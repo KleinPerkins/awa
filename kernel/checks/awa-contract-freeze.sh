@@ -422,6 +422,8 @@ if fin.OPERATION_CLASSIFICATION_VERSION != operation_contract["classification_ve
     errors.append("operation classification version drift")
 if fin.INVENTORY_FINGERPRINT_VERSION != operation_contract["inventory_fingerprint_version"]:
     errors.append("inventory fingerprint version drift")
+if fin.INVENTORY_STRUCTURE_VERSION != operation_contract["inventory_structure_version"]:
+    errors.append("inventory structure version drift")
 if fin.RETAIN_CLASSIFICATION_VERSION != operation_contract["retain_classification_version"]:
     errors.append("retain classification version drift")
 for name in (
@@ -444,8 +446,8 @@ for required in (
         errors.append(f"finish index-visibility contract missing {required}")
 expected = {
     "dialogue": {"schema","recognizer_version","conversation_id","session_id","state",
-                 "target","fingerprint","nonce","generation","hook_mode","visible","rows",
-                 "created_at_epoch","action_kind","action_commit_complete",
+                 "target","fingerprint","structure_fingerprint","nonce","generation",
+                 "hook_mode","visible","rows","created_at_epoch","action_kind","action_commit_complete",
                  "action_retain_complete","action_artifact_id"},
     "current_index": {"schema","root","session_id","conversation_id","generation","nonce",
                       "fingerprint","created_at_epoch"},
