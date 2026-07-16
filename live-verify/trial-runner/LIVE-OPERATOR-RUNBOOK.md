@@ -117,17 +117,25 @@ python3 "$FINISH" dispatch --current
 
 ### L3 — Retain (D2) — protected, restore-proven artifact
 
-Use `target-retain.wt`. Re-seed the dialogue there first (Mode B), or have the operator submit
-`I'm done` in a window opened on it (Mode A).
+Use `target-retain.wt`. The agent creates the unique target first, then seeds the dialogue there
+(Mode B), or has the operator submit `I'm done` in a window opened on it (Mode A).
+
+```bash
+WT="$HOME/.local/share/awa-finish-trial-uat/target-retain.wt"
+printf 'retain me\n' > "$WT/UAT-RETAIN-SENTINEL.txt"
+```
 
 - **Operator submits:** `Retain`
 - **Agent commands** (Retain requires an explicit displayed-row selection; secrets need
-  `--allow-secrets`; ignored rows are Retain-only):
+  `--allow-secrets`; ignored rows are Retain-only). Read the live warning and set `RETAIN_ROW` to
+  the number currently shown next to the exact path `UAT-RETAIN-SENTINEL.txt`; never assume an
+  ordinal because host/plugin rows may appear between turns:
 
 ```bash
 CONV=uat
-python3 "$FINISH" dispatch --current                       # -> selection state (never Close)
-python3 "$FINISH" retain --conversation-id "$CONV" --rows 1 # protected + restore-proven artifact
+python3 "$FINISH" dispatch --current                                  # -> selection state (never Close)
+RETAIN_ROW=<live-number-next-to-UAT-RETAIN-SENTINEL.txt>
+python3 "$FINISH" retain --conversation-id "$CONV" --rows "$RETAIN_ROW" # protected + restore-proven artifact
 python3 "$FINISH" retain-list                              # shows the artifact id + protected=true
 python3 "$FINISH" retain-restore --artifact-id <ID> --destination /tmp/awa-uat-restore
 python3 "$FINISH" retain-delete  --artifact-id <ID> --confirm <ID>   # delete requires the exact id again
@@ -141,12 +149,25 @@ python3 "$FINISH" retain-delete  --artifact-id <ID> --confirm <ID>   # delete re
 
 Use `target-commit.wt`; add a second commit + an extra file so there are rows to partition.
 
+- **Agent creates uniquely named target rows before preview:**
+
+```bash
+WT="$HOME/.local/share/awa-finish-trial-uat/target-commit.wt"
+printf 'commit me\n' > "$WT/UAT-MIXED-COMMIT-SENTINEL.txt"
+printf 'retain me\n' > "$WT/UAT-MIXED-RETAIN-SENTINEL.txt"
+```
+
 - **Operator submits:** `Mixed`
-- **Agent commands** (exact, disjoint, complete row partition):
+- **Agent commands** (exact, disjoint, complete row partition). Build both comma-separated lists
+  from the current display: `COMMIT_ROWS` includes the row next to
+  `UAT-MIXED-COMMIT-SENTINEL.txt`; `RETAIN_ROWS` includes the row next to
+  `UAT-MIXED-RETAIN-SENTINEL.txt`; and every other displayed row appears in exactly one list:
 
 ```bash
 python3 "$FINISH" dispatch --current
-python3 "$FINISH" mixed --conversation-id uat --commit-rows 1 --retain-rows 2 --message "uat mixed"
+COMMIT_ROWS=<live-comma-separated-Commit-row-numbers>
+RETAIN_ROWS=<live-comma-separated-Retain-row-numbers>
+python3 "$FINISH" mixed --conversation-id uat --commit-rows "$COMMIT_ROWS" --retain-rows "$RETAIN_ROWS" --message "uat mixed"
 ```
 
 - **Pass:** the commit-rows are delivered and the retain-rows become a protected artifact; a
@@ -156,11 +177,15 @@ python3 "$FINISH" mixed --conversation-id uat --commit-rows 1 --retain-rows 2 --
 ### L5 — Commit delivery (D2; D4 is the opt-in real-GitHub variant)
 
 - **Operator submits:** `Commit`
-- **Agent command (default — local/offline evaluator honesty):**
+- **Agent command (default — local/offline evaluator honesty).** Create a unique target, then use
+  the row number shown next to that exact path in the live display:
 
 ```bash
+WT="$HOME/.local/share/awa-finish-trial-uat/target-commit.wt"
+printf 'commit me\n' > "$WT/UAT-COMMIT-SENTINEL.txt"
 python3 "$FINISH" dispatch --current
-python3 "$FINISH" commit --conversation-id uat --rows 1 --message "uat commit"
+COMMIT_ROW=<live-number-next-to-UAT-COMMIT-SENTINEL.txt>
+python3 "$FINISH" commit --conversation-id uat --rows "$COMMIT_ROW" --message "uat commit"
 ```
 
   Against the disposable **bare** origin there is no real merged PR, so delivery **refuses honestly**
@@ -176,7 +201,8 @@ python3 "$FINISH" commit --conversation-id uat --rows 1 --message "uat commit"
 ```bash
 gh repo create KleinPerkins/awa-finish-uat-<ts> --private --source="$WT" --push   # merge-commit enabled
 # ...open + merge a real merge-commit PR into the default branch with complete checks...
-python3 "$FINISH" commit --conversation-id uat --rows 1 --message "uat commit"    # strict proof -> ok
+COMMIT_ROW=<live-number-next-to-UAT-COMMIT-SENTINEL.txt>
+python3 "$FINISH" commit --conversation-id uat --rows "$COMMIT_ROW" --message "uat commit" # strict proof -> ok
 gh repo delete KleinPerkins/awa-finish-uat-<ts> --yes                             # cleanup
 ```
 

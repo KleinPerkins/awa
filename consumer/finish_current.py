@@ -56,11 +56,13 @@ CURRENT_INDEX_SCHEMA = "awa_finish_current_index/v1"
 CHOICE_ENVELOPE_SCHEMA = "awa_finish_choice_envelope/v1"
 DIALOGUE_KEYS = frozenset({
     "schema", "recognizer_version", "conversation_id", "session_id", "state",
-    "target", "fingerprint", "nonce", "generation", "hook_mode", "visible",
+    "target", "fingerprint", "structure_fingerprint", "nonce", "generation",
+    "hook_mode", "visible",
     "rows", "created_at_epoch", "action_kind", "action_commit_complete",
     "action_retain_complete", "action_artifact_id",
 })
-LEGACY_DIALOGUE_KEYS = DIALOGUE_KEYS - {
+PRE_STRUCTURE_DIALOGUE_KEYS = DIALOGUE_KEYS - {"structure_fingerprint"}
+LEGACY_DIALOGUE_KEYS = PRE_STRUCTURE_DIALOGUE_KEYS - {
     "action_kind", "action_commit_complete", "action_retain_complete",
     "action_artifact_id",
 }
@@ -252,6 +254,10 @@ _FIXED_PUBLIC_MESSAGES = {
         "Removal could not be confirmed. The agent is stopping; this chat remains open."
     ),
 }
+_DRIFT_RECOVERY = (
+    "Something in this workspace changed since the warning. Start finish again to see a fresh "
+    "warning. For Commit, Retain, or Mixed, use only the row numbers that warning displays."
+)
 
 # Process-local handoff: the dispatcher selects one exact recovery anchor; the CLI deletes it only
 # after the complete closed public result has been written and flushed.
@@ -521,7 +527,8 @@ def _json_read(path: Path, schema: str) -> dict | None:
     actual = set(doc) if isinstance(doc, dict) else set()
     keyset_ok = keys is None or actual == keys
     if schema == DIALOGUE_SCHEMA and keys is not None:
-        keyset_ok = actual in (keys, LEGACY_DIALOGUE_KEYS)
+        keyset_ok = actual in (
+            keys, PRE_STRUCTURE_DIALOGUE_KEYS, LEGACY_DIALOGUE_KEYS)
     # canonical_choice was added within v1; accept its one pre-addition envelope shape while every
     # current writer and contract regression exact-pin the full emitted keyset.
     if schema == CHOICE_ENVELOPE_SCHEMA and keys is not None:
@@ -533,6 +540,9 @@ def _json_read(path: Path, schema: str) -> dict | None:
     )
     if not valid:
         return None
+    if schema == DIALOGUE_SCHEMA and "structure_fingerprint" not in doc:
+        doc = dict(doc)
+        doc["structure_fingerprint"] = ""
     if schema == DIALOGUE_SCHEMA and actual == LEGACY_DIALOGUE_KEYS:
         doc = dict(doc)
         doc.update({
@@ -1139,6 +1149,36 @@ def preview_payload(payload: dict, *, hook_mode: bool = False,
         inventory = fin.build_inventory(target["root"], target["git_dir"])
         if not inventory.get("safe"):
             raise FinishUXError("inventory_unsafe")
+        challenge, challenge_status = fin.read_challenge(conversation_id)
+        if (challenge_status != "ok" or challenge is None
+                or challenge.get("nonce") != result.get("nonce")
+                or challenge.get("generation") != result.get("generation")):
+            raise FinishUXError("preview_challenge_mismatch")
+        physical = fin.capture_physical_incarnations(
+            target["root"], target["git_dir"])
+        if physical != (
+                challenge.get("root_incarnation"),
+                challenge.get("git_dir_incarnation")):
+            raise FinishUXError("live_physical_incarnation_drift")
+        captured_fingerprint = fin.compute_fingerprint(
+            inventory, root=target["root"], git_dir=target["git_dir"],
+            common_dir=target["common_dir"], branch=target["branch"],
+            head=target["head"], membership=challenge["heartbeat_membership"],
+            root_incarnation=physical[0], git_dir_incarnation=physical[1])
+        captured_structure = fin.compute_structure_fingerprint(
+            inventory, root=target["root"], git_dir=target["git_dir"],
+            common_dir=target["common_dir"], branch=target["branch"],
+            head=target["head"], membership=challenge["heartbeat_membership"],
+            root_incarnation=physical[0], git_dir_incarnation=physical[1])
+        if (captured_fingerprint != result.get("fingerprint")
+                or captured_structure != result.get("structure_fingerprint")):
+            raise FinishUXError("live_inventory_drift")
+        row_fingerprints = fin.compute_row_fingerprints(inventory)
+        if len(row_fingerprints) != len(inventory["entries"]):
+            raise FinishUXError("live_inventory_drift")
+        for entry, row_fingerprint in zip(
+                inventory["entries"], row_fingerprints, strict=True):
+            entry["snapshot_fingerprint"] = row_fingerprint
         visible = [entry for entry in inventory["entries"]
                    if not entry["hidden"] and not entry.get("retained")]
         dialogue = {
@@ -1149,6 +1189,7 @@ def preview_payload(payload: dict, *, hook_mode: bool = False,
             "state": "awaiting_choice",
             "target": target,
             "fingerprint": result["fingerprint"],
+            "structure_fingerprint": result["structure_fingerprint"],
             "nonce": result["nonce"],
             "generation": result["generation"],
             "hook_mode": bool(hook_mode),
@@ -1420,26 +1461,27 @@ def _consume_choice_envelope(dialogue: dict) -> tuple[dict | None, str]:
     return doc, "ok"
 
 
-def _pending_choice_is_cancel(dialogue: dict, challenge: dict, answer: Any,
-                              attachments: Any) -> bool:
-    """Read-only: does the pending answer canonicalize to Cancel? Cancel is UNCONDITIONAL (plan:
-    'atomically delete the pending challenge and make no repo, Git, archive, or worktree change'),
-    so it alone skips the live-drift gate. Any uncertainty returns False, so the strict gate runs
-    for every other choice (and even for an unresolved Cancel envelope)."""
+def _pending_choice_drift_mode(dialogue: dict, challenge: dict, answer: Any,
+                               attachments: Any) -> str:
+    """Classify the read-only live-proof policy for the pending canonical choice."""
     try:
         if challenge.get("hook_mode"):
             _path, doc, _reason = _match_choice_envelope(dialogue)
             if doc is None:
-                return False
+                return "strict"
             choice, _ = canonicalize_choice(
                 doc.get("exact_text"), doc.get("attachments_present"))
             if "canonical_choice" in doc and doc.get("canonical_choice") != choice:
-                return False
-            return choice == "Cancel"
-        choice, _ = canonicalize_choice(answer, attachments)
-        return choice == "Cancel"
+                return "strict"
+        else:
+            choice, _ = canonicalize_choice(answer, attachments)
+        if choice == "Cancel":
+            return "cancel"
+        if choice in {"Retain", "Close"}:
+            return "content"
+        return "strict"
     except Exception:
-        return False
+        return "strict"
 
 
 def handle_hook_payload(payload: dict) -> dict:
@@ -1529,11 +1571,15 @@ def _selected(dialogue: dict, indices: list[int]) -> list[dict]:
 
 
 def _claim_action(conversation_id: str, expected_state: str, executing_state: str,
-                  lock_timeout: float = 30.0) -> dict:
+                  lock_timeout: float = 30.0, *,
+                  allow_content_drift: bool = False,
+                  selected_indices: list[int] | None = None) -> dict:
     dialogue = read_dialogue(conversation_id)
     if dialogue is None:
         raise FinishUXError("no_pending_dialogue")
-    fin, _challenge = _validate_dialogue_live(dialogue, expected_state=expected_state)
+    if dialogue.get("state") != expected_state:
+        raise FinishUXError("wrong_dialogue_state")
+    fin = _load_finish()
     with fin.common_dir_lock(
             dialogue["target"]["common_dir"], blocking=True, timeout=lock_timeout):
         current = read_dialogue(conversation_id)
@@ -1541,6 +1587,12 @@ def _claim_action(conversation_id: str, expected_state: str, executing_state: st
                 or current.get("nonce") != dialogue.get("nonce")
                 or current.get("state") != expected_state):
             raise FinishUXError("dialogue_transition_cas_mismatch")
+        fin, challenge = _bind_dialogue_challenge(
+            current, expected_state=expected_state, lock_held=True)
+        _assert_live_inventory(
+            fin, current, challenge, lock_held=True,
+            allow_content_drift=allow_content_drift,
+            selected_indices=selected_indices)
         current["state"] = executing_state
         write_dialogue(current)
         return current
@@ -1609,8 +1661,8 @@ def _bind_dialogue_challenge(dialogue: dict, *, expected_state: str,
                              lock_held: bool = False) -> tuple[Any, dict]:
     """Identity binding ONLY: resolve the challenge that this dialogue names, WITHOUT the live
     inventory/fingerprint drift gate. Every identity failure still refuses -- a Cancel may only
-    discard the exact challenge its dialogue is bound to. Callers that also require a byte-equal
-    live fingerprint pair this with `_assert_live_inventory` (see `_validate_dialogue_live`)."""
+    discard the exact challenge its dialogue is bound to. Callers that also require phase-specific
+    live proof pair this with `_assert_live_inventory` (see `_validate_dialogue_live`)."""
     if dialogue.get("state") != expected_state:
         raise FinishUXError(
             f"wrong_dialogue_state:{dialogue.get('state')}:{expected_state}")
@@ -1625,6 +1677,8 @@ def _bind_dialogue_challenge(dialogue: dict, *, expected_state: str,
     if (ch.get("nonce") != dialogue.get("nonce")
             or ch.get("generation") != dialogue.get("generation")
             or ch.get("fingerprint") != dialogue.get("fingerprint")
+            or ch.get("structure_fingerprint", "")
+            != dialogue.get("structure_fingerprint", "")
             or ch.get("root") != target.get("root")
             or ch.get("session_key") != fin._roots_module().session_key(
                 dialogue.get("session_id"))):
@@ -1632,12 +1686,16 @@ def _bind_dialogue_challenge(dialogue: dict, *, expected_state: str,
     return fin, ch
 
 
-def _assert_live_inventory(fin: Any, dialogue: dict, ch: dict, *,
-                           lock_held: bool = False) -> None:
-    """Enforce the byte-equal live fingerprint gate that a destructive/stateful choice requires and
-    that Cancel intentionally skips: inventory safety, recomputed-fingerprint equality, and
-    physical-incarnation equality. Raises live_inventory_unsafe / live_inventory_drift /
-    live_physical_incarnation_drift on any mismatch."""
+def _assert_live_inventory(
+        fin: Any, dialogue: dict, ch: dict, *, lock_held: bool = False,
+        allow_content_drift: bool = False,
+        selected_indices: list[int] | None = None) -> None:
+    """Enforce the phase-appropriate live proof and physical-incarnation gates.
+
+    Strict callers require the full fingerprint. Retain/Close callers may admit opaque regular-file
+    churn below an unchanged displayed directory after exact structural equality; Retain
+    additionally requires exact selected-row snapshots. Cancel intentionally skips this gate.
+    """
     target = dialogue["target"]
     inv = fin.build_inventory(target["root"], target["git_dir"])
     if not inv.get("safe"):
@@ -1654,16 +1712,46 @@ def _assert_live_inventory(fin: Any, dialogue: dict, ch: dict, *,
         head=target["head"], membership=membership,
         root_incarnation=physical[0], git_dir_incarnation=physical[1])
     if fingerprint != dialogue.get("fingerprint"):
-        raise FinishUXError("live_inventory_drift")
+        expected_structure = dialogue.get("structure_fingerprint")
+        if not allow_content_drift or not expected_structure:
+            raise FinishUXError("live_inventory_drift")
+        structure_fingerprint = fin.compute_structure_fingerprint(
+            inv, root=target["root"], git_dir=target["git_dir"],
+            common_dir=target["common_dir"], branch=target["branch"],
+            head=target["head"], membership=membership,
+            root_incarnation=physical[0], git_dir_incarnation=physical[1])
+        if structure_fingerprint != expected_structure:
+            raise FinishUXError("live_inventory_drift")
+        if selected_indices is not None:
+            selected = _selected(dialogue, selected_indices)
+            live_rows = [
+                row_fingerprint
+                for entry, row_fingerprint in zip(
+                    inv["entries"], fin.compute_row_fingerprints(inv), strict=True)
+                if not entry.get("hidden") and not entry.get("retained")
+            ]
+            if len(live_rows) != len(dialogue.get("visible") or []):
+                raise FinishUXError("live_inventory_drift")
+            for index, baseline in zip(selected_indices, selected, strict=True):
+                expected = baseline.get("snapshot_fingerprint")
+                if (not isinstance(expected, str)
+                        or re.fullmatch(r"[0-9a-f]{64}", expected) is None
+                        or live_rows[index - 1] != expected):
+                    raise FinishUXError("live_inventory_drift")
     if physical != (ch.get("root_incarnation"), ch.get("git_dir_incarnation")):
         raise FinishUXError("live_physical_incarnation_drift")
 
 
 def _validate_dialogue_live(dialogue: dict, *, expected_state: str,
-                            lock_held: bool = False) -> tuple[Any, dict]:
+                            lock_held: bool = False,
+                            allow_content_drift: bool = False,
+                            selected_indices: list[int] | None = None) -> tuple[Any, dict]:
     fin, ch = _bind_dialogue_challenge(
         dialogue, expected_state=expected_state, lock_held=lock_held)
-    _assert_live_inventory(fin, dialogue, ch, lock_held=lock_held)
+    _assert_live_inventory(
+        fin, dialogue, ch, lock_held=lock_held,
+        allow_content_drift=allow_content_drift,
+        selected_indices=selected_indices)
     return fin, ch
 
 
@@ -1889,6 +1977,12 @@ def _build_public_dispatch(
     }
     if fresh_preview_required is not None:
         result["fresh_preview_required"] = bool(fresh_preview_required)
+    if reason in {
+            PublicDispatchReason.LIVE_INVENTORY_UNSAFE,
+            PublicDispatchReason.LIVE_INVENTORY_DRIFT,
+            PublicDispatchReason.LIVE_PHYSICAL_DRIFT,
+            PublicDispatchReason.FINGERPRINT_MISMATCH}:
+        result["recovery"] = _DRIFT_RECOVERY
     if kernel_outcome is not None:
         result["outcome"] = {
             "outcome": "refused",
@@ -1946,13 +2040,16 @@ def dispatch_choice(conversation_id: str, answer: Any = None, *, attachments: An
             reason=_public_reason(
                 str(exc) if isinstance(exc, FinishUXError) else "",
                 PublicDispatchReason.REQUEST_REFUSED))
-    # Cancel is UNCONDITIONAL and mutates no repo/Git/archive/worktree state, so it must still
-    # discard the pending challenge under live_inventory_drift / live_physical_incarnation_drift
-    # (the agent legitimately edited the tree between warning and answer). Every OTHER choice keeps
-    # the strict byte-equal fingerprint gate, so Close/Commit/Retain/Mixed still refuse on drift.
-    if not _pending_choice_is_cancel(dialogue, challenge, answer, attachments):
+    # Cancel is unconditional and mutates no repository state. Retain and Close admit only
+    # structurally identical content drift; Retain's selected rows and Close's final proof are
+    # checked again in their phase-specific locked paths. Commit and Mixed remain fully strict.
+    drift_mode = _pending_choice_drift_mode(
+        dialogue, challenge, answer, attachments)
+    if drift_mode != "cancel":
         try:
-            _assert_live_inventory(fin, dialogue, challenge)
+            _assert_live_inventory(
+                fin, dialogue, challenge,
+                allow_content_drift=drift_mode == "content")
         except Exception as exc:
             return _build_public_dispatch(
                 PublicDispatchOutcome.REFUSED,
@@ -3320,7 +3417,8 @@ def create_retain(conversation_id: str, indices: list[int], *,
     if not _claimed:
         dialogue = _claim_action(
             conversation_id, "awaiting_retain_selection", "retaining",
-            lock_timeout=lock_timeout)
+            lock_timeout=lock_timeout, allow_content_drift=True,
+            selected_indices=indices)
         selected = _selected(dialogue, indices)
     target = dialogue["target"]
     fin = _load_finish()
@@ -3345,7 +3443,9 @@ def create_retain(conversation_id: str, indices: list[int], *,
             _validate_dialogue_live(
                 dialogue,
                 expected_state="executing_mixed" if _claimed else "retaining",
-                lock_held=True)
+                lock_held=True,
+                allow_content_drift=not _claimed,
+                selected_indices=None if _claimed else indices)
             live_inventory = fin.build_inventory(target["root"], target["git_dir"])
             if not live_inventory.get("safe"):
                 raise FinishUXError("retain_operation_inventory_unsafe")
@@ -4304,7 +4404,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(delete_retain(args.artifact_id, args.confirm),
                              indent=2, sort_keys=True))
         return 0
-    except Exception:
+    except Exception as exc:
         # Never append a contradictory workspace-preserved record after terminal dispatch output
         # was interrupted. The exact index remains for a later removed/uncertain recovery.
         if (args.cmd == "dispatch"
@@ -4312,7 +4412,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(json.dumps(_build_public_dispatch(
             PublicDispatchOutcome.REFUSED,
-            reason=PublicDispatchReason.OPERATION_FAILED), sort_keys=True))
+            reason=_public_reason(
+                str(exc) if isinstance(exc, FinishUXError) else "",
+                PublicDispatchReason.OPERATION_FAILED)), sort_keys=True))
         return 1
 
 

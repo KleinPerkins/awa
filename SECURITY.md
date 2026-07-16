@@ -349,10 +349,16 @@ heartbeat. (Contract cross-ref: `active_root.finish_session_waiver` + `finish_se
 The Phase-2 recognizer, operator loop, installed skill, prompt hook, and dialogue dispatcher are
 recall/UX components, not removal authority. A false-positive recognizer can only show the fixed
 warning. Removal still requires the Phase-1 kernel, under the shared lock, to consume a live
-challenge after exact bytes `Close` and a byte-identical final fingerprint. Commit, Retain, Mixed,
-and Cancel are case-insensitive non-destructive dialogue choices; this relaxation never applies to
-Close. Trusted booleans, “yes”, approval UI, router/model assertions, attachments, Close case/trim
-variants, and extra words cannot substitute.
+challenge after exact bytes `Close` and either a byte-identical full final fingerprint or a
+byte-identical path-granularity structural fingerprint. The structural alternative preserves the
+ordered displayed deletion scopes, each row-root type/mode/link target, every directory/symlink
+descendant, structure outside displayed directory scopes, Git path/mode/stage structure, operation
+state, target/incarnation, and session membership. It treats regular files below an already
+displayed directory as opaque contents of that authorized scope and omits their
+presence/name/mode/bytes plus ordinary index blob ids. Commit, Retain, Mixed, and Cancel are
+case-insensitive non-destructive dialogue choices; this relaxation never applies to Close. Trusted
+booleans, “yes”, approval UI, router/model assertions, attachments, Close case/trim variants, and
+extra words cannot substitute.
 
 The `beforeSubmitPrompt` hook is globally fail-open (`failClosed:false`) to avoid bricking all
 workspaces. Hook challenges are explicitly inactive until `dispatch --current` consumes one valid,
@@ -384,16 +390,37 @@ current-session/heartbeat projections are replaceable or prunable only after tha
 malformed mixed-boot evidence remains untouched. Dual timestamp writers sample once, and migration
 accepts only the known one-second legacy skew under the lock.
 
-The private finish fingerprint covers every filesystem object, not only Git-visible rows: encoded
+The private full finish fingerprint covers every filesystem object, not only Git-visible rows: encoded
 raw relative path, object type, permission bits, size, regular-file SHA-256, symlink target, exact
 Git status/index evidence, and every sorted descendant hidden behind one grouped ignored-directory
 row. Regular files use no-follow open plus lstat/fstat/re-lstat identity checks; directories are
-likewise opened and scanned by no-follow descriptors. Any drift, read error, mount boundary,
-escape, special file, or nested repository at any depth refuses. Private paths, link targets,
-content, and hashes never enter hook/operator diagnostics.
+likewise opened and scanned by no-follow descriptors. The companion structural fingerprint is
+derived from the same twice-stable capture. It exact-binds displayed scope order/path/root
+type/mode/link target, every directory/symlink descendant, structure outside displayed directory
+scopes, Git path/mode/stage structure, operation state, target identity, and membership. Regular
+files below a displayed directory are deliberately omitted because the warning names the whole
+directory as one deletion scope. Any capture drift, displayed-row insertion/removal/reorder,
+non-content structural drift, read error, mount boundary, escape, special file, or nested repository
+at any depth refuses. Private paths, link targets, content, and hashes never enter hook/operator
+diagnostics.
 The challenge also binds a non-empty install id and exact root/Git-admin physical incarnation.
 Execution rechecks all three under the shared lock; a reused path/branch/HEAD cannot alias the
 previewed physical worktree.
+
+This row-content tolerance is phase-specific. Retain may proceed only when the structural proof is
+unchanged and every explicitly selected row's full descendant/content proof still matches;
+selected-row changes refuse. Commit and Mixed retain their exact live-inventory rules. Retain
+completion cannot authorize removal: it latches a mandatory fresh full preview, and a later
+independently exact `Close` is still required. At Close, regular-file
+creation/removal/rename/mode changes/rewrites below an already displayed directory do not expand the
+path-granularity deletion authority; any new/reordered displayed row,
+scope/root-type/root-mode/root-link change, directory/symlink descendant change, structure outside
+a displayed directory, or Git
+structure change does and therefore refuses. A legacy challenge without a structural proof remains
+strict full-fingerprint-only. The removal journal separately records the final execution
+fingerprint so a failed remove can clear `prepared` only against the bytes actually checked
+immediately before the attempt. This does not weaken active-root/session protection, one-use
+generation binding, or literal-`Close`.
 
 Git index visibility is checked before every finish status/tree inventory and before any challenge
 is minted. The finish-only preflight refuses unchanged as well as modified assume-unchanged entries,
