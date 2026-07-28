@@ -24,6 +24,58 @@ SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # shellcheck source=kernel/lib/install-lib.sh
 . "$SRC_ROOT/kernel/lib/install-lib.sh"
 
+# True if $1 currently carries the macOS/BSD user-immutable flag (uchg). Always false on a
+# platform without `chflags` (e.g. Linux) or when the target does not exist yet. Lives here
+# (not kernel/lib/install-lib.sh) — see the NOTE beside awa_log/awa_warn/awa_die in that file.
+_awa_has_uchg() {
+  command -v chflags >/dev/null 2>&1 || return 1
+  [ -e "$1" ] || return 1
+  case "$(stat -f '%Sf' "$1" 2>/dev/null || true)" in
+    *uchg*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Write stdin to $1, backing up a differing prior copy first (idempotent: no-op if identical).
+# Defined here rather than kernel/lib/install-lib.sh purely to keep the macOS immutable-flag
+# handling out of kernel/ scope (see the NOTE in that file) — awa_mcp_add/awa_mcp_remove (defined
+# there) still call this by name and resolve it here since install.sh sources that file first.
+awa_write_backup() {
+  local dest="$1" tmp
+  tmp="$(mktemp)"
+  cat > "$tmp"
+  mkdir -p "$(dirname "$dest")"
+  if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then
+    rm -f "$tmp"; return 0
+  fi
+  if [ -f "$dest" ]; then
+    cp -p "$dest" "$dest.bak-$(date -u +%Y%m%d%H%M%S)" 2>/dev/null || true
+  fi
+  # macOS/BSD user-immutable flag (uchg) blocks rename(2) onto $dest even for the owning user
+  # (Cursor sets this on files it manages, e.g. ~/.cursor/mcp.json). Clear it immediately before
+  # the atomic rename -- a guarded no-op on Linux (no `chflags`) or when the flag isn't set -- and
+  # restore it after a successful write so AWA never permanently weakens a file's existing
+  # protection. A REMAINING failure (e.g. the system-immutable `schg`, which a non-root owner
+  # cannot clear) must not surface as a raw, unexplained `mv` error under the caller's `set -e`.
+  local had_uchg=0
+  if _awa_has_uchg "$dest"; then
+    had_uchg=1
+    chflags nouchg "$dest" 2>/dev/null || true
+  fi
+  if ! mv "$tmp" "$dest" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    if [ "$had_uchg" = "1" ]; then
+      chflags uchg "$dest" 2>/dev/null || \
+        awa_warn "could not restore the user-immutable (uchg) flag on $dest after a failed write"
+    fi
+    awa_die "cannot write $dest (rename failed — a system-immutable flag (schg) or permission issue may be blocking it; inspect with: ls -lO \"$dest\")"
+  fi
+  if [ "$had_uchg" = "1" ]; then
+    chflags uchg "$dest" 2>/dev/null || \
+      awa_warn "could not restore the user-immutable (uchg) flag on $dest after writing it"
+  fi
+}
+
 RUNTIME="$(awa_data_home)/awa/current"
 CONFIG_DIR="$(awa_config_home)/awa"
 ENV_FILE="$CONFIG_DIR/env"
@@ -147,7 +199,18 @@ EOF
 
   # Add-only MCP server (never clobbers other servers). Emit AWA_POLICY + AWA_GOVERNED_ROOT so
   # mode tools resolve the host-configured policy without patching _DEFAULT_POLICY at runtime.
-  local host_policy="${AWA_POLICY:-$default_policy}"
+  #
+  # AWA_POLICY ownership boundary: an EXPLICIT env value always wins (an operator/host deliberately
+  # (re)configuring it). Otherwise, PRESERVE whatever value is already recorded in mcp.json -- a
+  # reconcile invoked without that env exported (e.g. a bootstrap wrapper that doesn't re-export a
+  # host overlay's AWA_POLICY) must never silently downgrade an already-configured host policy back
+  # to the generic zero-governed-root default. Only a truly fresh entry (no prior value either way)
+  # falls back to the installed default template.
+  local host_policy="${AWA_POLICY:-}"
+  if [ -z "$host_policy" ]; then
+    host_policy="$(awa_mcp_env_get "$MCP_JSON" "awa" "AWA_POLICY")"
+  fi
+  [ -n "$host_policy" ] || host_policy="$default_policy"
   local governed_root="${AWA_GOVERNED_ROOT:-}"
   local mcp_env="AWA_POLICY=${host_policy}"
   [ -n "$governed_root" ] && mcp_env="${mcp_env}
@@ -409,12 +472,19 @@ PY
   return "$rc"
 }
 
-case "${1:-install}" in
-  install|"")   do_install 0 ;;
-  --repair)     do_install 1 ;;
-  --doctor)     do_doctor ;;
-  --check)      do_check ;;
-  --uninstall)  shift; do_uninstall "${1:-}" ;;
-  -h|--help)    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) awa_die "unknown argument: $1 (see --help)" ;;
-esac
+# Sourcing guard: allow tests to `source`/`.` this file (e.g. to exercise awa_write_backup in
+# isolation) without triggering an actual install. Every real invocation runs it as the top-level
+# script (`./install.sh`, `bash install.sh`, or install-lib.sh's own BASH_SOURCE idiom), where
+# BASH_SOURCE[0] always equals $0 — identical to how this script tests BASH_SOURCE when locating
+# its own SRC_ROOT above.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  case "${1:-install}" in
+    install|"")   do_install 0 ;;
+    --repair)     do_install 1 ;;
+    --doctor)     do_doctor ;;
+    --check)      do_check ;;
+    --uninstall)  shift; do_uninstall "${1:-}" ;;
+    -h|--help)    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) awa_die "unknown argument: $1 (see --help)" ;;
+  esac
+fi
