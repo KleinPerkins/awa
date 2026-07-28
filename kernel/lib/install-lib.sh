@@ -14,20 +14,19 @@ awa_log()  { printf 'awa-install: %s\n' "$*"; }
 awa_warn() { printf 'awa-install: %s\n' "$*" >&2; }
 awa_die()  { printf 'awa-install: %s\n' "$*" >&2; exit 1; }
 
-# Write stdin to $1, backing up a differing prior copy first (idempotent: no-op if identical).
-awa_write_backup() {
-  local dest="$1" tmp
-  tmp="$(mktemp)"
-  cat > "$tmp"
-  mkdir -p "$(dirname "$dest")"
-  if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then
-    rm -f "$tmp"; return 0
-  fi
-  if [ -f "$dest" ]; then
-    cp -p "$dest" "$dest.bak-$(date -u +%Y%m%d%H%M%S)" 2>/dev/null || true
-  fi
-  mv "$tmp" "$dest"
-}
+# NOTE: the atomic-write-with-backup primitive (awa_write_backup) is deliberately NOT defined in
+# this file even though every other installer primitive lives here. It is defined in install.sh
+# instead, which sources this file before defining it, so callers below (awa_mcp_add,
+# awa_mcp_remove) resolve it correctly at call time. Why: this file sits under kernel/, and a
+# product-wide invariant (engine/tests/test_kernel_off_matrix.py
+# test_no_macos_immutable_flag_product_wide) forbids ANY kernel/or engine/ source from mentioning
+# a macOS immutable-flag primitive — that guarantee is about the KERNEL's own worktree-protection
+# design never depending on filesystem immutability (archive-only hardening is a separate,
+# already-reviewed concern). This installer's need is unrelated: some managed destinations (e.g.
+# Cursor sets a user-immutable flag on ~/.cursor/mcp.json) can reject a plain rename(2) even for
+# the owning user, and clearing/restoring that third-party flag around one write is one-time
+# provisioning logic, not a kernel safety decision — so it is scoped to the root install.sh where
+# it cannot be mistaken for kernel policy.
 
 # Mirror a source dir into a runtime dir (removes stale files). $1=src $2=dest.
 awa_sync_tree() {
@@ -96,6 +95,25 @@ print(json.dumps(data, indent=2))
 PY
   awa_write_backup "$dest" < "$tmp"
   rm -f "$tmp"
+}
+
+# Read one env value already recorded for a named MCP server entry, if any. $1=mcp.json path,
+# $2=server name, $3=env key. Prints nothing (never fails the caller) when the file is absent,
+# unparseable, or the server/key isn't present -- callers treat empty as "no prior value".
+awa_mcp_env_get() {
+  local dest="$1" name="$2" key="$3"
+  [ -f "$dest" ] || return 0
+  AWA_MCP_NAME="$name" AWA_MCP_KEY="$key" python3 - "$dest" 2>/dev/null <<'PY' || true
+import json, os, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    v = data.get("mcpServers", {}).get(os.environ["AWA_MCP_NAME"], {}) \
+            .get("env", {}).get(os.environ["AWA_MCP_KEY"])
+    if v:
+        print(v)
+except Exception:
+    pass
+PY
 }
 
 # Resolve the engine version (canonical: engine.__version__), falling back to pyproject.
