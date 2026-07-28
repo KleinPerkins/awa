@@ -295,5 +295,58 @@ class TestInstallPolicyPreservation(unittest.TestCase):
         self.assertTrue(policy.endswith("kernel/policy/default-worktree-policy.yml"), policy)
 
 
+class TestInstallPolicyAppliesToModesFileSync(unittest.TestCase):
+    """FIX 2 completeness gap caught by pre-merge security-review + bugbot passes:
+    ensure_modes_file() and configure_dashboard_refresh() must consume the SAME preserved
+    host_policy as the MCP entry, not silently keep falling back to
+    ``${AWA_POLICY:-$default_policy}`` / the installed default. The installed default policy
+    ships with NO ``modes_file:`` pointer (by design -- see
+    kernel/policy/default-worktree-policy.yml), so before this fix, a reconcile run without
+    AWA_POLICY exported (exactly what `bootstrap.sh --reconcile` does) would silently no-op
+    ensure_modes_file every time instead of syncing the host's real, already-configured modes
+    file -- only a rare direct `AWA_POLICY=... bash install.sh` invocation actually worked."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="awa-install-modes-test.")
+        self.addCleanup(self.tmp.cleanup)
+        home = Path(self.tmp.name)
+        self.env = dict(os.environ)
+        self.env.update({
+            "HOME": str(home),
+            "XDG_DATA_HOME": str(home / ".local" / "share"),
+            "XDG_CONFIG_HOME": str(home / ".config"),
+            "XDG_STATE_HOME": str(home / ".local" / "state"),
+        })
+        self.overlay_policy = home / "overlay-worktree-policy.yml"
+        # A modes_file pointer is what makes ensure_modes_file's behavior actually diverge
+        # between "the preserved overlay" and "the installed default" (the default declares none).
+        self.overlay_policy.write_text(_POLICY_YAML.format(root=home) + "modes_file: modes.yml\n")
+        self.modes_file = home / "modes.yml"  # relative pointer resolves next to the policy file
+
+    def _install(self, *, awa_policy: str | None) -> subprocess.CompletedProcess:
+        env = dict(self.env)
+        if awa_policy is None:
+            env.pop("AWA_POLICY", None)
+        else:
+            env["AWA_POLICY"] = awa_policy
+        return subprocess.run([str(INSTALL_SH)], capture_output=True, text=True, env=env)
+
+    def test_reconcile_without_env_still_syncs_the_overlays_modes_file(self) -> None:
+        first = self._install(awa_policy=str(self.overlay_policy))
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertTrue(self.modes_file.exists(),
+                         "an explicit AWA_POLICY with a modes_file pointer must sync it on install")
+        self.modes_file.unlink()  # prove the SECOND run is what (re-)creates it, not a stale leftover
+
+        second = self._install(awa_policy=None)  # simulates bootstrap's suppressed-env reconcile
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertTrue(
+            self.modes_file.exists(),
+            "a reconcile without AWA_POLICY exported must still resolve the PRESERVED host "
+            "policy (with its modes_file pointer) for ensure_modes_file, not silently fall back "
+            "to the installed default (which has no modes_file pointer and would no-op)",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

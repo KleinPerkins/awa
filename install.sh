@@ -171,6 +171,20 @@ do_install() {
   local default_policy="$RUNTIME/kernel/policy/default-worktree-policy.yml"
   mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR" 2>/dev/null || true
 
+  # AWA_POLICY ownership boundary: an EXPLICIT env value always wins (an operator/host deliberately
+  # (re)configuring it). Otherwise, PRESERVE whatever value is already recorded in mcp.json -- a
+  # reconcile invoked without that env exported (e.g. a bootstrap wrapper that doesn't re-export a
+  # host overlay's AWA_POLICY) must never silently downgrade an already-configured host policy back
+  # to the generic zero-governed-root default. Only a truly fresh entry (no prior value either way)
+  # falls back to the installed default template. Resolved ONCE here and reused by every
+  # policy-consuming step below (modes-file sync, the MCP entry, dashboard rendering) so a single
+  # install/reconcile run can never have them disagree with each other.
+  local host_policy="${AWA_POLICY:-}"
+  if [ -z "$host_policy" ]; then
+    host_policy="$(awa_mcp_env_get "$MCP_JSON" "awa" "AWA_POLICY")"
+  fi
+  [ -n "$host_policy" ] || host_policy="$default_policy"
+
   # Config env (host overlay may append env.d files; we keep AWA_GOVERNED_ROOT commented here).
   # Deterministic content (no timestamp) so a re-install is a true no-op (idempotency).
   awa_write_backup "$ENV_FILE" <<EOF
@@ -184,7 +198,7 @@ EOF
 
   # Ensure the host-configured per-repo modes file exists + is normalized (runs on install AND
   # --repair). ZERO-LINK: path/default resolved from the host policy's modes_file pointer, not here.
-  ensure_modes_file "${AWA_POLICY:-$default_policy}"
+  ensure_modes_file "$host_policy"
 
   # Cursor hooks (merged, soft backstop) — the installed hooks reference the installed kernel.
   AWA_HOOKS_JSON="$HOOKS_JSON" "$RUNTIME/kernel/hooks/install-hooks.sh"
@@ -199,18 +213,7 @@ EOF
 
   # Add-only MCP server (never clobbers other servers). Emit AWA_POLICY + AWA_GOVERNED_ROOT so
   # mode tools resolve the host-configured policy without patching _DEFAULT_POLICY at runtime.
-  #
-  # AWA_POLICY ownership boundary: an EXPLICIT env value always wins (an operator/host deliberately
-  # (re)configuring it). Otherwise, PRESERVE whatever value is already recorded in mcp.json -- a
-  # reconcile invoked without that env exported (e.g. a bootstrap wrapper that doesn't re-export a
-  # host overlay's AWA_POLICY) must never silently downgrade an already-configured host policy back
-  # to the generic zero-governed-root default. Only a truly fresh entry (no prior value either way)
-  # falls back to the installed default template.
-  local host_policy="${AWA_POLICY:-}"
-  if [ -z "$host_policy" ]; then
-    host_policy="$(awa_mcp_env_get "$MCP_JSON" "awa" "AWA_POLICY")"
-  fi
-  [ -n "$host_policy" ] || host_policy="$default_policy"
+  # (host_policy resolved once above, per the AWA_POLICY ownership boundary described there.)
   local governed_root="${AWA_GOVERNED_ROOT:-}"
   local mcp_env="AWA_POLICY=${host_policy}"
   [ -n "$governed_root" ] && mcp_env="${mcp_env}
@@ -218,7 +221,7 @@ AWA_GOVERNED_ROOT=${governed_root}"
   AWA_MCP_ENV="$mcp_env" awa_mcp_add "$MCP_JSON" "awa" "$RUNTIME/bin/awa-engine.sh" "mcp-serve"
   awa_log "registered MCP server 'awa' -> $MCP_JSON"
 
-  configure_dashboard_refresh "$default_policy"
+  configure_dashboard_refresh "$host_policy"
 
   # Self-describing release pointer. `installed_at` is preserved across re-installs whose
   # identity (version/commit/runtime/source/policy) is unchanged, so a re-install is a no-op.
