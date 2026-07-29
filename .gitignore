@@ -39,6 +39,10 @@ id_ed25519*
 credentials
 credentials.*
 service-account*.json
+
+# machine-local continual-learning memory — never commit
+agent-learnings.md
+
 # OS / editor runtime cruft
 .DS_Store
 ._*

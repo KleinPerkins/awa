@@ -1,29 +1,5 @@
-## Learned User Preferences
+## Continual-learning memory
 
-- Use a plan-first workflow for AWA features: draft a rigorous plan, run multi-perspective review swarms, fold feedback into v2/v3, then implement.
-- When executing an approved plan, do not edit the plan file; plan todos are the authoritative worklist.
-- Work autonomously through obstacles to implemented, verified, and merged state; distinguish true blockers from approval-grantable actions.
-- Large AWA builds and pre-merge work: use multitask mode with parallel subagents on disjoint work; monitor and close them actively, with one writer per working tree.
-- Before merge, run code-review and hardening swarms; iterate when the operator requests another pass.
-- Verify reported failures are true positives before acting or reporting; never claim root cause from an adjacent fix or inference without causal evidence; confirm built-vs-gaps against disk and gates, then lock accepted fixes with biting regressions.
-- For AWA, prioritize determinism, reliability, and consistency over convenience; destructive-path uncertainty must preserve the workspace.
-- Do not claim live Desktop or hook proof from tests, agent rehearsal, or prompt-text matches; require the operator's real prompt and result-side Cursor hook evidence, never error strings merely quoted in a prompt.
-- Prefer the simplest root-bound, proof-checked AWA mechanism; reject identity or lineage designs that depend on unstable Cursor chat IDs or complex actor/session control planes.
-- AWA implementation/refactor sessions: launch with project root = KleinPerkins/awa product repo, not disposable UAT fixtures or the ~/dev host overlay.
-- For live Desktop UAT/trial sessions, scope targeted retests to addressed behavior; use isolated instructions/orchestrator, append-only evidence-ledger, and execution chats because chats cannot see each other's state; every test must provide a complete copy-paste block with New Agent → directory → branch → Local/Worktree/Cloud → exact prompt → expected output, choose live inventory rows by path from the displayed inventory rather than hard-coding row numbers, never assume which prior chat the operator means, restate current state each turn, and validate operator evidence on disk before relaying a vetted summary to the ledger.
-- AWA dashboard actions must run in-canvas through the background bridge, never open a new foreground chat; show each worktree's size on disk with adaptive KB/MB/GB units.
-
-## Learned Workspace Facts
-
-- KleinPerkins/awa is the SSP product (kernel + engine + dashboard + contract); KleinPerkins/dev is the thin host overlay (_ops delegators, `worktree-policy.yml`, `worktree-modes.yml`).
-- Runtime installs to `~/.local/share/awa/current`; GCB shelf at KleinPerkins/skills `global/tools/awa` (Flavor-2 standalone-release pointer).
-- Per-repo ON/OFF modes live in a tool-owned `awa-modes/v1` file; host policy references it via `modes_file:` (LD overlay uses `default_mode: on`). ON = a confirmed mutating command on an included primary returns an enforced hook `deny` (Cursor enforces `deny`, treats `ask` as non-blocking — L4); only exact `off` disables; Cloud/background agents degrade to allow and their autonomous commit/push choices are outside AWA's authority; `mode repair` migrates legacy `ask_on` to `on`.
-- Kernel-first invariant: never weaken engine-off safety; if Cursor fails before invoking the Desktop shell hook, AWA cannot pre-block that command and the global hook intentionally fails open, while recovery, detection, and cleanup refusal remain active; `make verify` is the repo gate.
-- Product repo mutations use `_ops/bin/dev-worktree.sh ensure` + linked worktree (~/dev is worktree-excluded — edit host overlay in place on a branch); MCP mode tools mutate only the host modes file — never repos, git state, or primary checkouts.
-- Documented guard residual: cross-cwd `git -C <primary>` from a linked worktree is not classified by payload cwd (see SECURITY.md shell-gate scope).
-- Root-bound finish is kernel-authorized; finish wording (`consumer/finish_current.py`, `beforeSubmitPrompt`) only previews and never itself authorizes removal. `Commit`/`Retain`/`Mixed`/`Cancel` normalize case/whitespace; only an exact, case-sensitive, standalone `Close` triggers removal, and after any Commit/Retain/Mixed the next prompt requires a fresh exact `Close` (a prior one is discarded there).
-- Commit requires an exact-head merge-commit PR incorporated into the live default branch with passing checks; Retain creates a protected restore-proven local artifact; ignored rows are Retain-only; removal is zero-network. Finish tolerates only opaque regular-file churn inside an already displayed, unselected directory scope for Retain/exact Close; selected-row, structural, session, or authorization drift and Commit/Mixed content drift refuse and preserve the workspace.
-- Finish CLIs reject option abbreviations and expose only fixed closed JSON; removed-state and branch truth come from durable index/journal evidence, never invented fallbacks.
-- `dev-worktree.sh clean --force` only overrides the ignored-files gate (`--bundle` archives first) and does not bypass commit-safety; cleanup may remove only precisely validated AWA-owned `.awa` bookkeeping before the dirtiness check, while malformed or extra contents still refuse; recovery archives live under `${XDG_STATE_HOME:-~/.local/state}/awa/recovery`, with no built-in TTL/prune verb.
-- AWA Desktop UAT guard tests must run with the agent's Environment dropdown set to Local (not Worktree) to exercise the primary-checkout hard-deny path — Worktree mode instead exercises the allow/recovery path; always verify guard pass/fail against actual `git log`/on-disk state, not the agent's self-reported text.
-- The scripted PM trial (`make trial`) requires exact phrase matches to advance (e.g. "okay", not "ok"), asks hidden per-step facilitator yes/no questions that appear only in the facilitator log file (not the main terminal), and refuses to overwrite an existing `TRIAL_FACILITATOR_LOG` file — a failed/aborted run needs a fresh log filename on retry — all recurring sources of operator confusion.
+Machine-mined preferences and workspace facts for this workspace now live in
+`agent-learnings.md` (machine-local, git-ignored, never committed). Agents load it as
+ancestor context when present; this file holds only hand-authored, human-curated guidance.
