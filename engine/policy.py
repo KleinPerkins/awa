@@ -275,15 +275,18 @@ def classify(
     hooks_path: str = "",
     has_origin: bool = True,
     is_root: bool = False,
+    is_standalone: bool = False,
 ) -> Classification:
     """Generic classification. `rel` is the repo path relative to the governed root.
 
     Order (first match wins): not-git -> explicit OFF -> legacy overrides -> SAFETY
     excludes (umbrella / governed-marker / foreign-hook / read-only) -> any explicit
     non-off mode (ON / typo / legacy) -> exclude globs -> no-origin advisory ->
-    eligibility (include glob or policy default) mapped through default_mode. One
-    fail-safe rule: only `off` disables; ANY other explicit value -> INCLUDE.
-    Safety-excludes beat an explicit ON; explicit OFF beats everything.
+    explicit include-glob eligibility -> standalone advisory (outside every governed
+    root) -> policy-default eligibility, mapped through default_mode. One fail-safe
+    rule: only `off` disables; ANY other explicit value -> INCLUDE. Safety-excludes
+    beat an explicit ON; explicit OFF beats everything; an explicit include-glob match
+    beats standalone.
     """
     if toplevel is None:
         return Classification(NOT_GIT, "not a git repository")
@@ -325,6 +328,9 @@ def classify(
 
     if _match_any(rel, cfg.include):
         return _eligible("included by workspace policy", cfg)
+
+    if is_standalone:
+        return Classification(ADVISORY, "standalone repo (outside every governed root)")
 
     if cfg.default == INCLUDE:
         return _eligible("policy default: include", cfg)

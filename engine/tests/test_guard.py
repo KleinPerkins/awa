@@ -51,6 +51,25 @@ detectors:
     - husky
 """
 
+# Same shape as _POLICY_YAML, but WITHOUT the catch-all `include: ['*']` glob. Needed for
+# is_standalone regression coverage: _POLICY_YAML's include:['*'] matches ANY non-'.' rel,
+# so classify()'s include-glob check (which the new is_standalone branch sits immediately
+# after) would fire first and mask the standalone branch entirely. PolicyConfig.include
+# defaults to [] when omitted, so _match_any never matches here.
+_POLICY_YAML_NO_INCLUDE_GLOB = """\
+version: 1
+governed_roots:
+  - {root}
+default: include
+exclude:
+  - .
+detectors:
+  governed_markers:
+    - _ops/POLICY.md
+  foreign_hook_frameworks:
+    - husky
+"""
+
 
 class TestMutatingClassifier(unittest.TestCase):
     def test_adversarial_bypasses(self):
@@ -144,6 +163,12 @@ class TestDecideShellDegraded(EngineTestCase):
         p.close()
         return p.name
 
+    def _policy_for_no_include_glob(self, root: str) -> str:
+        p = tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False)
+        p.write(_POLICY_YAML_NO_INCLUDE_GLOB.format(root=root))
+        p.close()
+        return p.name
+
     def test_primary_mutation_denies(self):
         repo = self.make_repo()
         pol = self._policy_for(self._tmp.name)
@@ -156,6 +181,30 @@ class TestDecideShellDegraded(EngineTestCase):
         pol = self._policy_for(self._tmp.name)
         d = guard.decide_shell(repo, "git status", pol)
         self.assertEqual(d.permission, "allow")
+
+    def test_standalone_repo_with_origin_allows_not_denies(self):
+        """Regression: a standalone clone (e.g. under /tmp) with an origin remote, OUTSIDE
+        every governed root and matching no include-glob, must classify advisory -> allow,
+        never include -> deny. Uses the dedicated no-include-glob policy (NOT the shared
+        _policy_for fixture) because that fixture's include: ['*'] would match first and
+        mask this exact code path -- see the swarm-review note above this test."""
+        repo = self.make_standalone_repo()
+        pol = self._policy_for_no_include_glob(self._tmp.name)
+        d = guard.decide_shell(repo, "git commit -am x", pol)
+        self.assertEqual(d.permission, "allow")
+        self.assertEqual(d.classification, "advisory")
+
+    def test_standalone_repo_without_origin_allows(self):
+        """Control, not is_standalone coverage: a standalone repo with NO origin remote hits
+        the pre-existing 'no origin remote' advisory branch (engine/policy.py:323-324), which
+        fires before the include-glob check and before is_standalone regardless of which
+        policy fixture is used. This proves that pre-existing behavior still holds for a
+        standalone repo; the test above is the one that actually covers is_standalone."""
+        repo = self.make_standalone_repo(origin=False)
+        pol = self._policy_for(self._tmp.name)
+        d = guard.decide_shell(repo, "git commit -am x", pol)
+        self.assertEqual(d.permission, "allow")
+        self.assertEqual(d.classification, "advisory")
 
     def test_worktree_allows_without_engine(self):
         repo = self.make_repo()

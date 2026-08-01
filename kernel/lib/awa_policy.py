@@ -276,14 +276,16 @@ def classify(
     hooks_path: str = "",
     has_origin: bool = True,
     is_root: bool = False,
+    is_standalone: bool = False,
 ) -> tuple[str, str]:
     """Generic classification. Order (first match wins) mirrors engine/policy.py.
 
     not-git -> explicit OFF -> legacy overrides -> SAFETY excludes (umbrella /
     governed-marker / foreign-hook / read-only) -> any explicit non-off mode (ON / typo /
-    legacy) -> exclude globs -> no-origin advisory -> eligibility (include glob or policy
-    default) mapped through default_mode. One fail-safe rule: only `off` disables; ANY
-    other explicit value -> INCLUDE. Safety-excludes beat explicit ON; OFF beats all.
+    legacy) -> exclude globs -> no-origin advisory -> explicit include-glob eligibility ->
+    standalone advisory (outside every governed root) -> policy-default eligibility. One
+    fail-safe rule: only `off` disables; ANY other explicit value -> INCLUDE. Safety-excludes
+    beat explicit ON; OFF beats all; an explicit include-glob match beats standalone.
     """
     if toplevel is None:
         return (NOT_GIT, "not a git repository")
@@ -325,6 +327,9 @@ def classify(
 
     if _match_any(rel, cfg.include):
         return _eligible("included by workspace policy", cfg)
+
+    if is_standalone:
+        return (ADVISORY, "standalone repo (outside every governed root)")
 
     if cfg.default == INCLUDE:
         return _eligible("policy default: include", cfg)
@@ -440,6 +445,7 @@ def main(argv: list[str]) -> int:
         cls, reason = classify(
             rel, toplevel, cfg,
             hooks_path=hooks_path, has_origin=has_origin, is_root=(rel == "."),
+            is_standalone=(gr == ""),
         )
         print("\t".join([cls, reason, rel, gr]))
         return 0

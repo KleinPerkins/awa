@@ -44,13 +44,17 @@ class TestKernelPolicyParity(unittest.TestCase):
         self._plain.cleanup()
         self._gov.cleanup()
 
-    def _assert_agree(self, rel, toplevel, cfg_kw, *, hooks_path="", has_origin=True, is_root=False):
+    def _assert_agree(self, rel, toplevel, cfg_kw, *, hooks_path="", has_origin=True,
+                       is_root=False, is_standalone=False):
         e_cfg, k_cfg = _make_cfgs(**cfg_kw)
         e = engine_policy.classify(rel, toplevel, e_cfg, hooks_path=hooks_path,
-                                   has_origin=has_origin, is_root=is_root)
+                                   has_origin=has_origin, is_root=is_root,
+                                   is_standalone=is_standalone)
         k_cls, k_reason = awa_policy.classify(rel, toplevel, k_cfg, hooks_path=hooks_path,
-                                              has_origin=has_origin, is_root=is_root)
-        label = f"rel={rel!r} hooks={hooks_path!r} origin={has_origin} root={is_root} cfg={cfg_kw}"
+                                              has_origin=has_origin, is_root=is_root,
+                                              is_standalone=is_standalone)
+        label = (f"rel={rel!r} hooks={hooks_path!r} origin={has_origin} root={is_root} "
+                 f"standalone={is_standalone} cfg={cfg_kw}")
         self.assertEqual(e.classification, k_cls, f"class mismatch: {label}")
         self.assertEqual(e.reason, k_reason, f"reason mismatch: {label}")
         return k_cls
@@ -105,6 +109,21 @@ class TestKernelPolicyParity(unittest.TestCase):
             ("proj", self.plain, {"include": ["proj"], "default_mode": "ask_on"}, {}, "include"),
             # no-origin stays advisory regardless of default_mode (even off can't override)
             ("proj", self.plain, {"default": "include", "default_mode": "off"}, {"has_origin": False}, "advisory"),
+            # --- is_standalone (outside every governed root) ---
+            # THE bug this fix targets: standalone + origin + no include-glob + default=include
+            # must go advisory, not include.
+            ("proj", self.plain, {"default": "include"}, {"is_standalone": True}, "advisory"),
+            # Control: identical cfg, NOT standalone -> unaffected (governed primary stays include).
+            ("proj", self.plain, {"default": "include"}, {"is_standalone": False}, "include"),
+            # standalone + no origin -> advisory from the EARLIER no-origin branch (both mirrors
+            # must still agree on the reason string, not just the classification).
+            ("proj", self.plain, {"default": "include"},
+             {"is_standalone": True, "has_origin": False}, "advisory"),
+            # An explicit include-glob match beats is_standalone (operator intent wins).
+            ("proj", self.plain, {"include": ["proj"]}, {"is_standalone": True}, "include"),
+            # A safety-exclude (self-governed marker) beats is_standalone too.
+            ("proj", self.gov, {"governed_markers": ["_ops/POLICY.md"]},
+             {"is_standalone": True}, "exclude"),
         ]
         for rel, toplevel, cfg_kw, kwargs, expected in cases:
             got = self._assert_agree(rel, toplevel, cfg_kw, **kwargs)
@@ -205,6 +224,55 @@ class TestKernelPolicyParity(unittest.TestCase):
             self.assertEqual(e_cfg.modes, k_cfg.modes)
             self.assertEqual(e_cfg.default_mode, k_cfg.default_mode)
             self.assertEqual(e_cfg.default_mode, "on")
+
+
+from engine import guard as engine_guard  # noqa: E402  (is_standalone resolver parity)
+
+
+class TestStandaloneResolverParity(unittest.TestCase):
+    """Resolver-level parity: _assert_agree above hand-feeds is_standalone as a literal
+    bool, so it can never catch the kernel and engine DISAGREEING on which repos are
+    standalone. This proves the two independent computations -- kernel's
+    resolve_governed_root() and engine's guard._is_standalone() -- agree on a real
+    filesystem path, including one reached through a symlink (the exact class of bug a
+    plain os.path.abspath, instead of realpath, would miss).
+    """
+
+    def setUp(self):
+        self._real_root = tempfile.TemporaryDirectory()
+        self._link_holder = tempfile.TemporaryDirectory()
+        self.real_root = self._real_root.name
+        self.repo = str(Path(self.real_root) / "proj")
+        os.makedirs(self.repo, exist_ok=True)
+        # A symlinked ALIAS to the governed root, from an unrelated location. governed_roots
+        # below names only the REAL root -- never the alias -- so only realpath resolution
+        # (not string-prefix matching) can tell a path through the alias is inside it.
+        self.root_alias = str(Path(self._link_holder.name) / "root-alias")
+        os.symlink(self.real_root, self.root_alias)
+
+    def tearDown(self):
+        self._real_root.cleanup()
+        self._link_holder.cleanup()
+
+    def _agree(self, toplevel, governed_roots):
+        e_cfg, k_cfg = _make_cfgs(governed_roots=governed_roots)
+        engine_standalone = engine_guard._is_standalone(toplevel, e_cfg)
+        kernel_standalone = awa_policy.resolve_governed_root(toplevel, "", k_cfg) == ""
+        self.assertEqual(engine_standalone, kernel_standalone,
+                          f"is_standalone disagreement: toplevel={toplevel!r} roots={governed_roots!r}")
+        return kernel_standalone
+
+    def test_repo_reached_through_symlinked_alias_agrees_not_standalone(self):
+        via_symlink = str(Path(self.root_alias) / "proj")
+        standalone = self._agree(via_symlink, [self.real_root])
+        self.assertFalse(standalone)
+
+    def test_genuinely_unrelated_path_agrees_standalone(self):
+        # Negative control: proves _agree can actually distinguish True from False, using a
+        # path sharing no ancestor with the governed root at all.
+        with tempfile.TemporaryDirectory() as unrelated:
+            standalone = self._agree(unrelated, [self.real_root])
+            self.assertTrue(standalone)
 
 
 if __name__ == "__main__":

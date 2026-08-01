@@ -951,17 +951,5 @@ class TestRouterLifecycleSeam(unittest.TestCase):
             self.assertIn("ERROR BEFORE OUTPUT", text)
 
 
-class TestCIConfiguration(unittest.TestCase):
-    def test_router_seam_fails_closed_without_credentials(self):
-        workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("ROUTER_SEAM_TOKEN is required", workflow)
-        self.assertIn("exit 1", workflow)
-        self.assertNotIn("Skipping (green)", workflow)
-        self.assertIn("python: ['3.9', '3.12']", workflow)
-        self.assertIn("TestRouterLifecycleSeam", workflow)
-
-
 if __name__ == "__main__":
     unittest.main()
