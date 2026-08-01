@@ -324,8 +324,10 @@ def decide_shell(cwd: str, command: str, policy_path: str,
     rel = _rel(ctx.toplevel or cwd, root)
     has_origin = bool(_origin(cwd))
     hooks_path = _hooks_path(cwd)
+    is_standalone = _is_standalone(ctx.toplevel or cwd, cfg)
     cls = policy_mod.classify(rel, ctx.toplevel, cfg, hooks_path=hooks_path,
-                              has_origin=has_origin, is_root=(rel == "."))
+                              has_origin=has_origin, is_root=(rel == "."),
+                              is_standalone=is_standalone)
     # Only an INCLUDED primary checkout (mode ON) is protected; every other classification
     # (exclude/advisory/not-git) allows.
     if cls.classification != policy_mod.INCLUDE:
@@ -379,6 +381,29 @@ def _governed_root(toplevel: str, cfg: policy_mod.PolicyConfig) -> str:
         if tl == gr_abs or tl.startswith(gr_abs + os.sep):
             return gr_abs
     return os.path.dirname(os.path.abspath(toplevel))
+
+
+def _is_standalone(toplevel: str, cfg: policy_mod.PolicyConfig) -> bool:
+    """True when no configured governed root contains `toplevel` — mirrors the kernel's
+    resolve_governed_root() returning "" (kernel/lib/awa_policy.py). Deliberately NOT derived
+    from _governed_root()'s return value: that function falls back to dirname(toplevel) for
+    the standalone case (never ""), so its result can't double as an is-standalone signal.
+
+    Normalizes with realpath (not plain abspath) to byte-for-byte match the kernel's _norm()
+    (kernel/lib/awa_policy.py:334-335) -- required so the two independently-computed
+    is_standalone signals cannot disagree across a symlinked governed_root or toplevel (e.g.
+    a path through /tmp on macOS, itself a symlink to /private/tmp). This intentionally does
+    NOT change the pre-existing, unrelated _governed_root()/_rel() (still abspath-only, out of
+    scope for this fix) -- so is_standalone's containment check and _governed_root()'s are not
+    byte-identical in their symlink handling, but that pre-existing behavior is unchanged by
+    this fix either way.
+    """
+    tl = os.path.realpath(os.path.expanduser(toplevel))
+    for gr in cfg.governed_roots:
+        gr_abs = os.path.realpath(os.path.expanduser(gr))
+        if tl == gr_abs or tl.startswith(gr_abs + os.sep):
+            return False
+    return True
 
 
 def _rel(toplevel: str, root: str) -> str:

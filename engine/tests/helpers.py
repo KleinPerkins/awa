@@ -69,6 +69,24 @@ class EngineTestCase(unittest.TestCase):
             git(repo, "remote", "add", "origin", "git@github.com:KleinPerkins/awa-test.git")
         return repo
 
+    def make_standalone_repo(self, name: str = "standalone-repo", *, origin: bool = True) -> str:
+        """A scratch repo OUTSIDE self._tmp.name — i.e. outside any governed root the tests'
+        policy fixtures configure. Used for is_standalone regression coverage. Lives in its
+        own tempdir (a sibling of self._tmp.name, never nested under it) so it is a genuine
+        standalone repo from the classifier's point of view.
+        """
+        tmp = tempfile.TemporaryDirectory(prefix="awa-engine-test-standalone.")
+        self.addCleanup(tmp.cleanup)
+        repo = str(Path(tmp.name) / name)
+        os.makedirs(repo, exist_ok=True)
+        git(repo, "init", "-q", ".")
+        Path(repo, "README.md").write_text("# uat\n", encoding="utf-8")
+        commit_all(repo, "init")
+        git(repo, "branch", "-M", "main")
+        if origin:
+            git(repo, "remote", "add", "origin", "git@github.com:KleinPerkins/awa-test.git")
+        return repo
+
     def add_worktree(self, repo: str, branch: str, suffix: str = ".wt") -> str:
         wt = repo + suffix
         git(repo, "worktree", "add", "-q", "-b", branch, wt, "main")
