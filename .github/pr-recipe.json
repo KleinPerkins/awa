@@ -1,0 +1,43 @@
+{
+  "schema": "pr-automation-recipe/v1",
+  "repository_id": "awa",
+  "canned_refs": [
+    {
+      "id": "canned.repository-contract.v1",
+      "digest": "sha256:43d4d6238bad4513a58135cc28b0810aff03921053f3d0a282261c756e8d5189"
+    }
+  ],
+  "custom_jobs": [
+    {
+      "id": "repo.awa.engine-tests",
+      "argv": [
+        "run-literal",
+        "python3",
+        "-B",
+        "-m",
+        "unittest",
+        "engine.tests.test_policy",
+        "engine.tests.test_modes",
+        "engine.tests.test_recovery",
+        "engine.tests.test_state_lock"
+      ],
+      "environment": {},
+      "depends_on": ["canned.repository-contract.v1"]
+    }
+  ],
+  "pipeline": {
+    "version": "pr-automation-pipeline/v1",
+    "pipeline_id": "awa-pilot-pipeline",
+    "jobs": [
+      {
+        "id": "canned.repository-contract.v1",
+        "depends_on": []
+      },
+      {
+        "id": "repo.awa.engine-tests",
+        "depends_on": ["canned.repository-contract.v1"]
+      }
+    ],
+    "aggregate": "all_required"
+  }
+}
