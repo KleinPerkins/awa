@@ -42,6 +42,13 @@ class TestState(EngineTestCase):
             self.assertIn("redacted", ev["detail"])
             self.assertNotIn("ghp_AAAA", ev["detail"])
 
+    def test_zzz_m1_shadow_seeded_failure_proof(self):
+        """Temporary (M1 gen3 task 10b, 2026-08-02): deliberately fails to prove that a Shadow-mode
+        custom (protected_recipe) job failure is informational only and does not gate the
+        `pr-automation / verify` aggregate or arm auto-merge. Removed in the follow-up
+        restored-pass commit on this same PR — never intended to reach `main`."""
+        self.fail("intentional seeded failure for M1 gen3 Shadow-mode proof (task 10b)")
+
 
 class TestLock(EngineTestCase):
     def test_second_nonblocking_acquire_is_busy(self):
