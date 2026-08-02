@@ -42,12 +42,12 @@ class TestState(EngineTestCase):
             self.assertIn("redacted", ev["detail"])
             self.assertNotIn("ghp_AAAA", ev["detail"])
 
-    def test_zzz_m1_local_seeded_failure_proof(self):
-        """Temporary (M1 gen3 task 10b, 2026-08-02): deliberately fails to prove that a Local-mode
-        custom (protected_recipe) job failure now gates the `pr-automation / verify` aggregate
-        (blocks it) and that the reviewer never arms on a failing head. Removed in the follow-up
-        restored-pass commit on this same PR — never intended to reach `main`."""
-        self.fail("intentional seeded failure for M1 gen3 Local-mode proof (task 10b)")
+    def test_zzz_m1_local_restored_pass_proof(self):
+        """Temporary (M1 gen3 task 10b, 2026-08-02), step 2/2: restores to passing. Proves that
+        once the custom (protected_recipe) job also passes under coverage_mode: local, the
+        aggregate succeeds and the existing singular reviewer-arm/approve/final-reread/
+        success-last path completes the merge autonomously — no manual merge required."""
+        self.assertTrue(True)
 
 
 class TestLock(EngineTestCase):
