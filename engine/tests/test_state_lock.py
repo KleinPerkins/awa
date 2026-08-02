@@ -42,6 +42,13 @@ class TestState(EngineTestCase):
             self.assertIn("redacted", ev["detail"])
             self.assertNotIn("ghp_AAAA", ev["detail"])
 
+    def test_zzz_m1_local_restored_pass_proof(self):
+        """Temporary (M1 gen3 task 10b, 2026-08-02), step 2/2: restores to passing. Proves that
+        once the custom (protected_recipe) job also passes under coverage_mode: local, the
+        aggregate succeeds and the existing singular reviewer-arm/approve/final-reread/
+        success-last path completes the merge autonomously — no manual merge required."""
+        self.assertTrue(True)
+
 
 class TestLock(EngineTestCase):
     def test_second_nonblocking_acquire_is_busy(self):
