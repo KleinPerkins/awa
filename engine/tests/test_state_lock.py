@@ -49,13 +49,13 @@ class TestState(EngineTestCase):
         success-last path completes the merge autonomously — no manual merge required."""
         self.assertTrue(True)
 
-    def test_zzz_m3_shadow_seeded_failure_proof(self):
-        """Temporary D7 evidence: fail only AWA's custom engine-test job under shadow.
+    def test_zzz_m3_shadow_restored_pass_proof(self):
+        """Temporary D7 evidence: restore AWA's custom engine-test job under shadow.
 
-        The canned repository contract and required aggregate should still pass, while the
-        informational custom stage fails and the reviewer must not arm auto-merge.
+        The canned repository contract, informational custom stage, and required aggregate
+        should all pass while the reviewer still must not arm auto-merge.
         """
-        self.fail("intentional D7 shadow evidence failure; never merge this head")
+        self.assertTrue(True)
 
 
 class TestLock(EngineTestCase):
