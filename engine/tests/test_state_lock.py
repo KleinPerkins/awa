@@ -49,6 +49,14 @@ class TestState(EngineTestCase):
         success-last path completes the merge autonomously — no manual merge required."""
         self.assertTrue(True)
 
+    def test_zzz_m3_local_seeded_failure_proof(self):
+        """Temporary D7 evidence: fail only AWA's custom engine-test job under local.
+
+        The canned repository contract should pass, while the custom failure must fail the
+        required aggregate and prevent reviewer approval or auto-merge from arming.
+        """
+        self.fail("intentional D7 local evidence failure; restore on the next exact head")
+
 
 class TestLock(EngineTestCase):
     def test_second_nonblocking_acquire_is_busy(self):
