@@ -228,6 +228,142 @@ def classify_mutating(command: str) -> bool:
     return any(_segment_is_mutating(toks) for toks in segs)
 
 
+# ---- ADR 0001: target-path-aware mutation scope -----------------------------------
+# A precise target-path check may only ever convert an existing `deny` into `allow`
+# when every resolved target is affirmatively proven safe; any uncertainty (an
+# unresolvable target, a glob metacharacter, an out-of-v1-scope verb) collapses back
+# to today's cwd-only behavior for the WHOLE command (ADR 0001 §1, §4). See the
+# companion plan (docs/plans/guard-target-path-precision-v1.md) §3.1 for the design.
+_PATH_ARG_VERBS = {"rm", "mv", "cp", "mkdir", "rmdir", "ln", "chmod", "chown",
+                    "unlink", "shred"}
+# Explicitly OUT of scope for v1 (conservative fallback unchanged) -- see ADR 0001 §3:
+# "install", "truncate", "dd", "tee" (ambiguous/key-value argument shapes), all _PKG
+# package-manager verbs (cwd-relative mutation with no explicit path argument -- cwd-based
+# classification is already correct for these, not a gap), and interpreter -c/-e bodies
+# (recursion already exists via classify_mutating; left conservative for v1, see §6).
+
+
+def _has_glob_metachar(s: str) -> bool:
+    return any(c in s for c in "*?[")
+
+
+def _extract_candidate_targets(prog, rest, cwd):
+    """Positional (non-flag) arguments for a path-mutating verb, resolved to absolute
+    paths. Returns None (== "extraction not confident, fall back to cwd-only
+    classification for this whole command") when there are no positional args, or
+    when ANY of them contains a shell glob metacharacter (cannot be resolved without
+    actually running the shell) -- never a partial list."""
+    if prog in _PATH_ARG_VERBS or (prog in _INPLACE and any(
+            a == "-i" or a.startswith("-i") for a in rest)):
+        positional = [a for a in rest if not a.startswith("-")]
+        if not positional or any(_has_glob_metachar(a) for a in positional):
+            return None
+        return [a if os.path.isabs(a) else os.path.join(cwd, a) for a in positional]
+    return None
+
+
+def _extract_git_target_dir(rest, cwd):
+    """git's -C / --git-dir / --work-tree redirect ITS OWN real working directory,
+    independent of the shell's cwd -- mirrors the existing arg-skip loop that already
+    walks these same flags to find the subcommand. Returns an absolute path (cwd
+    itself when no redirecting flag is present)."""
+    j, target = 0, cwd
+    while j < len(rest):
+        a = rest[j]
+        if a == "-C" and j + 1 < len(rest):
+            target = rest[j + 1]; j += 2; continue
+        if a.startswith("--git-dir=") or a.startswith("--work-tree="):
+            target = a.split("=", 1)[1]; j += 1; continue
+        if a in ("--git-dir", "--work-tree") and j + 1 < len(rest):
+            target = rest[j + 1]; j += 2; continue
+        j += 1
+    return target if os.path.isabs(target) else os.path.join(cwd, target)
+
+
+_MAX_PRECISE_TARGETS = 8  # bound worst-case classification calls per command; more
+                          # than this falls back to cwd-only (conservative, cheap check)
+
+
+def _prog_is_independently_mutating(prog: str, rest: list[str]) -> bool:
+    """True when PROG ITSELF (irrespective of any co-occurring redirect in the same
+    segment) is a recognized mutating trigger per classify_mutating's own rules.
+
+    Needed so an incidental redirect never stands in for a verb's OWN out-of-v1-scope
+    target: e.g. `dd if=x of=<protected file> > /tmp/log` must not be judged solely on
+    the harmless stdout redirect -- dd's own (unresolved, out-of-scope) `of=` write
+    target must still poison the whole command back to conservative cwd-only handling.
+    """
+    if prog in _MUT:
+        return True
+    if prog in _INPLACE and any(a == "-i" or a.startswith("-i") for a in rest):
+        return True
+    if prog in _PKG and any(a in ("install", "add", "i") for a in rest):
+        return True
+    if prog in _SCRIPT_BODY_PROGS:
+        body = _interpreter_script_body(rest)
+        return body is not None and classify_mutating(body)
+    return False
+
+
+def _collect_precise_targets(command, cwd):
+    """Per-segment target collection for a command already known to be mutating
+    (classify_mutating(command) is True). Returns None when ANY mutating segment's
+    target(s) cannot be confidently resolved -- one command, one decision (ADR 0001
+    §4): a single unscoped mutating segment poisons the whole command back to
+    cwd-only classification. Returns a deduped list (possibly empty only if there
+    were zero mutating segments, which cannot happen given the precondition) otherwise."""
+    try:
+        segs = _segments(command)
+    except ValueError:
+        return None
+    targets = []
+    for toks in segs:
+        if not _segment_is_mutating(toks):
+            continue
+        # Redirect targets are already detected by _segment_is_mutating's own scan;
+        # fold any real (non-safe) target into this segment's contribution rather than
+        # duplicating the safe-target-suffix logic a second time.
+        redirect_targets = []
+        has_redirect = False
+        for idx, tok in enumerate(toks):
+            if tok in _REDIRECT_OPS:
+                rtarget = toks[idx + 1] if idx + 1 < len(toks) else ""
+                if not rtarget or rtarget.isdigit() or rtarget.startswith(_SAFE_REDIRECT_TARGETS):
+                    continue
+                has_redirect = True
+                if _has_glob_metachar(rtarget):
+                    return None
+                redirect_targets.append(
+                    rtarget if os.path.isabs(rtarget) else os.path.join(cwd, rtarget))
+        i = _skip_wrappers(toks)
+        if i >= len(toks) or toks[i].startswith("-"):
+            return None  # dangling/wrapper-obscured program -- do not guess
+        prog = os.path.basename(toks[i])
+        rest = toks[i + 1:]
+        if prog == "git":
+            targets.append(_extract_git_target_dir(rest, cwd))
+            targets.extend(redirect_targets)
+            continue
+        found = _extract_candidate_targets(prog, rest, cwd)
+        if found is not None:
+            targets.extend(found)
+            targets.extend(redirect_targets)
+            continue
+        if has_redirect and not _prog_is_independently_mutating(prog, rest):
+            # This segment's ONLY mutation signal is the redirect (the program itself
+            # -- e.g. a plain `echo` -- carries none of its own); the redirect target
+            # fully explains the mutation, so it alone is confident enough to use.
+            targets.extend(redirect_targets)
+            continue
+        # Mutating segment via a verb/package/interpreter-body rule this v1 does not
+        # extract precise targets for (ADR 0001 §3: install/truncate/dd/tee, a _PKG
+        # install, or an interpreter -c/-e body) -- fall back to conservative for the
+        # whole command, regardless of any co-occurring redirect on this same segment.
+        return None
+    deduped = sorted(set(targets))
+    return deduped[:_MAX_PRECISE_TARGETS] if len(deduped) <= _MAX_PRECISE_TARGETS else None
+
+
 @dataclass
 class Decision:
     permission: str  # allow | ask | deny
@@ -297,6 +433,74 @@ def _is_cloud(cwd: str) -> bool:
     return top == "/workspace" or top.startswith("/workspace" + os.sep)
 
 
+def _probe_dir(path: str) -> str:
+    """Mirrors dir_for_probe() in kernel/hooks/worktree-guard.sh: `git -C` requires an
+    actual directory, so a FILE target (the common case -- e.g. `rm -f file.txt`,
+    existing or not) must be probed via its parent directory, never itself, or
+    gitutil.resolve() silently reports is_git=False for every such target regardless
+    of whether it is really inside a protected checkout (verified: `git -C
+    <file-path>` fails with "cannot change to ... Not a directory" / "No such file or
+    directory" for both an existing file and a not-yet-created one)."""
+    return path if os.path.isdir(path) else (os.path.dirname(path) or path)
+
+
+def _path_looks_governed(path: str, cfg: policy_mod.PolicyConfig) -> bool:
+    """Mirrors included_looking_path() in kernel/hooks/worktree-guard.sh: a pure
+    path-string containment check against the policy's configured governed roots
+    (realpath-normalized, matching _is_standalone's symlink handling). Used ONLY as
+    the fail-closed fallback in _path_is_protected_primary when the probe directory
+    cannot be checked via git at all -- never a substitute for real classification."""
+    p = os.path.realpath(os.path.expanduser(path))
+    for gr in cfg.governed_roots:
+        gr_abs = os.path.realpath(os.path.expanduser(gr))
+        if p == gr_abs or p.startswith(gr_abs + os.sep):
+            return True
+    return False
+
+
+def _path_is_protected_primary(path: str, cfg: policy_mod.PolicyConfig) -> bool:
+    """Is `path` (an already-resolved absolute candidate mutation target) inside a
+    PROTECTED PRIMARY checkout? Mirrors decide_shell's own primary-classification
+    steps (ADR 0001 §2: the unit of protection is "some protected primary", not just
+    the cwd's own repo) -- reuses gitutil.resolve / lease_mod.read_lease /
+    policy_mod.classify rather than reimplementing policy logic a second time.
+
+    Every git-adapter call below (_hooks_path/_origin, not just gitutil.resolve) is
+    made against `probe` -- a directory, never the raw (possibly-file) `path` -- and
+    once resolved, against `ctx.toplevel` specifically. `git -C <file>` always fails
+    (128, "Not a directory"), which would otherwise make _origin()/_hooks_path()
+    silently return "" for the common file-target case (e.g. `rm -f tracked-file`),
+    forcing classify()'s "no origin remote" branch to fire and misclassify an
+    INCLUDED primary as ADVISORY -- silently turning off protection for exactly the
+    files this fix must keep protecting. See docs/adr/0001 §2 and the
+    test_precise_target_inside_same_primary_still_denies regression test.
+
+    `git -C` also requires `probe` to ALREADY EXIST -- a not-yet-created nested path
+    (e.g. `mkdir -p <repo>/new/nested/dir`, or `rm -f <repo>/newdir/f` where `newdir`
+    was never created) cannot be probed via git at all, even though an EXISTING
+    ancestor (`<repo>`) may be a real, protected primary. Mirrors
+    target_is_protected_primary()'s classify_dir-failure fallback: fail toward
+    "protected" whenever the target merely LOOKS governed (_path_looks_governed),
+    never toward a silent allow on this uncertainty."""
+    probe = _probe_dir(path)
+    if not probe or not os.path.isdir(probe):
+        return _path_looks_governed(probe or path, cfg)
+    ctx = gitutil.resolve(probe)
+    if not ctx.is_git or ctx.is_linked:
+        return False
+    top = ctx.toplevel or probe
+    lz = lease_mod.read_lease(top)
+    if lz and lz.get("status", "active") == "active":
+        return False
+    root = _governed_root(top, cfg)
+    rel = _rel(top, root)
+    cls = policy_mod.classify(
+        rel, ctx.toplevel, cfg,
+        hooks_path=_hooks_path(top), has_origin=bool(_origin(top)),
+        is_root=(rel == "."), is_standalone=_is_standalone(top, cfg))
+    return cls.classification == policy_mod.INCLUDE
+
+
 def decide_shell(cwd: str, command: str, policy_path: str,
                  *, allow_primary: bool = False) -> Decision:
     """Engine-OFF decision for a shell command. Reads only policy + lease (+ git).
@@ -333,6 +537,16 @@ def decide_shell(cwd: str, command: str, policy_path: str,
     if cls.classification != policy_mod.INCLUDE:
         return _allow(f"{cls.classification}: {cls.reason}", cls.classification)
     if classify_mutating(command):
+        # ADR 0001: additive narrowing. Only when EVERY resolved target is confidently
+        # outside any protected primary does this convert the deny below into an allow;
+        # any uncertainty (targets is None) or any protected target falls through
+        # unchanged to the existing enforced deny.
+        targets = _collect_precise_targets(command, cwd)
+        if targets is not None and not any(
+                _path_is_protected_primary(t, cfg) for t in targets):
+            return _allow(
+                "mutating command, but every resolved target is outside any "
+                "protected primary checkout", cls.classification)
         # Enforced DENY (not ask): Cursor honors deny and ignores ask (L4). This is the one
         # case where prevention must actually happen.
         return Decision("deny", _DENY_REASON, cls.classification)
