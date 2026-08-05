@@ -85,8 +85,12 @@ Each governed repo has an explicit AWA **mode** you can set and inspect:
   step. A confirmed mutating command on a resulting included **primary** checkout returns an
   enforced hook **`deny`** (Cursor enforces `deny`; it treats `ask` as non-blocking — see
   [SECURITY.md](SECURITY.md#platform-limitation--cursor-enforces-hook-deny-not-ask-l4)), steering
-  work into a Safe Workspace. A Cursor Cloud / background agent (already an isolated own-branch
-  `/workspace` clone) degrades to allow, and afterFileEdit is observation-only.
+  work into a Safe Workspace. This decision is target-path-aware: when every path the command
+  actually resolves to is confidently outside any protected primary checkout (e.g. `rm -f /tmp/x`
+  run from inside an included repo), the guard allows instead of denying; any uncertainty keeps the
+  enforced deny (see [ADR 0001](docs/adr/0001-target-path-aware-mutation-scope.md)). A Cursor Cloud
+  / background agent (already an isolated own-branch `/workspace` clone) degrades to allow, and
+  afterFileEdit is observation-only.
 - **OFF** — AWA leaves the repo alone (no block, no Safe Workspace).
 
 One **fail-safe rule** governs both the classifier and the modes writer: only an exact `off`

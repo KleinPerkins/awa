@@ -217,8 +217,10 @@ A repo's AWA behavior is a first-class, explicitly-settable **mode** with two st
 inside the same generic zero-link classifier the shell kernel and the engine share:
 
 - **ON** → `include`: a confirmed mutating command on the primary checkout returns an enforced hook
-  **`deny`**, `ensure` creates a Safe Workspace, and the repo is eligible for repo-committed
-  worktree-setup execution.
+  **`deny`** — unless every path the command actually resolves to is confidently outside any
+  protected primary checkout, in which case it allows instead (target-path-aware narrowing, see
+  [ADR 0001](docs/adr/0001-target-path-aware-mutation-scope.md)) — `ensure` creates a Safe
+  Workspace, and the repo is eligible for repo-committed worktree-setup execution.
 - **OFF** → `exclude`: AWA leaves the repo alone — the guard allows, `ensure` is a no-op.
 
 **Why `deny`, not `ask` (L4).** Cursor's agent enforces a `beforeShellExecution` hook that returns
@@ -230,8 +232,10 @@ path (an included-looking checkout whose command payload the hook could not pars
 there knowing Cursor won't block, so it never *silently* downgrades an uncertain case to allow.
 See [SECURITY.md](SECURITY.md) for the platform-limitation writeup.
 
-For a mutating command on a primary checkout the guard **denies** under ON and allows under OFF;
-read-only commands, linked worktrees, and adopted leases always allow in every mode. A Cursor Cloud
+For a mutating command on a primary checkout the guard **denies** under ON — unless every target
+the command actually resolves to is confidently outside any protected primary, in which case it
+allows instead (ADR 0001) — and allows under OFF; read-only commands, linked worktrees, and adopted
+leases always allow in every mode. A Cursor Cloud
 / background agent runs in an already-isolated, own-branch `/workspace` clone; the guard detects that
 and **degrades to allow before the deny branch**, so a cloud VM is never hard-blocked. Hook-infra
 failure (crash / timeout / missing interpreter) also degrades to allow (anti-brick). `afterFileEdit`
