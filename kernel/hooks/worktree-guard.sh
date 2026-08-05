@@ -45,6 +45,8 @@ is_cloud="no"
 has_paths="no"
 session_id=""
 paths=()
+has_mut_targets="no"
+mut_targets=()
 eval "$(HOOK_INPUT="$input" python3 - <<'PY'
 import json, os, re, sys, shlex
 raw = os.environ.get("HOOK_INPUT", "")
@@ -287,11 +289,156 @@ def classify_mutating(command: str) -> bool:
     return any(_segment_is_mutating(toks) for toks in segs)
 
 
+# ---- ADR 0001: target-path-aware mutation scope (parity with engine/guard.py) ------
+# NOTE for maintainers: this block lives inside a quoted-delimiter heredoc that is
+# itself nested inside command substitution above. Old bash (3.2, still the macOS
+# default) has a real parser bug where a bare apostrophe in heredoc text breaks that
+# combination even though the delimiter is quoted -- see docs/adr/0001 background.
+# Keep every comment/docstring in this heredoc apostrophe-free (write "it is", not
+# a contraction); do not reintroduce contractions or possessives here even though
+# they would read more naturally.
+#
+# A precise target-path check may only ever convert an existing `deny` into `allow`
+# when every resolved target is affirmatively proven safe; any uncertainty (an
+# unresolvable target, a glob metacharacter, an out-of-v1-scope verb) collapses back
+# to the existing cwd-only behavior for the WHOLE command (ADR 0001 §1, §4). See
+# docs/plans/guard-target-path-precision-v1.md §3.1 for the design.
+_PATH_ARG_VERBS = {"rm", "mv", "cp", "mkdir", "rmdir", "ln", "chmod", "chown",
+                    "unlink", "shred"}
+# Explicitly OUT of scope for v1 (conservative fallback unchanged) -- see ADR 0001 §3:
+# install/truncate/dd/tee, all _PKG package-manager verbs, and interpreter -c/-e bodies.
+
+
+def _has_glob_metachar(s: str) -> bool:
+    return any(c in s for c in "*?[")
+
+
+def _extract_candidate_targets(prog, rest, cwd):
+    """Positional (non-flag) arguments for a path-mutating verb, resolved to absolute
+    paths. Returns None (extraction not confident -> fall back to cwd-only
+    classification for this whole command) when there are no positional args, or ANY
+    of them contains a shell glob metacharacter -- never a partial list."""
+    if prog in _PATH_ARG_VERBS or (prog in _INPLACE and any(
+            a == "-i" or a.startswith("-i") for a in rest)):
+        positional = [a for a in rest if not a.startswith("-")]
+        if not positional or any(_has_glob_metachar(a) for a in positional):
+            return None
+        return [a if os.path.isabs(a) else os.path.join(cwd, a) for a in positional]
+    return None
+
+
+def _extract_git_target_dir(rest, cwd):
+    """The git -C / --git-dir / --work-tree flags redirect where git itself will
+    run, independent of the invoking cwd. Returns an absolute path (cwd itself when
+    no redirecting flag is present)."""
+    j, target = 0, cwd
+    while j < len(rest):
+        a = rest[j]
+        if a == "-C" and j + 1 < len(rest):
+            target = rest[j + 1]; j += 2; continue
+        if a.startswith("--git-dir=") or a.startswith("--work-tree="):
+            target = a.split("=", 1)[1]; j += 1; continue
+        if a in ("--git-dir", "--work-tree") and j + 1 < len(rest):
+            target = rest[j + 1]; j += 2; continue
+        j += 1
+    return target if os.path.isabs(target) else os.path.join(cwd, target)
+
+
+_MAX_PRECISE_TARGETS = 8  # bound worst-case classification calls per command; more
+                          # than this falls back to cwd-only (conservative, cheap check)
+
+
+def _prog_is_independently_mutating(prog, rest) -> bool:
+    """True when PROG ITSELF (irrespective of any co-occurring redirect in the same
+    segment) is a recognized mutating trigger per the classify_mutating rules above.
+
+    Needed so an incidental redirect never substitutes for a verb that is, on its
+    own, out of v1 scope: e.g. `dd if=x of=<protected file> > /tmp/log` must not be
+    judged solely on the harmless stdout redirect -- the unresolved, out-of-scope
+    `of=` write target belongs to dd itself and must still poison the whole command
+    back to conservative cwd-only handling.
+    """
+    if prog in _MUT:
+        return True
+    if prog in _INPLACE and any(a == "-i" or a.startswith("-i") for a in rest):
+        return True
+    if prog in _PKG and any(a in ("install", "add", "i") for a in rest):
+        return True
+    if prog in _SCRIPT_BODY_PROGS:
+        body = _interpreter_script_body(rest)
+        return body is not None and classify_mutating(body)
+    return False
+
+
+def _collect_precise_targets(command, cwd):
+    """Per-segment target collection for a command already known to be mutating
+    (classify_mutating(command) is True). Returns None when the target(s) of ANY
+    mutating segment cannot be confidently resolved -- one command, one decision
+    (ADR 0001 §4): a single unscoped mutating segment poisons the whole command
+    back to cwd-only classification. Returns a deduped list otherwise."""
+    try:
+        segs = _segments(command)
+    except ValueError:
+        return None
+    targets = []
+    for toks in segs:
+        if not _segment_is_mutating(toks):
+            continue
+        # Redirect targets are already detected by the _segment_is_mutating scan above;
+        # fold any real (non-safe) target into the contribution for this segment rather
+        # than duplicating the safe-target-suffix logic a second time.
+        redirect_targets = []
+        has_redirect = False
+        for idx, tok in enumerate(toks):
+            if tok in _REDIRECT_OPS:
+                rtarget = toks[idx + 1] if idx + 1 < len(toks) else ""
+                if not rtarget or rtarget.isdigit() or rtarget.startswith(_SAFE_REDIRECT_TARGETS):
+                    continue
+                has_redirect = True
+                if _has_glob_metachar(rtarget):
+                    return None
+                redirect_targets.append(
+                    rtarget if os.path.isabs(rtarget) else os.path.join(cwd, rtarget))
+        i = _skip_wrappers(toks)
+        if i >= len(toks) or toks[i].startswith("-"):
+            return None  # dangling/wrapper-obscured program -- do not guess
+        prog = os.path.basename(toks[i])
+        rest = toks[i + 1:]
+        if prog == "git":
+            targets.append(_extract_git_target_dir(rest, cwd))
+            targets.extend(redirect_targets)
+            continue
+        found = _extract_candidate_targets(prog, rest, cwd)
+        if found is not None:
+            targets.extend(found)
+            targets.extend(redirect_targets)
+            continue
+        if has_redirect and not _prog_is_independently_mutating(prog, rest):
+            # The ONLY mutation signal for this segment is the redirect (the program
+            # itself -- e.g. a plain `echo` -- carries no mutation signal on its own);
+            # the redirect target fully explains the mutation, so it alone is
+            # confident enough to use.
+            targets.extend(redirect_targets)
+            continue
+        # Mutating segment via a verb/package/interpreter-body rule this v1 does not
+        # extract precise targets for -- fall back to conservative for the whole
+        # command, regardless of any co-occurring redirect on this same segment.
+        return None
+    deduped = sorted(set(targets))
+    return deduped[:_MAX_PRECISE_TARGETS] if len(deduped) <= _MAX_PRECISE_TARGETS else None
+
+
 resolved = []
 for p in paths:
     if not os.path.isabs(p):
         p = os.path.join(workspace, p)
     resolved.append(p)
+
+# ADR 0001: precise mutation-target candidates for THIS command, resolved against the
+# workspace cwd. None means "not confidently resolvable" -- the bash side must fall back
+# to the existing cwd-only deny/allow decision unchanged (see check_probe /
+# target_is_protected_primary).
+mut_targets = _collect_precise_targets(cmd, workspace) if classify_mutating(cmd) else None
 
 
 def _affirmative_context_handle(v):
@@ -336,6 +483,8 @@ print("is_cloud=%s" % ("yes" if is_cloud else "no"))
 print("has_paths=%s" % ("yes" if paths else "no"))
 print("session_id=%s" % shlex.quote(session_id))
 print("paths=(%s)" % " ".join(shlex.quote(p) for p in resolved))
+print("has_mut_targets=%s" % ("yes" if mut_targets is not None else "no"))
+print("mut_targets=(%s)" % " ".join(shlex.quote(t) for t in (mut_targets or [])))
 PY
 )"
 
@@ -401,6 +550,26 @@ classify_dir() {
   # Export AWA_STATUS_NO_MODE=1 so `status` skips the second python3 (`mode-for`) spawn — the
   # pre-mutation gate stays single-spawn (one classify), avoiding a latency regression.
   (cd "$dir" 2>/dev/null && AWA_STATUS_NO_MODE=1 "$DEV_WORKTREE" status 2>/dev/null) || return 1
+}
+
+# ADR 0001: is $1 (an already-resolved absolute path -- a candidate mutation target,
+# not necessarily an edited file) inside a PROTECTED PRIMARY checkout? Mirrors the
+# file-edit handler's own dir_for_probe + classify_dir probe below, applied to a
+# mutation target instead. Fails CLOSED (treats as protected) when the path looks
+# governed but couldn't be classified -- uncertainty must never resolve toward
+# allowing an unscoped mutation.
+target_is_protected_primary() {
+  local target="$1" probe status classification linked
+  probe="$(dir_for_probe "$target")"
+  [ -n "$probe" ] || return 0
+  status="$(classify_dir "$probe" || true)"
+  if [ -z "$status" ]; then
+    included_looking_path "$probe"   # 0 (protected) if plausibly governed, else 1
+    return $?
+  fi
+  classification="$(printf '%s\n' "$status" | awk -F': ' '$1=="classification"{print $2; exit}')"
+  linked="$(printf '%s\n' "$status" | awk -F': ' '$1=="linked-worktree"{print $2; exit}')"
+  [ "$classification" = "include" ] && [ "$linked" = "no" ]
 }
 
 # Which event is this invocation serving? beforeShellExecution carries a command;
@@ -556,6 +725,7 @@ is_uncertain_include() {
 
 check_probe() {
   local probe="$1" probe_ctx="$2" status classification linked cls_reason
+  local any_target_protected _t
   status="$(classify_dir "$probe" || true)"
   if [ -z "$status" ]; then
     if included_looking_path "$probe"; then
@@ -578,6 +748,20 @@ check_probe() {
           "I couldn't fully check whether this is safe here, so I paused instead of guessing." \
           "Classifier was unavailable for $probe ($cls_reason). Run '$DEV_WORKTREE status' there, or relaunch in a Safe Workspace via the Cursor Agents-Window Worktree dropdown."
         exit 0
+      fi
+      # ADR 0001: additive narrowing. If every resolved target is confidently outside
+      # any protected primary, the command cannot mutate protected content -> allow.
+      # Any uncertainty (has_mut_targets=no, or ANY target IS protected) falls through
+      # to the existing, unchanged deny below.
+      if [ "$has_mut_targets" = "yes" ]; then
+        any_target_protected=0
+        for _t in "${mut_targets[@]}"; do
+          target_is_protected_primary "$_t" && { any_target_protected=1; break; }
+        done
+        if [ "$any_target_protected" -eq 0 ]; then
+          respond_allow
+          exit 0
+        fi
       fi
       # CONFIRMED mutating command on an included primary -> enforced DENY. Cursor honors deny;
       # ask is non-blocking (L4), so deny is the only shape that actually prevents the mutation.

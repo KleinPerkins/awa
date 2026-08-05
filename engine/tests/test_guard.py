@@ -343,6 +343,107 @@ class TestDecideShellDegraded(EngineTestCase):
         d = guard.decide_shell(repo, "git commit -am x", pol.name)
         self.assertEqual(d.permission, "deny")
 
+    # ---- ADR 0001: target-path-aware mutation scope ----------------------------
+    def test_precise_target_outside_any_repo_allows(self):
+        repo = self.make_repo()
+        pol = self._policy_for(self._tmp.name)
+        outside = os.path.join(tempfile.gettempdir(), "awa-guard-precision-outside.txt")
+        d = guard.decide_shell(repo, "rm -f %s" % outside, pol)
+        self.assertEqual(d.permission, "allow")
+
+    def test_precise_target_inside_same_primary_still_denies(self):
+        repo = self.make_repo()
+        pol = self._policy_for(self._tmp.name)
+        d = guard.decide_shell(repo, "rm -f README.md", pol)
+        self.assertEqual(d.permission, "deny")
+
+    def test_precise_target_inside_another_protected_primary_denies(self):
+        repo_a = self.make_repo("repo-a")
+        repo_b = self.make_repo("repo-b")
+        pol = self._policy_for(self._tmp.name)
+        target = os.path.join(repo_b, "README.md")
+        d = guard.decide_shell(repo_a, "rm -f %s" % target, pol)
+        self.assertEqual(d.permission, "deny")
+
+    def test_precise_target_inside_linked_worktree_allows(self):
+        repo = self.make_repo()
+        wt = self.add_worktree(repo, "feat/x")
+        pol = self._policy_for(self._tmp.name)
+        target = os.path.join(wt, "README.md")
+        d = guard.decide_shell(repo, "rm -f %s" % target, pol)
+        self.assertEqual(d.permission, "allow")
+
+    def test_precise_target_inside_excluded_or_advisory_repo_allows(self):
+        """Uses the dedicated no-include-glob policy fixture for the SAME reason as
+        test_standalone_repo_with_origin_allows_not_denies above: the shared
+        _policy_for fixture's include: ['*'] would match the standalone repo's own
+        rel first and misclassify it INCLUDE, masking the is_standalone branch this
+        test needs on the TARGET side (not the cwd side)."""
+        repo = self.make_repo()
+        pol = self._policy_for_no_include_glob(self._tmp.name)
+        standalone = self.make_standalone_repo()
+        target = os.path.join(standalone, "README.md")
+        d = guard.decide_shell(repo, "rm -f %s" % target, pol)
+        self.assertEqual(d.permission, "allow")
+
+    def test_glob_target_falls_back_conservative_denies(self):
+        repo = self.make_repo()
+        pol = self._policy_for(self._tmp.name)
+        d = guard.decide_shell(repo, "rm -rf *", pol)
+        self.assertEqual(d.permission, "deny")
+
+    def test_multiple_targets_any_protected_denies(self):
+        repo = self.make_repo()
+        pol = self._policy_for(self._tmp.name)
+        outside = os.path.join(tempfile.gettempdir(), "awa-guard-precision-multi.txt")
+        d = guard.decide_shell(repo, "rm -f %s README.md" % outside, pol)
+        self.assertEqual(d.permission, "deny")
+
+    def test_mv_cp_source_and_dest_both_checked(self):
+        repo = self.make_repo()
+        pol = self._policy_for(self._tmp.name)
+        outside = os.path.join(tempfile.gettempdir(), "awa-guard-precision-mv.txt")
+        # Destination outside, source inside the protected repo -- still deny (the
+        # source is removed by mv too, not just written).
+        d1 = guard.decide_shell(repo, "mv README.md %s" % outside, pol)
+        self.assertEqual(d1.permission, "deny")
+        # The reverse: source outside, destination inside the protected repo.
+        d2 = guard.decide_shell(repo, "mv %s README2.md" % outside, pol)
+        self.assertEqual(d2.permission, "deny")
+
+    def test_git_dash_c_target_redirects_classification(self):
+        repo_a = self.make_repo("repo-a")
+        pol = self._policy_for(self._tmp.name)
+        repo_b = self.make_repo("repo-b")
+        d_deny = guard.decide_shell(repo_a, "git -C %s commit -am x" % repo_b, pol)
+        self.assertEqual(d_deny.permission, "deny")
+        wt = self.add_worktree(repo_a, "feat/x")
+        d_allow = guard.decide_shell(repo_a, "git -C %s commit -am x" % wt, pol)
+        self.assertEqual(d_allow.permission, "allow")
+
+    def test_too_many_targets_falls_back_conservative(self):
+        repo = self.make_repo()
+        pol = self._policy_for(self._tmp.name)
+        many = " ".join("f%d.txt" % i for i in range(guard._MAX_PRECISE_TARGETS + 1))
+        d = guard.decide_shell(repo, "rm -f %s" % many, pol)
+        self.assertEqual(d.permission, "deny")
+
+    def test_unresolvable_target_conservative_denies(self):
+        """A target with no real filesystem/git anchor at all resolves outside any
+        protected primary (allow); a not-yet-created nested path INSIDE the
+        protected repo's own working tree cannot be probed via git at all (`git -C`
+        requires the exact directory to already exist) -- this must still deny via
+        the governed-roots fallback (_path_looks_governed), never silently allow
+        just because the exact nested path does not exist yet."""
+        repo = self.make_repo()
+        pol = self._policy_for(self._tmp.name)
+        nowhere = "/nonexistent-awa-guard-test-root-xyz/deeply/nested/file.txt"
+        d_allow = guard.decide_shell(repo, "rm -f %s" % nowhere, pol)
+        self.assertEqual(d_allow.permission, "allow")
+        nested = os.path.join(repo, "a", "b", "c")
+        d_deny = guard.decide_shell(repo, "mkdir -p %s" % nested, pol)
+        self.assertEqual(d_deny.permission, "deny")
+
 
 class TestCanClean(EngineTestCase):
     def test_refuses_primary(self):

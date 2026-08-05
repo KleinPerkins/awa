@@ -329,6 +329,36 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         self.assertIn("user_message", resp)
         self.assertIn("agent_message", resp)
 
+    # ---- ADR 0001: target-path-aware mutation scope (bash-hook parity) ---------
+    def test_target_outside_governed_root_allows(self):
+        outside = os.path.join(tempfile.gettempdir(), "awa-guard-precision-hook-outside.txt")
+        resp = self._guard("rm -f %s" % outside)
+        self.assertEqual(resp.get("permission"), "allow")
+
+    def test_target_inside_primary_still_denies(self):
+        resp = self._guard("rm -f f")
+        self.assertEqual(resp.get("permission"), "deny")
+        # frozen deny_shape
+        self.assertIn("user_message", resp)
+        self.assertIn("agent_message", resp)
+
+    def test_git_dash_c_target_parity(self):
+        other = self.root / "other-repo"
+        other.mkdir()
+        self._git("init", "-q", str(other))
+        (other / "f").write_text("#\n", encoding="utf-8")
+        self._git("-C", str(other), "add", "f")
+        self._git("-C", str(other), *_IDENT, "commit", "-qm", "init")
+        self._git("-C", str(other), "remote", "add", "origin",
+                  "git@github.com:KleinPerkins/awa-hook-wrap-other.git")
+        resp = self._guard("git -C %s commit -am x" % other)
+        self.assertEqual(resp.get("permission"), "deny")
+
+        wt = self.root / "proj.wt"
+        self._git("-C", str(self.repo), "worktree", "add", "-q", "-b", "feat/x", str(wt), "main")
+        resp2 = self._guard("git -C %s commit -am x" % wt)
+        self.assertEqual(resp2.get("permission"), "allow")
+
 
 if __name__ == "__main__":
     unittest.main()
