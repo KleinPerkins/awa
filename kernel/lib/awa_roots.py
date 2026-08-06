@@ -81,6 +81,27 @@ DEFAULT_TTL_SECONDS = 12 * 3600
 # every pid-less heartbeat instantly stale/removable).
 MIN_TTL_SECONDS = 300
 
+# Dedicated (SHORTER, more time-sensitive) staleness window for _heartbeat_locked()'s
+# "other_session_disagrees" check, below -- deliberately NOT the same knob as DEFAULT_TTL_SECONDS.
+# That TTL answers a coarse, deliberately-generous question ("is this whole workspace still in use
+# at all, for removal-safety") where erring toward ACTIVE is cheap: a stale workspace merely resists
+# `clean` a while longer. This constant answers a narrower, opposite-biased question: "does some
+# OTHER tracked session's LAST-KNOWN branch claim still deserve to veto a branch value the
+# confirming session's heartbeat just, independently, live-reverified via git THIS CALL". A
+# worktree has exactly one physical checked-out branch at a time, so any recorded "disagreement" is
+# ALWAYS just a stale belief from before the branch last changed -- never a real concurrent
+# alternate-branch observation. Erring toward "still fresh" for too long here does not buy extra
+# safety the way the coarse TTL's bias does; it reproduces this file's own original defect class
+# (a dead session's frozen claim silently vetoes a live session's heartbeat forever), which is WORSE
+# than the coarse TTL's failure mode because it defeats the beforeSubmitPrompt finish-preview hook
+# with no warning at all (see PR #82's own fix intent). A genuinely still-active peer session
+# refreshes its OWN heartbeat entry on every prompt submission (beforeSubmitPrompt's
+# `_bind_hook_current_session`) and, during shell activity, at least every
+# AWA_HEARTBEAT_REFRESH_THROTTLE (default 180s) -- so 30 minutes is a wide safety margin above any
+# realistic gap for a session that is actually still concurrently in play, while still expiring in
+# reasonable human time rather than requiring most of a work day (DEFAULT_TTL_SECONDS = 12h).
+BRANCH_DISAGREEMENT_STALE_SECONDS = 30 * 60
+
 
 def _ttl_seconds(override: int | None = None) -> int:
     if override is not None:
@@ -932,6 +953,23 @@ def _heartbeat_target_recheck(root_path: str, *, branch: str | None,
     return True, "validated"
 
 
+def _session_disagreement_is_fresh(sess: dict, now_epoch: int) -> bool:
+    """Is `sess`'s last-known heartbeat still recent enough to make its recorded `branch` a
+    meaningful disagreement (see BRANCH_DISAGREEMENT_STALE_SECONDS, above)?
+
+    A session member reaching this point has already passed `_validate_session_member`'s strict
+    timestamp check, so a parseable epoch is guaranteed here; the None fallback is defensive-only
+    and fails safe (treated as fresh, i.e. still capable of disagreeing) rather than silently
+    waiving evidence this helper could not actually parse.
+    """
+    last = _iso_to_epoch(sess.get("last_heartbeat_epoch"))
+    if last is None:
+        last = _iso_to_epoch(sess.get("last_heartbeat"))
+    if last is None:
+        return True
+    return (now_epoch - int(last)) < BRANCH_DISAGREEMENT_STALE_SECONDS
+
+
 def _heartbeat_locked(root_path: str, *, branch: str | None, common_dir: str | None,
                       session_id: str | None, pid: int | None,
                       boot: str | None) -> dict:
@@ -1005,9 +1043,15 @@ def _heartbeat_locked(root_path: str, *, branch: str | None, common_dir: str | N
             # it is some OTHER session's own recorded claim -- the CONFIRMING session's own
             # prior claim (e.g. from before an ordinary `git checkout`/`git switch` between
             # sequential PRs in one long-lived agent session) legitimately evolving over time
-            # must not veto its own freshly-reverified branch.
+            # must not veto its own freshly-reverified branch. Staleness also matters here: a
+            # session that has not itself heartbeated in a while is not a live disagreement, just
+            # a frozen belief from before the branch last changed -- see
+            # BRANCH_DISAGREEMENT_STALE_SECONDS for why this uses a dedicated, SHORTER window than
+            # DEFAULT_TTL_SECONDS rather than treating every ever-recorded session as a permanent
+            # veto (the gap that let this exact defect class ship once already, in this check).
             other_session_disagrees = any(
                 other_key != skey and other_sess.get("branch") not in (None, eff_branch)
+                and _session_disagreement_is_fresh(other_sess, now_epoch)
                 for other_key, other_sess in sessions.items()
             )
             if other_session_disagrees:
@@ -1059,13 +1103,16 @@ def heartbeat(root_path: str, *, branch: str | None = None, common_dir: str | No
     Identity-mutation guard (session-aware for ``branch``, unconditional for ``common_dir``): a
     heartbeat that would change a root's persisted ``branch`` or ``git_common_dir`` is refused
     UNLESS the live target-recheck above just re-verified it AND, for ``branch`` specifically, no
-    OTHER currently-tracked session disagrees. A worktree's ``git_common_dir`` is a structural
-    identity that should never legitimately change over a Safe Workspace's lifetime, so that half
-    stays a hard, session-independent block. A worktree's checked-out ``branch`` legitimately,
-    routinely changes via an ordinary `git checkout`/`git switch` -- e.g. sequential PRs in one
-    long-lived agent session -- so the SAME session's own prior branch claim evolving must not
-    veto its own freshly-reverified value; a DIFFERENT, still-tracked session's disagreement still
-    refuses (genuine concurrent-use protection is preserved).
+    OTHER currently-tracked, STILL-FRESH session disagrees. A worktree's ``git_common_dir`` is a
+    structural identity that should never legitimately change over a Safe Workspace's lifetime, so
+    that half stays a hard, session-independent block. A worktree's checked-out ``branch``
+    legitimately, routinely changes via an ordinary `git checkout`/`git switch` -- e.g. sequential
+    PRs in one long-lived agent session -- so the SAME session's own prior branch claim evolving
+    must not veto its own freshly-reverified value; a DIFFERENT, still-tracked session's
+    disagreement still refuses (genuine concurrent-use protection is preserved) -- but only while
+    that other session's own last heartbeat is within BRANCH_DISAGREEMENT_STALE_SECONDS. A session
+    that has gone quiet longer than that is a frozen belief, not a live peer, and must not veto a
+    heartbeat forever (see BRANCH_DISAGREEMENT_STALE_SECONDS for the full rationale).
 
     ``pid`` is recorded for STRONG liveness ONLY when the caller owns a long-lived process for
     this root; ephemeral callers (a sessionStart hook that exits immediately) MUST omit it, so
@@ -1288,8 +1335,21 @@ def _finish_session_evidence_locked(root_path: str, *, confirming_session_key: s
         first = _strict_iso_epoch(sess.get("first_seen"))
         member_timestamp_state, last_epoch = _timestamp_pair_state(
             sess.get("last_heartbeat"), sess.get("last_heartbeat_epoch"))
+        # `branch` is the ONE session-mutable field here (see `_heartbeat_locked`'s identical
+        # philosophy) -- a member recording an outdated branch is expected and harmless once that
+        # member is stale (BRANCH_DISAGREEMENT_STALE_SECONDS): the member's OWN entry is simply a
+        # frozen belief from before the branch last changed, and finish_session_gate's own
+        # freshness loop, below in this file, already never lets a stale member block OR waive
+        # anything. Rejecting the WHOLE evidence set over one stale member's stale branch value
+        # would silently break every preview/finish call for this root exactly as long as that
+        # member sits in `sessions` -- the same "cross-session disagreement never expires" defect
+        # this file's other multi-session checks (heartbeat's own guard, above) are fixed against.
+        # A FRESH member's branch must still match: that is a live, meaningful disagreement.
+        branch_ok = (
+            sess.get("branch") == branch
+            or not _session_disagreement_is_fresh(sess, now))
         if (sess.get("boot_id") != current_boot
-                or sess.get("branch") != branch
+                or not branch_ok
                 or sess.get("git_common_dir") != target_common
                 or first is None or member_timestamp_state == "invalid" or last_epoch is None
                 or first > last_epoch or last_epoch > now + 5):

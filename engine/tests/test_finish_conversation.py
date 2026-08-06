@@ -317,6 +317,61 @@ class HookAndDispatcherTest(Phase2Base):
         latest = json.loads(files[-1].read_text(encoding="utf-8"))
         self.assertEqual(latest["decision"], "block_warning")
 
+    def test_hook_stale_different_session_branch_disagreement_no_longer_fails_open(
+            self) -> None:
+        """END-TO-END regression for the NEW defect this task fixes (distinct from the PR #82
+        fix above): a DIFFERENT, long-idle session/tab's heartbeat on this SAME worktree --
+        recorded once, then never refreshed again, e.g. a chat left open and forgotten -- must
+        not silently veto a live, different session's ordinary "I'm done" after the branch has
+        since changed. This is the EXACT real field repro shape (two distinct session
+        identities, one gone stale, the branch changed in between). BITING: before this fix, this
+        returned {"continue": True} with decision=fail_open / reason=heartbeat_existing_branch_
+        mismatch -- reproduced against the actual poisoned worktree during this investigation."""
+        _, wt = self.linked("stale-other-session")
+        Path(wt, "draft.txt").write_text("x", encoding="utf-8")
+        roots = UX._load_finish()._roots_module()
+        common = git(
+            wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        seeded = roots.heartbeat(
+            wt, branch="cursor/worktree/stale-other-session", common_dir=common,
+            session_id="idle-old-session")
+        self.assertTrue(seeded.get("ok", True), seeded)
+        path = Path(roots.record_path(wt))
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        stale_epoch = roots._now_epoch() - (roots.BRANCH_DISAGREEMENT_STALE_SECONDS + 60)
+        stale_timestamp = roots._iso_from_epoch(stale_epoch)
+        member = rec["sessions"][roots.session_key("idle-old-session")]
+        member["last_heartbeat_epoch"] = stale_epoch
+        member["last_heartbeat"] = stale_timestamp
+        member["first_seen"] = stale_timestamp
+        # idle-old-session is (so far) also the record's top-level writer -- the record's own
+        # member-projection invariant (top-level fields == that session's member fields) requires
+        # aging those in lockstep too; this is fixture upkeep, not part of what is under test.
+        if rec.get("session_id") == "idle-old-session":
+            rec["last_heartbeat_epoch"] = stale_epoch
+            rec["last_heartbeat"] = stale_timestamp
+            rec["first_seen"] = stale_timestamp
+        path.write_text(json.dumps(rec), encoding="utf-8")
+
+        git(wt, "checkout", "-q", "-b", "docs-followup-live")
+
+        response = UX.handle_hook_payload(self.live_payload(
+            wt, session="live-session-2", conv="live-conversation-2"))
+        self.assertEqual(
+            set(response), {"continue", "user_message"},
+            f"a different, stale session's frozen branch claim must not fail the hook open: "
+            f"{response}")
+        self.assertFalse(response["continue"], response)
+        dialogue = UX.read_dialogue("live-conversation-2")
+        self.assertIsNotNone(dialogue)
+        self.assertEqual(dialogue["target"]["branch"], "docs-followup-live")
+
+        directory = UX._hook_observation_dir()
+        files = sorted(directory.glob("hook-*.json"), key=lambda p: p.stat().st_mtime)
+        self.assertGreaterEqual(len(files), 1)
+        latest = json.loads(files[-1].read_text(encoding="utf-8"))
+        self.assertEqual(latest["decision"], "block_warning")
+
     def test_hook_preview_blocks_with_exact_warning_and_bare_choice_handoff(self) -> None:
         _, wt = self.linked("handoff")
         Path(wt, "draft.txt").write_text("x", encoding="utf-8")
