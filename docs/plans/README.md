@@ -22,11 +22,12 @@ lands — this directory already follows the reference shape it derived from.
 2. **Naming.** `<topic-slug>-vN.md`. A continuously-amended single-version tracker
    (no competing versions expected) may omit the `-vN` suffix.
 3. **Freeze-on-approval.** Once a version is owner-approved (or superseded by a newer
-   version), it is **frozen immutable** — never edit it again, including for typos. A
-   revision is always a **new** `-v<N+1>.md` file, preserving the prior version
-   byte-identically. State the pointer explicitly in the new file's `**Supersedes:**`
-   bullet and, where practical, add a one-line "now frozen historical" note to the
-   superseded file's own `**Status:**` bullet (its body stays untouched).
+   version), it is **frozen immutable** — never edit it again, including for typos, and
+   (per doc-warden POLICY §9, adopted for new plans by ADR 0008) **not even a
+   status-bullet edit**. A revision is always a **new** `-v<N+1>.md` file, preserving the
+   prior version byte-identically, with the pointer stated explicitly in the new file's
+   `**Supersedes:**` bullet; the prior version's frozen/superseded status is recorded in
+   the **index row below only**, never by editing the accepted file.
 4. **Body shape.** purpose and boundary → live-state verification → inherited
    scope/ground truth → numbered or lettered decisions → acceptance-test ledger →
    non-goals → owner GO/NO-GO gate → review provenance. Pick whichever skeleton fits
@@ -36,11 +37,22 @@ lands — this directory already follows the reference shape it derived from.
    this file before writing a new plan or acting on an old one. The root `AGENTS.md`
    points here.
 
+## Convention reconciliation with doc-warden (2026-08-06)
+
+> **New plans adopt doc-warden's canonical shape going forward** — see the ADR-set meta-decision
+> [`../adr/0008-adopt-and-reconcile-doc-warden-conventions.md`](../adr/0008-adopt-and-reconcile-doc-warden-conventions.md).
+> New plans use doc-warden's status vocabulary `DRAFT → ACCEPTED → SUPERSEDED` (the local
+> `APPROVED — FROZEN` / `COMPLETE` values remain valid for existing records). This index keeps its local
+> `File | Status | One-line description` columns for now so the existing `guard-…` row stays
+> byte-identical; migrating to doc-warden's canonical `Plan | Status | Date | Notes` is a deferred,
+> operator-gated, index-only change under doc-warden's POC 3d.
+
 ## Index
 
 | File | Status | One-line description |
 |---|---|---|
 | `guard-target-path-precision-v1.md` | COMPLETE — 2026-08-06 | Fix `beforeShellExecution` DENYing mutating commands whose resolved target path is outside every protected primary checkout (e.g. `rm /tmp/x` from inside a protected repo); establishes this `docs/` governance layer itself. |
+| `awa-mcp-evolution-v1.md` | DRAFT — 2026-08-06 | Consolidates the v3/v4 MCP-discoverability floor and expands it: single-source capability registry, deterministic `awa_route`, kernel-gated MCP lifecycle previews, MCP worktree creation, engine-owned dynamic resources, and doc-warden alignment (ADRs 0002–0009). |
 
 ## Related conventions
 
