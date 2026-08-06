@@ -47,6 +47,7 @@ lands — this directory already follows the reference shape it derived from.
 
 | ADR | Status | One-line decision |
 |---|---|---|
+| 0002-awa-dev-overlay.md | awa dev overlay | DRAFT | 2026-08-06 |
 | [0001](0001-target-path-aware-mutation-scope.md) | Accepted — 2026-08-05 | Mutation-scope decisions must resolve and check actual command target path(s), not just cwd+verb; additive-only, conservative-fallback-preserving. |
 
 ## Related conventions
