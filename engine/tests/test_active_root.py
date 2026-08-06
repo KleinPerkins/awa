@@ -200,6 +200,90 @@ class ActiveRootTest(EngineTestCase):
         recovered = AR.heartbeat(wt, branch="shared/x", common_dir=common, session_id="session-a")
         self.assertTrue(recovered.get("ok", True), recovered)
 
+    def _age_session_member(self, root: str, session_id: str, seconds_ago: int) -> None:
+        """Rewrite ONE session member's last-heartbeat timestamps in place (other members are
+        left untouched), so a test can make a specific tracked session look stale without
+        disturbing the rest of the record. If this session is currently the record's top-level
+        writer, the top-level projection fields are aged in lockstep -- the record's own
+        member-projection invariant (top-level fields == that session's member fields) requires
+        this; it is not itself part of what this test is exercising."""
+        path = Path(AR.record_path(root))
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        epoch = AR._now_epoch() - seconds_ago
+        timestamp = AR._iso_from_epoch(epoch)
+        member = rec["sessions"][AR.session_key(session_id)]
+        member["last_heartbeat_epoch"] = epoch
+        member["last_heartbeat"] = timestamp
+        if member.get("first_seen"):
+            first_epoch = AR._iso_to_epoch(member["first_seen"])
+            if first_epoch is not None and first_epoch > epoch:
+                member["first_seen"] = timestamp
+        if rec.get("session_id") == session_id:
+            rec["last_heartbeat_epoch"] = epoch
+            rec["last_heartbeat"] = timestamp
+            if rec.get("first_seen"):
+                top_first_epoch = AR._iso_to_epoch(rec["first_seen"])
+                if top_first_epoch is not None and top_first_epoch > epoch:
+                    rec["first_seen"] = timestamp
+        path.write_text(json.dumps(rec), encoding="utf-8")
+
+    def test_heartbeat_stale_different_session_branch_disagreement_no_longer_vetoes(
+            self) -> None:
+        """BITING (fix, round 2): PR #82 made `other_session_disagrees` session-aware but not
+        STALENESS-aware -- ANY other session EVER recorded against this root, however old,
+        vetoed a heartbeat forever once its frozen `branch` disagreed with a fresh, live
+        target-recheck. Reproduces the real field defect: two long-idle Cursor sessions
+        (session-a on the ORIGINAL branch) left in `sessions`, then an ordinary later branch
+        switch by session-b must not be vetoed by session-a's now-stale claim."""
+        repo = self.make_repo("stalebranch")
+        wt = self.add_worktree(repo, "shared/orig")
+        common = git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        seeded = AR.heartbeat(wt, branch="shared/orig", common_dir=common, session_id="session-a")
+        self.assertTrue(seeded.get("ok", True), seeded)
+        # Age session-a's OWN entry well past BRANCH_DISAGREEMENT_STALE_SECONDS (30 min) --
+        # exactly like the real poisoned worktree's two ~11.6h-old entries, just clamped to
+        # comfortably past this dedicated (shorter) threshold rather than the coarse 12h TTL.
+        self._age_session_member(
+            wt, "session-a", AR.BRANCH_DISAGREEMENT_STALE_SECONDS + 60)
+
+        git(wt, "checkout", "-q", "-b", "shared/new")
+        refreshed = AR.heartbeat(wt, branch="shared/new", common_dir=common, session_id="session-b")
+        self.assertTrue(refreshed.get("ok", True), refreshed)
+        self.assertEqual(refreshed["branch"], "shared/new")
+        self.assertEqual(
+            refreshed["sessions"][AR.session_key("session-b")]["branch"], "shared/new")
+        # session-a's own stale entry is left as-is (minimal-risk: non-voting, not pruned) --
+        # matching finish_session_gate's own established "stale neither blocks nor waives" style.
+        self.assertEqual(
+            refreshed["sessions"][AR.session_key("session-a")]["branch"], "shared/orig")
+        self.assertEqual(AR.disposition(wt)["disposition"], "active")
+
+    def test_heartbeat_branch_disagreement_freshness_boundary_is_exact(self) -> None:
+        """Robustness: the freshness cutoff is the exact BRANCH_DISAGREEMENT_STALE_SECONDS
+        boundary, not some other accidental threshold (e.g. the coarse 12h DEFAULT_TTL_SECONDS,
+        which would NOT have cleared the real poisoned worktree -- its two entries were ~11.6h
+        old, still 'fresh' by that measure)."""
+        repo = self.make_repo("boundarybranch")
+        wt = self.add_worktree(repo, "shared/orig")
+        common = git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        AR.heartbeat(wt, branch="shared/orig", common_dir=common, session_id="session-a")
+        git(wt, "checkout", "-q", "-b", "shared/new")
+
+        # Just UNDER the threshold -> still fresh -> still vetoes.
+        self._age_session_member(
+            wt, "session-a", AR.BRANCH_DISAGREEMENT_STALE_SECONDS - 5)
+        still_blocked = AR.heartbeat(
+            wt, branch="shared/new", common_dir=common, session_id="session-b")
+        self.assertFalse(still_blocked.get("ok", True), still_blocked)
+        self.assertEqual(still_blocked["reason"], "heartbeat_existing_branch_mismatch")
+
+        # Just OVER the threshold -> stale -> no longer vetoes.
+        self._age_session_member(
+            wt, "session-a", AR.BRANCH_DISAGREEMENT_STALE_SECONDS + 5)
+        now_allowed = AR.heartbeat(
+            wt, branch="shared/new", common_dir=common, session_id="session-b")
+        self.assertTrue(now_allowed.get("ok", True), now_allowed)
+
     # ---- bind_current_session has the SAME defect one level up (fix, cont.) -----------
     def test_bind_current_session_same_session_branch_switch_now_succeeds(self) -> None:
         """BITING: bind_current_session's OWN `same_target` check compares `prior.branch` to
@@ -243,6 +327,97 @@ class ActiveRootTest(EngineTestCase):
             common_dir=common, source="beforeSubmitPrompt")
         self.assertFalse(refused.get("ok"), refused)
         self.assertEqual(refused["reason"], "current_session_target_mismatch")
+
+    def test_bind_current_session_stale_prior_self_heals_via_session_start(self) -> None:
+        """Investigation finding (NOT a bug -- proven here so it never silently regresses):
+        unlike heartbeat()'s accumulating `sessions` dict, `current_session` is a SINGLE
+        CAS-replaceable record, and `sessionStart` may replace a DIFFERENT session's prior claim
+        UNCONDITIONALLY (identity-independent), regardless of how stale that prior claim is --
+        there is no time-based veto to go unbounded in the first place. An arbitrarily old prior
+        claim from a long-dead session is superseded the moment the new session's sessionStart
+        hook runs, exactly as for a claim written a second ago. beforeSubmitPrompt alone (no
+        sessionStart) legitimately still refuses (current_session_session_mismatch) -- that race
+        is already bounded by _bind_hook_current_session's own short retry-with-deadline loop,
+        not by staleness."""
+        repo = self.make_repo("bindstaleheals")
+        wt = self.add_worktree(repo, "feat/alpha")
+        common = git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        seeded = AR.bind_current_session(
+            wt, session_id="session-a", conversation_id="conv-a", branch="feat/alpha",
+            common_dir=common, source="beforeSubmitPrompt")
+        self.assertTrue(seeded.get("ok"), seeded)
+        # Age the (single) current_session record WAY past any staleness window this file uses
+        # anywhere (12h default TTL) -- if this were the same unbounded-veto defect class, this
+        # would still block a different session's beforeSubmitPrompt bind forever.
+        path = Path(AR.current_session_path(wt))
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        rec["updated_at_epoch"] = AR._now_epoch() - (AR.DEFAULT_TTL_SECONDS * 10)
+        path.write_text(json.dumps(rec), encoding="utf-8")
+
+        still_refused = AR.bind_current_session(
+            wt, session_id="session-b", conversation_id="conv-b", branch="feat/alpha",
+            common_dir=common, source="beforeSubmitPrompt")
+        self.assertFalse(still_refused.get("ok"), still_refused)
+        self.assertEqual(still_refused["reason"], "current_session_session_mismatch")
+
+        healed = AR.bind_current_session(
+            wt, session_id="session-b", conversation_id="conv-b", branch="feat/alpha",
+            common_dir=common, source="sessionStart")
+        self.assertTrue(healed.get("ok"), healed)
+        current, status = AR.read_current_session(wt)
+        self.assertEqual(status, "ok")
+        self.assertEqual(current["session_id"], "session-b")
+
+    # ---- finish_session_evidence has the SAME defect one level further downstream ----
+    def test_finish_session_evidence_stale_disagreeing_session_no_longer_malformed(
+            self) -> None:
+        """BITING (fix, round 3): fixing heartbeat() alone left the real end-to-end repro dying
+        one layer further downstream, in finish_session_gate's OWN evidence-validation helper
+        (_finish_session_evidence_locked). ANY session member's frozen `branch` disagreeing with
+        the CURRENT live branch made the whole evidence set `session_malformed`, regardless of
+        that member's staleness -- even though finish_session_gate's OWN freshness loop, right
+        below this helper in the same file, already correctly treats a stale member as neither
+        blocking nor waiving. This is the exact reason the real poisoned worktree's repro still
+        failed (reason=session_malformed) immediately after fixing heartbeat() alone."""
+        repo = self.make_repo("evidencestale")
+        wt = self.add_worktree(repo, "shared/orig")
+        common = git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        AR.heartbeat(wt, branch="shared/orig", common_dir=common, session_id="session-a")
+        self._age_session_member(
+            wt, "session-a", AR.BRANCH_DISAGREEMENT_STALE_SECONDS + 60)
+        git(wt, "checkout", "-q", "-b", "shared/new")
+        confirmed = AR.heartbeat(
+            wt, branch="shared/new", common_dir=common, session_id="session-b")
+        self.assertTrue(confirmed.get("ok", True), confirmed)
+
+        evidence = AR.finish_session_evidence(
+            wt, confirming_session_key=AR.session_key("session-b"),
+            branch="shared/new", common_dir=common)
+        self.assertTrue(evidence.get("ok"), evidence)
+        self.assertIn(AR.session_key("session-a"), evidence["membership"])
+
+        # A FRESH disagreement must still be treated as malformed/blocking evidence -- defense in
+        # depth parity with heartbeat()'s own guard, which in the ordinary flow already refuses
+        # first for a fresh disagreement (so this shape cannot normally arise via the public API;
+        # construct it directly, matching this file's existing convention for edge cases, e.g.
+        # test_reboot_heartbeat_prunes_valid_old_members_and_preserves_mixed_projection above).
+        path = Path(AR.record_path(wt))
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        fresh_epoch = AR._now_epoch()
+        rec["sessions"][AR.session_key("session-a")] = {
+            "session_id": "session-a", "pid": None, "boot_id": AR.boot_id(),
+            "branch": "shared/other", "git_common_dir": common,
+            "first_seen": AR._iso_from_epoch(fresh_epoch),
+            "last_heartbeat": AR._iso_from_epoch(fresh_epoch),
+            "last_heartbeat_epoch": fresh_epoch,
+        }
+        path.write_text(json.dumps(rec), encoding="utf-8")
+        fresh_disagreement = AR.finish_session_evidence(
+            wt, confirming_session_key=AR.session_key("session-b"),
+            branch="shared/new", common_dir=common)
+        self.assertFalse(fresh_disagreement.get("ok"), fresh_disagreement)
+        self.assertEqual(fresh_disagreement["reason"], "session_malformed")
+        self.assertEqual(fresh_disagreement["detail"], "session_target_or_timestamp_invalid")
 
     # ---- STALE (TTL) allows -------------------------------------------------
     def test_ttl_expired_is_stale_and_allows(self) -> None:
