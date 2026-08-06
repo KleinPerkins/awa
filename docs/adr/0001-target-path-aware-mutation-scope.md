@@ -1,6 +1,6 @@
 # ADR 0001: Mutation-scope decisions must be target-path-aware, not cwd-only
 
-Status: proposed — 2026-08-05
+Status: accepted — 2026-08-05 (implemented and merged in [#80](https://github.com/KleinPerkins/awa/pull/80))
 
 ## Context
 

@@ -1,7 +1,8 @@
 # AWA guard target-path precision — v1
 
 - **Version:** v1
-- **Status:** DRAFT (for review)
+- **Status:** COMPLETE — 2026-08-06 (merged as [#80](https://github.com/KleinPerkins/awa/pull/80), tagged/released
+  `v1.2.0`, deployed, and live-verified per §4C step 14 / §5's closing acceptance proof)
 - **Date:** 2026-08-05
 - **Relates to:** [ADR 0001](../adr/0001-target-path-aware-mutation-scope.md) (the durable
   decision this plan executes); [issue #75](https://github.com/KleinPerkins/awa/issues/75)
