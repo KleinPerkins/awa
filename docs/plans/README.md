@@ -40,7 +40,7 @@ lands — this directory already follows the reference shape it derived from.
 
 | File | Status | One-line description |
 |---|---|---|
-| `guard-target-path-precision-v1.md` | Proposed — 2026-08-05 | Fix `beforeShellExecution` DENYing mutating commands whose resolved target path is outside every protected primary checkout (e.g. `rm /tmp/x` from inside a protected repo); establishes this `docs/` governance layer itself. |
+| `guard-target-path-precision-v1.md` | COMPLETE — 2026-08-06 | Fix `beforeShellExecution` DENYing mutating commands whose resolved target path is outside every protected primary checkout (e.g. `rm /tmp/x` from inside a protected repo); establishes this `docs/` governance layer itself. |
 
 ## Related conventions
 
