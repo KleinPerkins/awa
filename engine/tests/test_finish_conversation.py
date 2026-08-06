@@ -279,6 +279,44 @@ class HookAndDispatcherTest(Phase2Base):
             self.assertEqual(UX._load_finish().read_challenge(conv)[1], "absent")
             self.assertIsNone(UX.read_dialogue(conv))
 
+    def test_hook_mid_session_branch_switch_no_longer_fails_open(self) -> None:
+        """END-TO-END regression for the reported field symptom: earlier in one long-lived agent
+        session/conversation, a first `beforeSubmitPrompt` "I'm done" established a heartbeat +
+        current-session binding on the worktree's FIRST branch. An ordinary mid-session
+        `git checkout` to a second branch -- exactly the sequential-PR agent workflow this repo's
+        own worktree conventions expect -- must not silently fail the finish hook open on the
+        next "I'm done" from the SAME live session. BITING: before this fix, the second hook call
+        returned {"continue": True} with the private hook-observation decision=fail_open /
+        reason=heartbeat_existing_branch_mismatch -- the EXACT diagnostic recorded in the field.
+        (Fixing heartbeat() alone still reproduces this end-to-end through
+        bind_current_session's sibling check, just renamed to current_session_target_mismatch --
+        both were fixed together for this test to pass.) After the fix, the real preview/warning
+        fires for the new, freshly-reverified branch instead."""
+        _, wt = self.linked("mid-session-switch")
+        Path(wt, "draft.txt").write_text("x", encoding="utf-8")
+        session, conv = "live-session", "live-conversation"
+        first = UX.handle_hook_payload(self.live_payload(wt, session=session, conv=conv))
+        self.assertFalse(first["continue"], first)
+
+        git(wt, "checkout", "-q", "-b", "docs-followup")
+
+        second = UX.handle_hook_payload(self.live_payload(wt, session=session, conv=conv))
+        self.assertEqual(
+            set(second), {"continue", "user_message"},
+            "same live session's ordinary branch switch must not silently fail the hook open: "
+            f"{second}")
+        self.assertFalse(second["continue"], second)
+        dialogue = UX.read_dialogue(conv)
+        self.assertIsNotNone(dialogue)
+        self.assertEqual(dialogue["target"]["branch"], "docs-followup")
+        self.assertEqual(second["user_message"], UX.render_warning(dialogue["rows"]))
+
+        directory = UX._hook_observation_dir()
+        files = sorted(directory.glob("hook-*.json"), key=lambda p: p.stat().st_mtime)
+        self.assertGreaterEqual(len(files), 2)
+        latest = json.loads(files[-1].read_text(encoding="utf-8"))
+        self.assertEqual(latest["decision"], "block_warning")
+
     def test_hook_preview_blocks_with_exact_warning_and_bare_choice_handoff(self) -> None:
         _, wt = self.linked("handoff")
         Path(wt, "draft.txt").write_text("x", encoding="utf-8")

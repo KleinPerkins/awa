@@ -415,6 +415,15 @@ def bind_current_session(root_path: str, *, session_id: str, conversation_id: st
     sessionStart may replace a previous session but never clears an already attached conversation
     for the same session. beforeSubmitPrompt may create an absent binding or attach only to its
     exact session; it never adopts another session or conversation.
+
+    Identity-mutation guard (session-aware for ``branch``, unconditional for ``root``/
+    ``common_dir``): mirrors ``heartbeat``'s guard above for the same reason -- ``branch``
+    legitimately, routinely changes over a worktree's lifetime via an ordinary `git checkout`/
+    `git switch` (e.g. sequential PRs in one long-lived agent session), so the SAME session's own
+    prior branch claim evolving (now live-reverified by the target-recheck below) must not veto
+    its own freshly-reverified value. A DIFFERENT session's disagreement about the branch still
+    refuses -- for ``beforeSubmitPrompt`` explicitly (``current_session_session_mismatch``, right
+    below) and for any source via the unchanged ``root``/``common_dir`` half of ``same_target``.
     """
     if source not in {"sessionStart", "beforeSubmitPrompt"}:
         raise ValueError("unsupported current session bind source")
@@ -438,16 +447,17 @@ def bind_current_session(root_path: str, *, session_id: str, conversation_id: st
                 # authority. The live linked-target recheck above makes replacing it safe.
                 prior = None
             if prior is not None:
+                same_session = prior.get("session_id") == incoming["session_id"]
                 same_target = (
                     prior.get("root") == incoming["root"]
-                    and prior.get("branch") == incoming["branch"]
+                    and (same_session or prior.get("branch") == incoming["branch"])
                     and os.path.abspath(prior.get("common_dir", ""))
                     == incoming["common_dir"])
                 if not same_target:
                     return {"ok": False, "reason": "current_session_target_mismatch"}
-                if source == "beforeSubmitPrompt" and prior["session_id"] != incoming["session_id"]:
+                if source == "beforeSubmitPrompt" and not same_session:
                     return {"ok": False, "reason": "current_session_session_mismatch"}
-                if prior["session_id"] == incoming["session_id"]:
+                if same_session:
                     prior_conversation = prior.get("conversation_id", "")
                     incoming_conversation = incoming["conversation_id"]
                     if (prior_conversation and incoming_conversation
@@ -980,15 +990,29 @@ def _heartbeat_locked(root_path: str, *, branch: str | None, common_dir: str | N
     eff_pid = int(pid) if pid is not None else None
     if not _valid_optional_pid(eff_pid):
         return {"ok": False, "reason": "heartbeat_pid_invalid"}
+    skey = session_key(eff_session)
     if prior:
         prior_common = prior.get("git_common_dir")
-        prior_branch = prior.get("branch")
         if (common_dir and prior_common and os.path.abspath(prior_common) != eff_common):
             return {"ok": False, "reason": "heartbeat_existing_common_dir_mismatch"}
+        prior_branch = prior.get("branch")
         if branch and prior_branch and prior_branch != eff_branch:
-            return {"ok": False, "reason": "heartbeat_existing_branch_mismatch"}
+            # The persisted top-level `branch` merely reflects whichever session's heartbeat
+            # wrote it last -- by itself that is not a concurrency signal (see `sessions`,
+            # below). `_heartbeat_target_recheck` above already, freshly and independently,
+            # re-verified (under this SAME lock) that `eff_branch` is this worktree's genuine,
+            # live, current branch RIGHT NOW. A stale prior value is a real conflict only when
+            # it is some OTHER session's own recorded claim -- the CONFIRMING session's own
+            # prior claim (e.g. from before an ordinary `git checkout`/`git switch` between
+            # sequential PRs in one long-lived agent session) legitimately evolving over time
+            # must not veto its own freshly-reverified branch.
+            other_session_disagrees = any(
+                other_key != skey and other_sess.get("branch") not in (None, eff_branch)
+                for other_key, other_sess in sessions.items()
+            )
+            if other_session_disagrees:
+                return {"ok": False, "reason": "heartbeat_existing_branch_mismatch"}
 
-    skey = session_key(eff_session)
     sess_first_seen = sessions.get(skey, {}).get("first_seen") or now_iso
     sessions[skey] = {
         "session_id": eff_session,
@@ -1031,6 +1055,17 @@ def heartbeat(root_path: str, *, branch: str | None = None, common_dir: str | No
     readers are unchanged), AND an optional ``sessions`` map records EACH session's own entry
     (keyed by session_key) so the finish path can distinguish the confirming session's own heartbeat
     from another live session. Per-session ``first_seen`` is preserved across refreshes.
+
+    Identity-mutation guard (session-aware for ``branch``, unconditional for ``common_dir``): a
+    heartbeat that would change a root's persisted ``branch`` or ``git_common_dir`` is refused
+    UNLESS the live target-recheck above just re-verified it AND, for ``branch`` specifically, no
+    OTHER currently-tracked session disagrees. A worktree's ``git_common_dir`` is a structural
+    identity that should never legitimately change over a Safe Workspace's lifetime, so that half
+    stays a hard, session-independent block. A worktree's checked-out ``branch`` legitimately,
+    routinely changes via an ordinary `git checkout`/`git switch` -- e.g. sequential PRs in one
+    long-lived agent session -- so the SAME session's own prior branch claim evolving must not
+    veto its own freshly-reverified value; a DIFFERENT, still-tracked session's disagreement still
+    refuses (genuine concurrent-use protection is preserved).
 
     ``pid`` is recorded for STRONG liveness ONLY when the caller owns a long-lived process for
     this root; ephemeral callers (a sessionStart hook that exits immediately) MUST omit it, so

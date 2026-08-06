@@ -109,6 +109,141 @@ class ActiveRootTest(EngineTestCase):
         self.assertFalse(refused["ok"])
         self.assertEqual(path.read_bytes(), before)
 
+    # ---- session-aware branch-mismatch guard (fix: mid-session branch switch) ----------
+    def test_heartbeat_same_session_branch_switch_now_succeeds(self) -> None:
+        """BITING: before the fix, a SAME session's heartbeat on a real linked worktree, after
+        an ordinary mid-session `git checkout` to a new branch, was refused with
+        heartbeat_existing_branch_mismatch purely because the persisted top-level `branch` was
+        stale -- even though _heartbeat_target_recheck had JUST, freshly, independently
+        re-verified the new branch against live git ground truth under the same lock."""
+        repo = self.make_repo("samesession")
+        wt = self.add_worktree(repo, "fix/one")
+        common = git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        first = AR.heartbeat(wt, branch="fix/one", common_dir=common, session_id="agent-session")
+        self.assertTrue(first.get("ok", True), first)
+        self.assertEqual(first["branch"], "fix/one")
+
+        git(wt, "checkout", "-q", "-b", "docs/two")
+        second = AR.heartbeat(wt, branch="docs/two", common_dir=common, session_id="agent-session")
+        self.assertTrue(second.get("ok", True), second)
+        self.assertEqual(second["branch"], "docs/two")
+        self.assertEqual(
+            second["sessions"][AR.session_key("agent-session")]["branch"], "docs/two")
+        self.assertEqual(AR.disposition(wt)["disposition"], "active")
+
+    def test_heartbeat_different_session_branch_disagreement_still_refused(self) -> None:
+        """BITING: protection preserved. A DIFFERENT, still-tracked session's own recorded
+        branch claim disagreeing with a fresh heartbeat's branch must still refuse -- this is a
+        genuine concurrent-use signal, not a stale same-session artifact."""
+        repo = self.make_repo("diffsession")
+        wt = self.add_worktree(repo, "feat/alpha")
+        common = git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        seeded = AR.heartbeat(wt, branch="feat/alpha", common_dir=common, session_id="session-a")
+        self.assertTrue(seeded.get("ok", True), seeded)
+
+        git(wt, "checkout", "-q", "-b", "feat/beta")
+        before = Path(AR.record_path(wt)).read_bytes()
+        refused = AR.heartbeat(wt, branch="feat/beta", common_dir=common, session_id="session-b")
+        self.assertFalse(refused.get("ok", True), refused)
+        self.assertEqual(refused["reason"], "heartbeat_existing_branch_mismatch")
+        self.assertEqual(Path(AR.record_path(wt)).read_bytes(), before,
+                         "a refused heartbeat must not mutate the persisted record")
+
+    def test_heartbeat_common_dir_mismatch_still_refused_regardless_of_session(self) -> None:
+        """BITING: the common_dir half of the guard is UNCHANGED -- still a hard, unconditional
+        block regardless of session identity (a worktree's git_common_dir must never remap
+        without the filesystem being torn down/rebuilt)."""
+        root = self.a_dir("commondir")
+        seeded = AR.heartbeat(root, common_dir="/tmp/awa-common-a", session_id="same-session")
+        self.assertTrue(seeded.get("ok", True), seeded)
+        before = Path(AR.record_path(root)).read_bytes()
+        refused = AR.heartbeat(root, common_dir="/tmp/awa-common-b", session_id="same-session")
+        self.assertFalse(refused.get("ok", True), refused)
+        self.assertEqual(refused["reason"], "heartbeat_existing_common_dir_mismatch")
+        self.assertEqual(Path(AR.record_path(root)).read_bytes(), before)
+
+    def test_heartbeat_branch_conflict_check_is_per_session_not_last_writer(self) -> None:
+        """Robustness: the conflict check must consult EVERY other currently-tracked session's
+        OWN recorded claim, not merely whichever session's heartbeat most recently wrote the
+        shared top-level fields. Session Z claims branch W; session A also agrees on W and (by
+        coincidence) becomes the top-level's most recent writer; a real branch switch to X must
+        still block A's OWN update, because Z -- a separate, still-tracked session -- has not
+        (yet) agreed to X. A naive comparison that only checks whichever session wrote the
+        top-level fields last would wrongly let this through, since A -- the confirming session
+        -- also happens to be that last writer."""
+        repo = self.make_repo("multisession")
+        wt = self.add_worktree(repo, "shared/w")
+        common = git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        z1 = AR.heartbeat(wt, branch="shared/w", common_dir=common, session_id="session-z")
+        self.assertTrue(z1.get("ok", True), z1)
+        a1 = AR.heartbeat(wt, branch="shared/w", common_dir=common, session_id="session-a")
+        self.assertTrue(a1.get("ok", True), a1)
+        self.assertEqual(a1["session_id"], "session-a", "A is now the top-level last writer")
+
+        git(wt, "checkout", "-q", "-b", "shared/x")
+        blocked = AR.heartbeat(wt, branch="shared/x", common_dir=common, session_id="session-a")
+        self.assertFalse(blocked.get("ok", True), blocked)
+        self.assertEqual(
+            blocked["reason"], "heartbeat_existing_branch_mismatch",
+            "Z's own still-tracked claim of the OLD branch must still block A's update, even "
+            "though A (not Z) wrote the top-level fields last")
+        # The block is symmetric (a genuine two-session disagreement, not a one-sided bug): Z
+        # moving alone is equally blocked by A's own still-tracked (and, since `blocked` above
+        # never persisted, still stale) claim. This mutual-refusal-until-reconciled behavior
+        # PRE-DATES this fix (the old top-level-only check could wedge on ANY mismatch, from any
+        # cause); this fix only narrows which mismatches can trigger it -- resolving a genuine
+        # multi-session disagreement automatically is out of scope here. The file's existing
+        # `forget`/remove_root escape hatch (K2 TODO, above) is the documented recovery path.
+        z_blocked = AR.heartbeat(wt, branch="shared/x", common_dir=common, session_id="session-z")
+        self.assertFalse(z_blocked.get("ok", True), z_blocked)
+        self.assertTrue(AR.remove_root(wt, common_dir=common))
+        recovered = AR.heartbeat(wt, branch="shared/x", common_dir=common, session_id="session-a")
+        self.assertTrue(recovered.get("ok", True), recovered)
+
+    # ---- bind_current_session has the SAME defect one level up (fix, cont.) -----------
+    def test_bind_current_session_same_session_branch_switch_now_succeeds(self) -> None:
+        """BITING: bind_current_session's OWN `same_target` check compares `prior.branch` to
+        the freshly live-reverified incoming branch UNCONDITIONALLY, one level above heartbeat().
+        Fixing heartbeat() alone left this reproducing the identical original symptom (fail-open
+        on an ordinary mid-session branch switch) through _bind_hook_current_session, just under
+        a different reason string (current_session_target_mismatch instead of
+        heartbeat_existing_branch_mismatch) -- proven directly below and end-to-end in
+        test_finish_conversation.HookAndDispatcherTest."""
+        repo = self.make_repo("bindsamesession")
+        wt = self.add_worktree(repo, "fix/one")
+        common = git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        first = AR.bind_current_session(
+            wt, session_id="agent-session", conversation_id="conv-1", branch="fix/one",
+            common_dir=common, source="beforeSubmitPrompt")
+        self.assertTrue(first.get("ok"), first)
+
+        git(wt, "checkout", "-q", "-b", "docs/two")
+        second = AR.bind_current_session(
+            wt, session_id="agent-session", conversation_id="conv-1", branch="docs/two",
+            common_dir=common, source="beforeSubmitPrompt")
+        self.assertTrue(second.get("ok"), second)
+        self.assertEqual(second["current_session"]["branch"], "docs/two")
+
+    def test_bind_current_session_different_session_branch_disagreement_still_refused(
+            self) -> None:
+        """BITING: protection preserved -- a DIFFERENT session's own prior current-session claim
+        disagreeing about the branch must still refuse bind_current_session, exactly mirroring
+        heartbeat()'s unchanged cross-session protection."""
+        repo = self.make_repo("binddiffsession")
+        wt = self.add_worktree(repo, "feat/alpha")
+        common = git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        seeded = AR.bind_current_session(
+            wt, session_id="session-a", conversation_id="conv-a", branch="feat/alpha",
+            common_dir=common, source="beforeSubmitPrompt")
+        self.assertTrue(seeded.get("ok"), seeded)
+
+        git(wt, "checkout", "-q", "-b", "feat/beta")
+        refused = AR.bind_current_session(
+            wt, session_id="session-b", conversation_id="conv-b", branch="feat/beta",
+            common_dir=common, source="beforeSubmitPrompt")
+        self.assertFalse(refused.get("ok"), refused)
+        self.assertEqual(refused["reason"], "current_session_target_mismatch")
+
     # ---- STALE (TTL) allows -------------------------------------------------
     def test_ttl_expired_is_stale_and_allows(self) -> None:
         root = self.a_dir("stale")
