@@ -17,7 +17,7 @@ import os
 import re
 from dataclasses import dataclass
 
-from . import gitutil, lease as lease_mod, lock, state as state_mod
+from . import gitutil, identity, lease as lease_mod, lock, state as state_mod
 
 
 class LifecycleError(RuntimeError):
@@ -91,12 +91,58 @@ def _attest_locked(worktree_path: str, lease_id: str, state: state_mod.State) ->
         return False, "lease invalid: " + "; ".join(errs)
     if disk.get("lease_id") != lease_id:
         return False, "lease_id mismatch between disk and record"
-    # verify the worktree still resolves to the recorded common dir + branch.
+    # verify the worktree still resolves to the recorded common dir. git_common_dir is the
+    # REAL collision/identity boundary (frozen contract §lease.collision_boundary: "branch/path
+    # uniqueness is necessary but not sufficient") -- a linked worktree's common dir never
+    # legitimately changes short of the filesystem being torn down and rebuilt, so any mismatch
+    # here is genuine drift and stays an unconditional hard block.
     ctx = gitutil.resolve(worktree_path)
     if os.path.abspath(ctx.common_dir or "") != os.path.abspath(disk["git_common_dir"]):
         return False, "git_common_dir drifted"
     if ctx.branch != disk["branch"]:
-        return False, "branch drifted"
+        # An ordinary `git checkout`/`git switch` between adopt and attest (or between two
+        # attests) is a LEGITIMATE, expected evolution of a Safe Workspace -- not corruption.
+        # `gitutil.resolve()` just did a fresh, live re-read of ground truth immediately above;
+        # treat it as authoritative and self-heal the lease onto it, mirroring how heartbeat()
+        # already treats its own live-reverified branch as authoritative (#82/#83). Unlike
+        # heartbeat's `active_root/v1`, a lease is a SINGLE record per worktree with no session
+        # concept to consult, so there is no "is some other actor still disagreeing" question to
+        # ask here at all -- the only two states are "still the same physical worktree" (common
+        # dir matched, just handled above) and "not" (already returned above).
+        #
+        # The frozen identity_rule ties lease_id to the CURRENT branch (lease_id =
+        # hash(worktree_path + branch + git_common_dir + boot_id)), so simply overwriting
+        # `branch` in place would leave the on-disk lease permanently failing its own
+        # self-consistency check in `lease_mod.validate()`. Re-deriving lease_id keeps that
+        # invariant intact and is a REKEY of the same lease lineage (same worktree, same boot),
+        # not a new adoption: the old lease_id is marked "superseded" (kept, not deleted) rather
+        # than silently dropped, so the audit trail stays complete and `active_leases` bookkeeping
+        # does not double-count the same physical worktree under two identities.
+        old_branch, old_lease_id = disk["branch"], lease_id
+        new_lease = dict(disk)
+        new_lease["branch"] = ctx.branch or ""
+        new_lease["lease_id"] = identity.lease_id(
+            disk["worktree_path"], new_lease["branch"], disk["git_common_dir"], disk["boot_id"])
+        rekey_errs = lease_mod.validate(new_lease)
+        if rekey_errs:
+            return False, "rekeyed lease invalid: " + "; ".join(rekey_errs)
+        lease_mod.write_lease(worktree_path, new_lease)
+        state.set_lease_status(old_lease_id, "superseded")
+        state.upsert_lease(new_lease)
+        state.record_event(
+            "attest_rekeyed",
+            f"live branch changed {old_branch!r} -> {new_lease['branch']!r}; "
+            f"lease {old_lease_id} superseded by {new_lease['lease_id']}",
+            new_lease["lease_id"],
+        )
+        state.attest_lease(new_lease["lease_id"])
+        state.record_event("attest", f"attested lease {new_lease['lease_id']} (rekeyed)",
+                            new_lease["lease_id"])
+        return True, (
+            "verified: lease matches worktree (path+git_common_dir); branch self-healed "
+            f"{old_branch!r} -> {new_lease['branch']!r} (lease rekeyed "
+            f"{old_lease_id} -> {new_lease['lease_id']})"
+        )
     state.attest_lease(lease_id)
     state.record_event("attest", f"attested lease {lease_id}", lease_id)
     return True, "verified: lease matches worktree (path+branch+common_dir)"
