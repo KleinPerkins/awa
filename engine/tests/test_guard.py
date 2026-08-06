@@ -421,6 +421,21 @@ class TestDecideShellDegraded(EngineTestCase):
         d_allow = guard.decide_shell(repo_a, "git -C %s commit -am x" % wt, pol)
         self.assertEqual(d_allow.permission, "allow")
 
+    def test_git_dir_flag_not_masked_by_trailing_safe_work_tree(self):
+        """A trailing safe --work-tree must not launder an earlier --git-dir that still
+        points at the protected primary: git honors -C / --git-dir / --work-tree
+        SIMULTANEOUSLY, so a commit with an explicit --git-dir=<protected>/.git still
+        writes its objects/refs into that protected primary even when --work-tree
+        redirects the checked-out files elsewhere. The previous implementation kept
+        only the LAST-seen flag as "the" target, so ordering --work-tree after
+        --git-dir made the whole command look safe -- a guard bypass."""
+        repo = self.make_repo()
+        pol = self._policy_for(self._tmp.name)
+        safe_wt = tempfile.mkdtemp()
+        cmd = "git --git-dir=%s/.git --work-tree=%s commit -am x" % (repo, safe_wt)
+        d = guard.decide_shell(repo, cmd, pol)
+        self.assertEqual(d.permission, "deny")
+
     def test_too_many_targets_falls_back_conservative(self):
         repo = self.make_repo()
         pol = self._policy_for(self._tmp.name)
