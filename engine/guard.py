@@ -262,22 +262,45 @@ def _extract_candidate_targets(prog, rest, cwd):
     return None
 
 
-def _extract_git_target_dir(rest, cwd):
-    """git's -C / --git-dir / --work-tree redirect ITS OWN real working directory,
-    independent of the shell's cwd -- mirrors the existing arg-skip loop that already
-    walks these same flags to find the subcommand. Returns an absolute path (cwd
-    itself when no redirecting flag is present)."""
-    j, target = 0, cwd
+def _extract_git_target_dirs(rest, cwd):
+    """git's -C / --git-dir / --work-tree flags each redirect a DIFFERENT real
+    mutation surface, and git honors ALL of them simultaneously when several are
+    given together: -C changes git's own effective cwd (and is the fallback
+    git-dir-discovery root, becoming the work tree too whenever --work-tree /
+    GIT_WORK_TREE is absent -- even when --git-dir IS explicitly given); --git-dir
+    names where objects/refs are actually written (commit, index updates, fetch,
+    ...); --work-tree names where checked-out files are written (checkout, reset
+    --hard, clean, ...). A previous version of this function kept only the
+    LAST-seen flag's value as "the" target -- so `git --git-dir=<protected>/.git
+    --work-tree=<safe> commit` was classified solely on the trailing safe
+    --work-tree, even though --git-dir still pointed the actual commit (object +
+    ref write) at the protected primary: a guard bypass. Returns ALL applicable
+    targets (the -C-adjusted cwd, always, plus any explicit --git-dir / --work-tree
+    values) so the caller must prove EVERY one of them safe before converting a
+    deny into an allow (ADR 0001 §4: any single unsafe/unresolved target poisons
+    the whole command)."""
+    j, c_path, git_dir, work_tree = 0, cwd, None, None
     while j < len(rest):
         a = rest[j]
         if a == "-C" and j + 1 < len(rest):
-            target = rest[j + 1]; j += 2; continue
-        if a.startswith("--git-dir=") or a.startswith("--work-tree="):
-            target = a.split("=", 1)[1]; j += 1; continue
-        if a in ("--git-dir", "--work-tree") and j + 1 < len(rest):
-            target = rest[j + 1]; j += 2; continue
+            nxt = rest[j + 1]
+            c_path = nxt if os.path.isabs(nxt) else os.path.join(c_path, nxt)
+            j += 2; continue
+        if a.startswith("--git-dir="):
+            git_dir = a.split("=", 1)[1]; j += 1; continue
+        if a == "--git-dir" and j + 1 < len(rest):
+            git_dir = rest[j + 1]; j += 2; continue
+        if a.startswith("--work-tree="):
+            work_tree = a.split("=", 1)[1]; j += 1; continue
+        if a == "--work-tree" and j + 1 < len(rest):
+            work_tree = rest[j + 1]; j += 2; continue
         j += 1
-    return target if os.path.isabs(target) else os.path.join(cwd, target)
+    targets = [c_path]
+    if git_dir is not None:
+        targets.append(git_dir if os.path.isabs(git_dir) else os.path.join(c_path, git_dir))
+    if work_tree is not None:
+        targets.append(work_tree if os.path.isabs(work_tree) else os.path.join(c_path, work_tree))
+    return targets
 
 
 _MAX_PRECISE_TARGETS = 8  # bound worst-case classification calls per command; more
@@ -341,7 +364,7 @@ def _collect_precise_targets(command, cwd):
         prog = os.path.basename(toks[i])
         rest = toks[i + 1:]
         if prog == "git":
-            targets.append(_extract_git_target_dir(rest, cwd))
+            targets.extend(_extract_git_target_dirs(rest, cwd))
             targets.extend(redirect_targets)
             continue
         found = _extract_candidate_targets(prog, rest, cwd)

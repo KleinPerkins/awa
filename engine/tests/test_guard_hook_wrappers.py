@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -358,6 +359,20 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         self._git("-C", str(self.repo), "worktree", "add", "-q", "-b", "feat/x", str(wt), "main")
         resp2 = self._guard("git -C %s commit -am x" % wt)
         self.assertEqual(resp2.get("permission"), "allow")
+
+    def test_git_dir_flag_not_masked_by_trailing_safe_work_tree(self):
+        """A trailing safe --work-tree must not launder an earlier --git-dir that still
+        points at the protected primary: git honors BOTH flags together, so the commit's
+        objects/refs still land in the protected primary's git-dir even though the
+        checked-out files come from the safe work tree. Bash-hook parity for
+        engine/tests/test_guard.py's identical regression."""
+        safe_wt = tempfile.mkdtemp(prefix="awa-hook-wrap-safe-wt.")
+        try:
+            resp = self._guard(
+                "git --git-dir=%s/.git --work-tree=%s commit -am x" % (self.repo, safe_wt))
+            self.assertEqual(resp.get("permission"), "deny")
+        finally:
+            shutil.rmtree(safe_wt, ignore_errors=True)
 
 
 if __name__ == "__main__":
