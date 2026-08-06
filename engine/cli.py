@@ -93,7 +93,13 @@ def cmd_adopt(args: argparse.Namespace) -> int:
 
 def cmd_attest(args: argparse.Namespace) -> int:
     ok, why = lifecycle.attest(args.worktree)
-    return _emit({"action": "attest", "ok": ok, "reason": why}, code=0 if ok else 1)
+    # Re-read fresh: a branch self-heal rekeys lease_id in place (see lifecycle._attest_locked),
+    # so the id current at call-time may differ from whatever the caller resolved beforehand.
+    lz = lease_mod.read_lease(args.worktree)
+    out = {"action": "attest", "ok": ok, "reason": why}
+    if lz:
+        out["lease_id"] = lz.get("lease_id")
+    return _emit(out, code=0 if ok else 1)
 
 
 def cmd_publish(args: argparse.Namespace) -> int:
