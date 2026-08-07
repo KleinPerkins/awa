@@ -53,6 +53,29 @@ does not resolve and the companion plan does not attempt to fix:
    (outside any git working tree, or inside a linked worktree / adopted-lease Safe
    Workspace / excluded / advisory repo) does that target count as safe.
 
+   > **Update — 2026-08-06 (v1.5.0):** the resolution that decides "owned by no
+   > protected primary" must treat the `.git/` directory as INSIDE its enclosing repo.
+   > git's own `--is-inside-work-tree` semantics deliberately EXCLUDE `.git/`
+   > (`git -C <repo>/.git rev-parse --show-toplevel` fails with "this operation must be
+   > run in a work tree"), so the first implementation resolved a target of `.git`,
+   > `.git/config`, `.git/HEAD`, `.git/refs`, `.git/objects`, `.git/hooks/<name>`,
+   > `.git/worktrees/<name>`, ... on an INCLUDED primary as "outside every work tree"
+   > and wrongly counted it safe — converting the `deny` to an `allow`. (The pre-ADR
+   > blanket cwd-only deny had caught `rm -rf .git` unconditionally; this hole was
+   > introduced by the target-path resolution this ADR added.) `.git/` is metadata, not
+   > part of the work tree by git's definition, but destroying its object DB / refs /
+   > hooks is at least as catastrophic as deleting tracked files and, unlike a
+   > tracked-file delete, IRRECOVERABLE — squarely inside AWA's boundary (§1:
+   > uncertainty, here a technically-correct-but-wrong-question git answer, resolves
+   > toward protection). Fixed in BOTH mirrors by re-attributing a `.git`-internal
+   > target to its ENCLOSING work tree and classifying THAT repo normally (respecting
+   > its real include/exclude/advisory result — never a blanket deny of every
+   > `.git`-shaped path) BEFORE the git resolution runs. See
+   > `engine/guard.py::_reattribute_dotgit_probe` /
+   > `kernel/hooks/worktree-guard.sh::reattribute_dotgit_probe` and their fail-before /
+   > pass-after regression tests in `engine/tests/test_guard.py` +
+   > `engine/tests/test_guard_hook_wrappers.py`.
+
 3. **Per-verb target extraction is conservative and explicitly bounded (v1 scope).**
    In scope: the plain file-mutating verbs already in `_MUT`
    (`rm mv cp mkdir rmdir ln chmod chown unlink shred` — `install`, `truncate`, `dd`,
