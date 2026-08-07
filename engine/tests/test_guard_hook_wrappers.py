@@ -374,6 +374,49 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         finally:
             shutil.rmtree(safe_wt, ignore_errors=True)
 
+    # ---- ADR 0001 §2/§4: .git-internal targets are inside the protected primary ----
+    # Parity for engine/tests/test_guard.py: git's own --is-inside-work-tree semantics
+    # exclude .git/, so `classify_dir` (cd .git && dev-worktree.sh status) returns a
+    # non-empty "classification: not-git" that was (wrongly) trusted as "not protected"
+    # -> `rm -rf .git/objects` on a protected primary was ALLOWED. Reattribution to the
+    # enclosing work tree fixes both mirrors identically.
+    def test_dotgit_internal_targets_deny(self):
+        for rel in (".git", ".git/config", ".git/HEAD", ".git/refs",
+                    ".git/objects", ".git/objects/pack", ".git/hooks/pre-commit"):
+            resp = self._guard("rm -rf %s" % rel)
+            self.assertEqual(resp.get("permission"), "deny", rel)
+            # frozen deny_shape
+            self.assertIn("user_message", resp)
+            self.assertIn("agent_message", resp)
+
+    def test_dotgit_internal_target_in_excluded_repo_allows(self):
+        """No over-blocking (requirement 1): a .git-internal path inside a NON-included
+        (here self-governed -> exclude) repo must still ALLOW -- reattribution classifies
+        the ENCLOSING repo normally, it does not blanket-deny every .git-shaped path."""
+        excluded = self.root / "excluded"
+        excluded.mkdir()
+        self._git("init", "-q", str(excluded))
+        (excluded / "f").write_text("#\n", encoding="utf-8")
+        (excluded / "_ops").mkdir()
+        (excluded / "_ops" / "POLICY.md").write_text("policy\n", encoding="utf-8")
+        self._git("-C", str(excluded), "add", "-A")
+        self._git("-C", str(excluded), *_IDENT, "commit", "-qm", "init")
+        self._git("-C", str(excluded), "remote", "add", "origin",
+                  "git@github.com:KleinPerkins/awa-hook-wrap-excluded.git")
+        for rel in ("", "objects", "config"):
+            target = excluded / ".git" / rel if rel else excluded / ".git"
+            resp = self._guard("rm -rf %s" % target)
+            self.assertEqual(resp.get("permission"), "allow", rel)
+
+    def test_linked_worktree_dotgit_file_target_allows(self):
+        """Requirement 3: a linked worktree's .git is a FILE, redirected to the worktree
+        root (a Safe Workspace) by dir_for_probe BEFORE reattribution -> stays ALLOW."""
+        wt = self.root / "proj.wt"
+        self._git("-C", str(self.repo), "worktree", "add", "-q", "-b", "feat/dg", str(wt), "main")
+        self.assertTrue((wt / ".git").is_file())  # sanity: worktree .git really is a file
+        resp = self._guard("rm -rf %s" % (wt / ".git"))
+        self.assertEqual(resp.get("permission"), "allow")
+
 
 if __name__ == "__main__":
     unittest.main()

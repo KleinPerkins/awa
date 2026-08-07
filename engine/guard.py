@@ -467,6 +467,49 @@ def _probe_dir(path: str) -> str:
     return path if os.path.isdir(path) else (os.path.dirname(path) or path)
 
 
+def _reattribute_dotgit_probe(probe: str) -> str:
+    """Redirect a `.git`-internal probe to its ENCLOSING work tree, so a mutation
+    aimed at git's own metadata is attributed to the repo that actually owns it.
+    Mirrored byte-for-byte by reattribute_dotgit_probe() in
+    kernel/hooks/worktree-guard.sh (parity is contract-enforced).
+
+    git's own `--is-inside-work-tree` semantics (which gitutil.resolve mirrors)
+    EXCLUDE the `.git` directory itself: `git -C <repo>/.git rev-parse
+    --show-toplevel` fails with "this operation must be run in a work tree", so
+    gitutil.resolve(<repo>/.git) reports is_git=False. That is correct GIT semantics
+    but the WRONG question for a mutation-safety boundary -- `rm -rf .git/objects`
+    (or `.git`, `.git/config`, `.git/HEAD`, `.git/refs`, `.git/hooks/<name>`,
+    `.git/worktrees/<name>`, ...) destroys the object DB / refs / hooks of the
+    enclosing repo: at least as catastrophic as deleting tracked files and, unlike a
+    tracked-file delete, IRRECOVERABLE. AWA's protection boundary must therefore
+    INCLUDE `.git/` (ADR 0001 §2: the unit of protection is "some protected primary",
+    and §1: uncertainty resolves toward protection).
+
+    Behavior: if `probe` is a `.git` directory itself or lies inside one, return the
+    PARENT of the nearest enclosing `.git` path component -- a genuine work-tree root
+    that gitutil.resolve / policy.classify handle NORMALLY, so the enclosing repo's
+    real include/exclude/advisory classification is respected (NOT a blanket deny of
+    every `.git`-shaped path -- a `.git`-internal target inside an advisory/excluded
+    repo still resolves to allow). When there is no `.git` component, return `probe`
+    UNCHANGED -- byte-for-byte the pre-fix behavior for every non-`.git` target.
+
+    Two subtleties:
+    * A LINKED worktree's `.git` is a FILE (a `gitdir:` pointer), which _probe_dir
+      already redirects to the worktree root BEFORE this runs -- so a worktree's
+      `.git` never reaches here as a `.git` component, and its (correct, unprotected)
+      Safe-Workspace classification is unaffected (ADR 0001 requirement 3).
+    * normpath first: a target like `.git/../outside` names a path OUTSIDE `.git`, so
+      it must NOT be reattributed; collapsing `.`/`..` ensures only a genuinely
+      `.git`-internal probe is redirected (git itself collapses the `..` when the
+      unchanged probe is later resolved)."""
+    cur = os.path.normpath(probe)
+    while cur and cur != os.sep:
+        if os.path.basename(cur) == ".git":
+            return os.path.dirname(cur) or os.sep
+        cur = os.path.dirname(cur)
+    return probe
+
+
 def _path_looks_governed(path: str, cfg: policy_mod.PolicyConfig) -> bool:
     """Mirrors included_looking_path() in kernel/hooks/worktree-guard.sh: a pure
     path-string containment check against the policy's configured governed roots
@@ -504,8 +547,14 @@ def _path_is_protected_primary(path: str, cfg: policy_mod.PolicyConfig) -> bool:
     ancestor (`<repo>`) may be a real, protected primary. Mirrors
     target_is_protected_primary()'s classify_dir-failure fallback: fail toward
     "protected" whenever the target merely LOOKS governed (_path_looks_governed),
-    never toward a silent allow on this uncertainty."""
-    probe = _probe_dir(path)
+    never toward a silent allow on this uncertainty.
+
+    A `.git`-internal target (`.git` itself or any path within it) is re-attributed
+    to its ENCLOSING work tree by _reattribute_dotgit_probe FIRST, because git's own
+    `--is-inside-work-tree` semantics exclude `.git/` and would otherwise report it as
+    outside every work tree -- silently allowing a catastrophic `rm -rf .git/objects`
+    on a protected primary. See that helper's docstring and ADR 0001 §2/§4."""
+    probe = _reattribute_dotgit_probe(_probe_dir(path))
     if not probe or not os.path.isdir(probe):
         return _path_looks_governed(probe or path, cfg)
     ctx = gitutil.resolve(probe)

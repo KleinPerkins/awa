@@ -459,6 +459,80 @@ class TestDecideShellDegraded(EngineTestCase):
         d_deny = guard.decide_shell(repo, "mkdir -p %s" % nested, pol)
         self.assertEqual(d_deny.permission, "deny")
 
+    # ---- ADR 0001 §2/§4: a .git-internal target IS inside the protected primary ----
+    # git's own --is-inside-work-tree semantics EXCLUDE the .git directory, so a target
+    # like `.git`, `.git/config`, `.git/objects`, `.git/hooks/<name>` resolves as
+    # "not a work tree" and was (wrongly) treated as outside all protection -> the deny
+    # was converted to allow. Destroying the object DB / refs / hooks is at least as
+    # catastrophic as deleting tracked files (and, unlike a tracked-file delete,
+    # irrecoverable), so AWA's protection boundary MUST include .git/.
+    def test_dotgit_directory_target_on_primary_denies(self):
+        repo = self.make_repo()
+        pol = self._policy_for(self._tmp.name)
+        for cmd in ("rm -rf .git", "rm -rf %s" % os.path.join(repo, ".git")):
+            d = guard.decide_shell(repo, cmd, pol)
+            self.assertEqual(d.permission, "deny", cmd)
+
+    def test_dotgit_internal_targets_on_primary_deny(self):
+        repo = self.make_repo()
+        pol = self._policy_for(self._tmp.name)
+        # config/HEAD are files; refs/objects/objects/pack are dirs; hooks/<name> is a
+        # nested file -- cover both file and directory probes at several depths.
+        for rel in (".git/config", ".git/HEAD", ".git/refs", ".git/objects",
+                    ".git/objects/pack", ".git/hooks/pre-commit",
+                    ".git/refs/heads/main"):
+            d = guard.decide_shell(repo, "rm -rf %s" % rel, pol)
+            self.assertEqual(d.permission, "deny", rel)
+
+    def test_dotgit_internal_target_in_another_protected_primary_denies(self):
+        """§2: the unit of protection is 'some protected primary', not the cwd's repo --
+        a .git-internal target inside a DIFFERENT protected primary must still deny."""
+        repo_a = self.make_repo("repo-a")
+        repo_b = self.make_repo("repo-b")
+        pol = self._policy_for(self._tmp.name)
+        target = os.path.join(repo_b, ".git", "objects")
+        d = guard.decide_shell(repo_a, "rm -rf %s" % target, pol)
+        self.assertEqual(d.permission, "deny")
+
+    def test_dotgit_internal_target_in_advisory_repo_allows(self):
+        """No over-blocking (requirement 1): a .git-internal path inside a NON-included
+        (standalone/advisory) repo must still ALLOW. The fix attributes the target to its
+        ENCLOSING repo and classifies THAT repo normally -- it does not blanket-deny every
+        .git-shaped path. Uses the no-include-glob fixture for the same reason as
+        test_precise_target_inside_excluded_or_advisory_repo_allows above."""
+        repo = self.make_repo()
+        pol = self._policy_for_no_include_glob(self._tmp.name)
+        standalone = self.make_standalone_repo()
+        for rel in (".git", os.path.join(".git", "objects"), os.path.join(".git", "config")):
+            target = os.path.join(standalone, rel)
+            d = guard.decide_shell(repo, "rm -rf %s" % target, pol)
+            self.assertEqual(d.permission, "allow", rel)
+
+    def test_linked_worktree_dotgit_file_target_still_allows(self):
+        """Requirement 3: a linked worktree's .git is a FILE (a `gitdir:` pointer), which
+        _probe_dir redirects to the worktree root (a Safe Workspace) BEFORE the .git
+        reattribution runs -- so it stays ALLOW, on a different code path, unaffected."""
+        repo = self.make_repo()
+        wt = self.add_worktree(repo, "feat/x")
+        pol = self._policy_for(self._tmp.name)
+        dotgit = os.path.join(wt, ".git")
+        self.assertTrue(os.path.isfile(dotgit))  # sanity: worktree .git really is a file
+        d = guard.decide_shell(repo, "rm -rf %s" % dotgit, pol)
+        self.assertEqual(d.permission, "allow")
+
+    def test_reattribute_dotgit_probe_helper(self):
+        """Unit-level parity anchor for the reattribution walk-up (mirrored byte-for-byte
+        in kernel/hooks/worktree-guard.sh). A .git component redirects to its parent; a
+        `..` that escapes .git (a path OUTSIDE it) does NOT; no .git is unchanged."""
+        self.assertEqual(guard._reattribute_dotgit_probe("/r/.git"), "/r")
+        self.assertEqual(guard._reattribute_dotgit_probe("/r/.git/objects/pack"), "/r")
+        self.assertEqual(guard._reattribute_dotgit_probe("/r/sub/.git"), "/r/sub")
+        self.assertEqual(guard._reattribute_dotgit_probe("/r/work"), "/r/work")
+        # `.git/..` normalizes to `/r` (a path OUTSIDE .git), so it is NOT treated as
+        # .git-internal: the probe is returned UNCHANGED for the caller to resolve (git
+        # itself collapses the `..`), never reattributed to /r's parent (`/`).
+        self.assertEqual(guard._reattribute_dotgit_probe("/r/.git/.."), "/r/.git/..")
+
 
 class TestCanClean(EngineTestCase):
     def test_refuses_primary(self):

@@ -566,6 +566,40 @@ dir_for_probe() {
   fi
 }
 
+# ADR 0001 §2/§4: re-attribute a .git-internal probe to its ENCLOSING work tree
+# (byte-for-byte parity with engine/guard.py._reattribute_dotgit_probe). git's own
+# --is-inside-work-tree semantics EXCLUDE the .git directory itself, so classify_dir on
+# a .git-internal target (cd .git && dev-worktree.sh status) returns a NON-EMPTY
+# "classification: not-git" -- the [ -z "$status" ] conservative fallback in
+# target_is_protected_primary then never fires and the not-git result was (wrongly)
+# trusted as a definitive "not protected", so `rm -rf .git/objects` (or .git,
+# .git/config, .git/HEAD, .git/refs, .git/hooks/<name>, .git/worktrees/<name>, ...) on a
+# protected primary was ALLOWED. Destroying the object DB / refs / hooks is at least as
+# catastrophic as deleting tracked files and, unlike a tracked-file delete,
+# IRRECOVERABLE, so AWA's protection boundary MUST include .git/. Return the PARENT of
+# the nearest enclosing .git path component -- a genuine work tree that classify_dir
+# handles NORMALLY, so the enclosing repo's real include/exclude/advisory
+# classification is respected (NOT a blanket deny of every .git-shaped path). No .git
+# component -> the probe is returned UNCHANGED (pre-fix behavior for every non-.git
+# target). A LINKED worktree's .git is a FILE, which dir_for_probe already redirects to
+# the worktree root BEFORE this runs, so a worktree Safe Workspace is never touched.
+# python3 performs the normpath walk-up so both mirrors stay byte-identical and a path
+# that escapes .git via .. (OUTSIDE .git) is not misattributed.
+reattribute_dotgit_probe() {
+  DG_PROBE="$1" python3 - <<'PY'
+import os
+probe = os.environ.get("DG_PROBE", "")
+cur = os.path.normpath(probe)
+while cur and cur != os.sep:
+    if os.path.basename(cur) == ".git":
+        print(os.path.dirname(cur) or os.sep)
+        break
+    cur = os.path.dirname(cur)
+else:
+    print(probe)
+PY
+}
+
 classify_dir() {
   local dir="$1"
   [ -x "$DEV_WORKTREE" ] || return 1
@@ -583,9 +617,14 @@ classify_dir() {
 # governed but couldn't be classified -- uncertainty must never resolve toward
 # allowing an unscoped mutation.
 target_is_protected_primary() {
-  local target="$1" probe status classification linked
+  local target="$1" probe reattr status classification linked
   probe="$(dir_for_probe "$target")"
   [ -n "$probe" ] || return 0
+  # A .git-internal target must be attributed to its enclosing work tree (see
+  # reattribute_dotgit_probe). Preserve the original probe if reattribution somehow
+  # yields nothing, so uncertainty still resolves toward protection, never a silent allow.
+  reattr="$(reattribute_dotgit_probe "$probe" 2>/dev/null || true)"
+  [ -n "$reattr" ] && probe="$reattr"
   status="$(classify_dir "$probe" || true)"
   if [ -z "$status" ]; then
     included_looking_path "$probe"   # 0 (protected) if plausibly governed, else 1
