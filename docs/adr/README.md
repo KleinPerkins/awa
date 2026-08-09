@@ -43,12 +43,32 @@ lands — this directory already follows the reference shape it derived from.
 6. **Discoverability.** Read this file before adding a new architecture decision or
    trying to find out why an existing one was made. The root `AGENTS.md` points here.
 
+## Convention reconciliation with doc-warden (2026-08-06)
+
+> **New records (ADR 0002+) adopt doc-warden's canonical shape going forward** — see
+> [`0008-adopt-and-reconcile-doc-warden-conventions.md`](0008-adopt-and-reconcile-doc-warden-conventions.md).
+> New ADRs use doc-warden's status vocabulary `draft → accepted → superseded` (not the local
+> `proposed`) and are **byte-identical-forever once accepted — no inline `> Update —` correction**
+> (supersede with a higher-numbered ADR instead). This index keeps its local
+> `ADR | Status | One-line decision` columns for now so the accepted **0001** row stays byte-identical;
+> migrating to doc-warden's canonical `ADR | Title | Status | Date` is a deferred, operator-gated,
+> index-only change under doc-warden's POC 3d. ADR 0001 is not retroactively re-governed — it keeps its
+> local `proposed|accepted|superseded|deprecated` vocabulary and the inline-`> Update —` exception.
+
 ## Index
 
 | ADR | Status | One-line decision |
 |---|---|---|
 | 0002-awa-dev-overlay.md | awa dev overlay | DRAFT | 2026-08-06 |
 | [0001](0001-target-path-aware-mutation-scope.md) | Accepted — 2026-08-05 | Mutation-scope decisions must resolve and check actual command target path(s), not just cwd+verb; additive-only, conservative-fallback-preserving. |
+| [0002](0002-mcp-capability-registry-single-source.md) | Draft — 2026-08-06 | One in-engine `engine/mcp_catalog.py` is the single source of truth for every MCP capability's metadata; all consumers (tools/list, validation, ordering, instructions, operator-guide, generated docs) derive from it (FG4). |
+| [0003](0003-awa-route-deterministic-in-engine-front-door.md) | Draft — 2026-08-06 | Add a deterministic, in-engine `awa_route` front door with a pinned closed `awa-route/v1` schema (explicit reject branch; `executed`/`authorized` literal false on every branch) and a finish-recognizer parity gate (FG1/FG2). |
+| [0004](0004-routing-strategy-graduation.md) | Draft — 2026-08-06 | Ship deterministic-first routing; graduate an out-of-engine router fallback only if it beats the frozen 96-run scorecard — gated + measured, never a dependency (complements ADR 0003). |
+| [0005](0005-lifecycle-verbs-via-mcp-preview-kernel-gated.md) | Draft — 2026-08-06 | Lifecycle verbs (protect/save/resume/cleanup/finish) get MCP preview/propose surfaces only; the mutating/destructive step stays kernel-gated by a one-use operator-chat-turn envelope — no agent self-authorization. |
+| [0006](0006-mcp-worktree-creation-and-path-whitelisting.md) | Draft — 2026-08-06 | MCP worktree provisioning is fused `dev-worktree.sh ensure` reuse (primary) + optional disposable scratch dir (secondary); whitelisting never downgrades an included primary checkout's protection (FG3 mirror). |
+| [0007](0007-dynamic-resources-module-boundary.md) | Draft — 2026-08-06 | Expose engine-owned live state via a new `engine/mcp_dynamic_resources.py`, preserving `mcp_resources.py` zero-I/O purity; excludes consumer conversational state; persists no user text. |
+| [0008](0008-adopt-and-reconcile-doc-warden-conventions.md) | Draft — 2026-08-06 | Adopt doc-warden's canonical conventions for new artifacts and reconcile AWA's five local divergences per-divergence; index-column migration deferred to an operator-gated POC 3d. |
+| [0009](0009-tooling-subtraction-policy.md) | Draft — 2026-08-06 | Subtract no MCP surface now (all 9 tools used/tested; the one resource is retained); establish a durable proof-to-kill rule for any future removal. |
 
 ## Related conventions
 
