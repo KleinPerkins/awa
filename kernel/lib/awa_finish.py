@@ -67,13 +67,14 @@ RETAIN_PUBLICATION_KEYS = frozenset({
 CRUFT_ALLOWLIST_VERSION = "1"
 WARNING_VERSION = "1"
 RETAIN_CLASSIFICATION_VERSION = "3"
-INVENTORY_FINGERPRINT_VERSION = "2"
-INVENTORY_STRUCTURE_VERSION = "1"
+INVENTORY_FINGERPRINT_VERSION = "3"
+INVENTORY_STRUCTURE_VERSION = "2"
 OPERATION_CLASSIFICATION_VERSION = "1"
 SELECTED_DISPOSITION_FULL_DISCARD = "full-discard"
 GENERATION_TRANSITIONS = frozenset({"close_claimed", "cancelled"})
 REMOVAL_PHASES = frozenset({"prepared", "removed", "finalized"})
 INDEX_VISIBILITY_REFUSAL = "index_visibility_flags"
+FINISH_INTERNAL_BOOKKEEPING_PREFIXES = (b".cursor/hooks/state",)
 
 CHALLENGE_KEYS = frozenset({
     "schema", "nonce", "generation", "conversation_id", "session_key", "boot_id",
@@ -1777,6 +1778,37 @@ def _coarse_class(xy: str) -> str:
     return "unknown"
 
 
+def _is_finish_internal_bookkeeping_path(path_b: bytes) -> bool:
+    normalized = path_b.rstrip(b"/")
+    return any(
+        normalized == prefix or normalized.startswith(prefix + b"/")
+        for prefix in FINISH_INTERNAL_BOOKKEEPING_PREFIXES)
+
+
+def _status_z_from_rows(rows: list) -> bytes:
+    out = bytearray()
+    for xy, path_b, original_b in rows:
+        out.extend(xy.encode("ascii", "strict") + b" " + path_b + b"\x00")
+        if original_b is not None:
+            out.extend(original_b + b"\x00")
+    return bytes(out)
+
+
+def _filter_finish_internal_bookkeeping_status(
+        status_bytes: bytes, index_bytes: bytes) -> bytes:
+    rows = _parse_status_z(status_bytes)
+    filtered = []
+    for xy, path_b, original_b in rows:
+        paths = [path_b] + ([original_b] if original_b is not None else [])
+        if (_coarse_class(xy) in {"untracked", "ignored"}
+                and any(_is_finish_internal_bookkeeping_path(path) for path in paths)):
+            continue
+        filtered.append((xy, path_b, original_b))
+    if len(filtered) == len(rows):
+        return status_bytes
+    return _status_z_from_rows(filtered)
+
+
 def _segments(relpath: str) -> list:
     return [seg for seg in relpath.split("/") if seg]
 
@@ -2223,7 +2255,8 @@ def _regular_object(path_b: bytes, rel_b: bytes, before: os.stat_result, *,
 def _capture_tree_object(path_b: bytes, rel_b: bytes, *, root_dev: int,
                          root_real_b: bytes, objects: list,
                          parent_fd: int | None = None,
-                         name_b: bytes | None = None) -> None:
+                         name_b: bytes | None = None,
+                         internal_bookkeeping_tracked_paths: set[bytes] | None = None) -> None:
     """Capture one complete filesystem object without following symlinks."""
     try:
         before = _relative_lstat(
@@ -2238,6 +2271,14 @@ def _capture_tree_object(path_b: bytes, rel_b: bytes, *, root_dev: int,
     except OSError as exc:
         raise FinishError(f"mount_check:{exc.errno}") from exc
     mode = stat.S_IMODE(before.st_mode)
+    normalized = rel_b.rstrip(b"/")
+    tracked_paths = internal_bookkeeping_tracked_paths or set()
+    tracked_bookkeeping = (
+        normalized in tracked_paths
+        or any(path.startswith(normalized + b"/") for path in tracked_paths))
+    excluded = (
+        _is_finish_internal_bookkeeping_path(rel_b)
+        and not tracked_bookkeeping)
     if stat.S_ISLNK(before.st_mode):
         try:
             target = (
@@ -2256,12 +2297,16 @@ def _capture_tree_object(path_b: bytes, rel_b: bytes, *, root_dev: int,
         sep = os.fsencode(os.sep)
         if not (real == root_real_b or real.startswith(root_real_b + sep)):
             raise FinishError("symlink_escape")
+        if excluded:
+            return
         objects.append({
             "path_hex": rel_b.hex(), "type": "symlink", "mode": mode,
             "size": before.st_size, "target_hex": target_b.hex(),
         })
         return
     if stat.S_ISREG(before.st_mode):
+        if excluded:
+            return
         objects.append(_regular_object(
             path_b, rel_b, before, parent_fd=parent_fd, name_b=name_b))
         return
@@ -2301,9 +2346,11 @@ def _capture_tree_object(path_b: bytes, rel_b: bytes, *, root_dev: int,
             raise FinishError("nested_repo")
         if rel_b and {b"HEAD", b"objects", b"refs"} <= names:
             raise FinishError("nested_repo")
-        objects.append({
-            "path_hex": rel_b.hex(), "type": "dir", "mode": mode, "size": before.st_size,
-        })
+        if not excluded:
+            objects.append({
+                "path_hex": rel_b.hex(), "type": "dir", "mode": mode,
+                "size": before.st_size,
+            })
         for child_name_b in child_names:
             child_rel = child_name_b if not rel_b else os.path.join(rel_b, child_name_b)
             # The linked worktree's own `.git` administrative file is expected and included in the
@@ -2311,7 +2358,8 @@ def _capture_tree_object(path_b: bytes, rel_b: bytes, *, root_dev: int,
             _capture_tree_object(
                 os.path.join(path_b, child_name_b), child_rel, root_dev=root_dev,
                 root_real_b=root_real_b, objects=objects,
-                parent_fd=directory_fd, name_b=child_name_b)
+                parent_fd=directory_fd, name_b=child_name_b,
+                internal_bookkeeping_tracked_paths=internal_bookkeeping_tracked_paths)
         after_fd = os.fstat(directory_fd)
         if _stat_identity(after_fd) != _stat_identity(opened):
             raise FinishError("proof_directory_read_drift")
@@ -2328,7 +2376,8 @@ def _capture_tree_object(path_b: bytes, rel_b: bytes, *, root_dev: int,
         raise FinishError("proof_directory_path_drift")
 
 
-def _capture_complete_tree(root: str) -> list:
+def _capture_complete_tree(
+        root: str, *, internal_bookkeeping_tracked_paths: set[bytes] | None = None) -> list:
     """Private canonical proof of every physical object under the worktree root."""
     root_c = canon(root)
     root_b = os.fsencode(root_c)
@@ -2341,7 +2390,8 @@ def _capture_complete_tree(root: str) -> list:
     objects: list = []
     _capture_tree_object(
         root_b, b"", root_dev=root_st.st_dev,
-        root_real_b=os.path.realpath(root_b), objects=objects)
+        root_real_b=os.path.realpath(root_b), objects=objects,
+        internal_bookkeeping_tracked_paths=internal_bookkeeping_tracked_paths)
     objects.sort(key=lambda item: (item["path_hex"], item["type"]))
     return objects
 
@@ -2362,19 +2412,26 @@ def _proof_inputs(root: str, git_dir: str) -> tuple[bytes, bytes, bytes, dict, l
         "ls-files", "--stage", "-z")
     if index.returncode != 0:
         raise FinishError("git_index_failed")
+    filtered_status = _filter_finish_internal_bookkeeping_status(
+        status.stdout, index.stdout)
+    indexed_paths = set(_index_paths(index.stdout))
     operation = _capture_operation_manifest(
-        binding, status_bytes=status.stdout, index_listing=index.stdout,
+        binding, status_bytes=filtered_status, index_listing=index.stdout,
         raw_index=raw_index)
-    objects = _capture_complete_tree(root)
+    objects = _capture_complete_tree(
+        root, internal_bookkeeping_tracked_paths={
+            path for path in indexed_paths
+            if _is_finish_internal_bookkeeping_path(path)
+        })
     raw_index_after = _read_index_stable(binding["index_file"])
     if raw_index_after != raw_index:
         raise FinishError("git_state_drift")
     operation_after = _capture_operation_manifest(
-        binding, status_bytes=status.stdout, index_listing=index.stdout,
+        binding, status_bytes=filtered_status, index_listing=index.stdout,
         raw_index=raw_index_after)
     if operation_after != operation:
         raise FinishError("operation_state_drift")
-    return status.stdout, index.stdout, raw_index, operation, objects
+    return filtered_status, index.stdout, raw_index, operation, objects
 
 
 def _index_paths(index_bytes: bytes) -> list[bytes]:

@@ -12,7 +12,7 @@ from unittest import mock
 
 from consumer import finish_current as UX
 from kernel.lib import awa_finish as FIN
-from .helpers import commit_all
+from .helpers import commit_all, git
 from .test_finish_hardening import HardeningBase
 
 
@@ -20,7 +20,8 @@ class FinishSemanticDriftTest(HardeningBase):
     def linked_fixture(self, name: str) -> tuple[str, str]:
         repo = self.make_repo(name)
         Path(repo, ".gitignore").write_text(
-            ".cursor/hooks/state/\nignored-operator/\n", encoding="utf-8")
+            ".cursor/hooks/state/\nignored-operator/\nignored-structural/\n",
+            encoding="utf-8")
         Path(repo, ".cursor/hooks").mkdir(parents=True)
         Path(repo, ".cursor/hooks/.gitkeep").write_text("", encoding="utf-8")
         commit_all(repo, "ignore fixture state")
@@ -55,11 +56,11 @@ class FinishSemanticDriftTest(HardeningBase):
         wt, hook_state, dialogue, sentinel_row = self.retain_selection(
             conversation, initial_hook_file=False)
         self.assertFalse(hook_state.exists())
-        self.assertTrue(any(
+        self.assertFalse(any(
             row["path"] == ".cursor/hooks/state" for row in dialogue["visible"]))
 
-        # Exact Desktop UAT shape: the displayed ignored directory row already exists, then a
-        # normal Cursor stop hook creates its state file between the choice and row turn.
+        # Exact Desktop UAT shape: Cursor creates hook state between the choice and row turn.
+        # That tool-owned state is not operator work and must not stale the selected row proof.
         hook_state.write_text('{"turnsSinceLastRun":3}\n', encoding="utf-8")
         retained = UX.complete_retain(conversation, [sentinel_row])
         self.assertTrue(retained["artifact"]["protected"], retained)
@@ -79,6 +80,52 @@ class FinishSemanticDriftTest(HardeningBase):
         hook_state.write_text('{"turnsSinceLastRun":4}\n', encoding="utf-8")
         UX.handle_hook_payload(self.payload(
             wt, "Close", conversation, event_id="exact-close"))
+        removed = self.current(wt)
+        self.assertTrue(removed["workspace_removed"], removed)
+        self.assertTrue(removed["agent_stopping"], removed)
+        self.assertFalse(Path(wt).exists())
+
+    def test_tracked_cursor_hook_state_remains_operator_inventory_without_sibling_drift(self) -> None:
+        name = "tracked-hook-state"
+        repo = self.make_repo(name)
+        tracked = Path(repo, ".cursor/hooks/state/operator-note.txt")
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("tracked\n", encoding="utf-8")
+        git(repo, "add", "-f", ".cursor/hooks/state/operator-note.txt")
+        commit_all(repo, "track operator hook-state file")
+        wt = self.add_worktree(repo, f"cursor/worktree/{name}")
+        Path(wt, ".cursor/hooks/state/operator-note.txt").write_text(
+            "changed\n", encoding="utf-8")
+
+        dialogue = self.start(wt, name)
+        self.assertTrue(any(
+            row["path"] == ".cursor/hooks/state/operator-note.txt"
+            for row in dialogue["visible"]))
+        sibling = Path(wt, ".cursor/hooks/state/generated-hook.json")
+        sibling.write_text('{"cursor":true}\n', encoding="utf-8")
+        UX.handle_hook_payload(self.payload(
+            wt, "Close", name, event_id="tracked-state-close"))
+
+        removed = self.current(wt)
+        self.assertTrue(removed["workspace_removed"], removed)
+        self.assertTrue(removed["agent_stopping"], removed)
+        self.assertFalse(Path(wt).exists())
+
+    def test_hook_state_created_after_fresh_warning_does_not_stale_exact_close(self) -> None:
+        conversation = "hook-state-created-after-warning"
+        _repo, wt = self.linked_fixture(conversation)
+        hook_state = Path(wt, ".cursor/hooks/state/finish.json")
+        self.assertFalse(hook_state.parent.exists())
+
+        dialogue = self.start(wt, conversation)
+        self.assertFalse(any(
+            row["path"] == ".cursor/hooks/state" for row in dialogue["visible"]))
+
+        hook_state.parent.mkdir(parents=True)
+        hook_state.write_text('{"published":true}\n', encoding="utf-8")
+        UX.handle_hook_payload(self.payload(
+            wt, "Close", conversation, event_id="fresh-warning-close"))
+
         removed = self.current(wt)
         self.assertTrue(removed["workspace_removed"], removed)
         self.assertTrue(removed["agent_stopping"], removed)
@@ -129,6 +176,25 @@ class FinishSemanticDriftTest(HardeningBase):
                 Path(wt, "ignored-operator/UAT-RETAIN-SENTINEL.txt"), path.parent)
             path.symlink_to(target)
 
+        def prepare(name: str) -> tuple[str, Path, int]:
+            _repo, wt = self.linked_fixture(name)
+            sentinel = Path(wt, "ignored-operator/UAT-RETAIN-SENTINEL.txt")
+            sentinel.parent.mkdir(parents=True)
+            sentinel.write_text("retain-me\n", encoding="utf-8")
+            probe = Path(wt, "ignored-structural/probe.txt")
+            probe.parent.mkdir(parents=True)
+            probe.write_text("probe\n", encoding="utf-8")
+            self.start(wt, name)
+            UX.handle_hook_payload(self.payload(
+                wt, "Retain", name, event_id=f"{name}-retain-choice"))
+            selection = self.current(wt)
+            self.assertEqual(selection["state"], "awaiting_retain_selection")
+            dialogue = UX.read_dialogue(name)
+            sentinel_row = next(
+                number for number, row in enumerate(dialogue["visible"], 1)
+                if row["path"] == "ignored-operator")
+            return wt, probe, sentinel_row
+
         for label, mutate in (
                 ("insert", insert),
                 ("remove", remove),
@@ -137,8 +203,8 @@ class FinishSemanticDriftTest(HardeningBase):
                 ("symlink", change_to_symlink)):
             with self.subTest(label=label):
                 name = f"semantic-structure-{label}"
-                wt, hook_state, _dialogue, sentinel_row = self.retain_selection(name)
-                mutate(hook_state, wt)
+                wt, probe, sentinel_row = prepare(name)
+                mutate(probe, wt)
                 with self.assertRaisesRegex(
                         UX.FinishUXError, "^live_inventory_drift$"):
                     UX.complete_retain(name, [sentinel_row])
