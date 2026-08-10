@@ -14,6 +14,10 @@ import unittest
 from pathlib import Path
 
 from engine import guard, lifecycle
+from engine.tests.git_guard_command_corpus import (
+    GIT_MUTATING_FAMILY_COMMANDS,
+    GIT_READONLY_FAMILY_COMMANDS,
+)
 from engine.tests.helpers import EngineTestCase, commit_all
 
 _POLICY_YAML = """\
@@ -149,6 +153,14 @@ class TestMutatingClassifier(unittest.TestCase):
         for cmd in self.WRAPPER_READONLY:
             self.assertFalse(guard.classify_mutating(cmd), cmd)
 
+    def test_git_readonly_forms_inside_mutating_families_allowed(self):
+        for cmd in GIT_READONLY_FAMILY_COMMANDS:
+            self.assertFalse(guard.classify_mutating(cmd), cmd)
+
+    def test_git_mutating_forms_inside_mutating_families_still_mutating(self):
+        for cmd in GIT_MUTATING_FAMILY_COMMANDS:
+            self.assertTrue(guard.classify_mutating(cmd), cmd)
+
 
 class TestDecideShellDegraded(EngineTestCase):
     def _policy_for(self, root: str) -> str:
@@ -181,6 +193,22 @@ class TestDecideShellDegraded(EngineTestCase):
         pol = self._policy_for(self._tmp.name)
         d = guard.decide_shell(repo, "git status", pol)
         self.assertEqual(d.permission, "allow")
+
+    def test_primary_allows_readonly_git_family_forms(self):
+        repo = self.make_repo()
+        pol = self._policy_for(self._tmp.name)
+        for cmd in GIT_READONLY_FAMILY_COMMANDS:
+            d = guard.decide_shell(repo, cmd, pol)
+            self.assertEqual(d.permission, "allow", cmd)
+            self.assertEqual(d.classification, "include", cmd)
+
+    def test_primary_still_denies_mutating_git_family_forms(self):
+        repo = self.make_repo()
+        pol = self._policy_for(self._tmp.name)
+        for cmd in GIT_MUTATING_FAMILY_COMMANDS:
+            d = guard.decide_shell(repo, cmd, pol)
+            self.assertEqual(d.permission, "deny", cmd)
+            self.assertEqual(d.classification, "include", cmd)
 
     def test_standalone_repo_with_origin_allows_not_denies(self):
         """Regression: a standalone clone (e.g. under /tmp) with an origin remote, OUTSIDE
