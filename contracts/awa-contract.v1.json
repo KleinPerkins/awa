@@ -125,8 +125,8 @@
   "awa_git_operation_manifest": {
     "schema": "awa_git_operation_manifest/v1",
     "classification_version": "1",
-    "inventory_fingerprint_version": "2",
-    "inventory_structure_version": "1",
+    "inventory_fingerprint_version": "3",
+    "inventory_structure_version": "2",
     "retain_classification_version": "3",
     "groups": ["merge", "sequence", "rebase-merge", "rebase-apply", "am", "bisect", "notes-merge"],
     "private_rule": "Under the one shared per-common-dir lock, the kernel captures every supported per-worktree Git operation as one canonical private content-addressed manifest. It recursively scans only regular files/directories descriptor-relative and no-follow, sorted by raw-byte relative name, and binds type/mode/size/SHA-256, exact raw index bytes plus parsed stages, logical refs read through Git's ref API (including refs/bisect and refs/rewritten for files or reftable), operation-reachable object closure, original/head identity, and all index/worktree dependencies. It scans the operation state twice around complete worktree capture and requires byte equality. Links, special files, mount crossings, live git lockfiles (a genuine top-level git lock -- a git-managed lockable stem or a `<f>.lock` over an existing top-level `<f>`; a foreign non-git `.lock` such as the host `cursor-session.lock` session marker is ignored, never a live lock), path escapes, unknown/ambiguous combinations, malformed refs/indexes, missing objects, and read drift refuse safely.",
