@@ -141,6 +141,130 @@ _WRAPPER_POSITIONAL = {"timeout", "chrt"}
 _INTERPRETERS = frozenset({"bash", "sh", "dash", "zsh", "python3", "python", "perl", "ruby", "node"})
 _SCRIPT_BODY_PROGS = _INTERPRETERS | frozenset({"script"})
 _SCRIPT_OPTS = frozenset({"-c", "-e"})
+_GIT_TAKES_ARG = ("-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                  "--exec-path", "--super-prefix")
+_GITMUT = {"commit", "add", "reset", "rebase", "checkout", "switch", "clean",
+           "merge", "cherry-pick", "apply", "restore", "stash", "rm", "mv",
+           "pull", "am", "revert", "worktree", "push", "fetch"}
+_GIT_WORKTREE_READONLY_ACTIONS = {"list"}
+_GIT_STASH_READONLY_ACTIONS = {"list", "show"}
+_GIT_WORKTREE_LIST_FLAGS = {"--porcelain", "-z", "--verbose", "-v"}
+_GIT_STASH_LIST_FLAGS = set()
+_GIT_STASH_SHOW_FLAGS = {"--stat", "--patch", "-p"}
+_GIT_CLEAN_DRY_RUN_FLAGS = {"-n", "--dry-run"}
+_GIT_CLEAN_READONLY_FLAGS = {"-n", "--dry-run", "-d", "-x", "-X", "-q"}
+_GIT_CLEAN_MUTATING_FLAGS = {"-f", "--force", "-i", "--interactive"}
+
+
+def _git_subcommand(rest):
+    j = 0
+    while j < len(rest):
+        a = rest[j]
+        if a in _GIT_TAKES_ARG:
+            j += 2
+            continue
+        if a.startswith(("--git-dir=", "--work-tree=", "--namespace=",
+                         "--exec-path=", "--super-prefix=")) or (a.startswith("-c") and len(a) > 2):
+            j += 1
+            continue
+        if a.startswith("-"):
+            j += 1
+            continue
+        break
+    sub = rest[j] if j < len(rest) else ""
+    return sub, rest[j + 1:] if j < len(rest) else []
+
+
+def _git_exact_nested_action(args):
+    if not args or args[0].startswith("-"):
+        return "", args
+    return args[0], args[1:]
+
+
+def _git_flag_name(arg):
+    return arg.split("=", 1)[0]
+
+
+def _git_args_are_known_readonly_flags(args, allowed):
+    return all(arg in allowed for arg in args)
+
+
+def _git_worktree_list_is_readonly(args):
+    return _git_args_are_known_readonly_flags(args, _GIT_WORKTREE_LIST_FLAGS)
+
+
+def _git_stash_list_is_readonly(args):
+    return args == []
+
+
+def _git_stash_show_is_readonly(args):
+    seen_ref = False
+    for arg in args:
+        if arg in _GIT_STASH_SHOW_FLAGS:
+            continue
+        if arg == "--":
+            return False
+        if arg.startswith("-"):
+            return False
+        if seen_ref:
+            return False
+        seen_ref = True
+    return True
+
+
+def _git_clean_is_readonly(args):
+    has_dry_run = False
+    parsing_options = True
+    for a in args:
+        if parsing_options and a == "--":
+            parsing_options = False
+            continue
+        if not parsing_options:
+            continue
+        if a in _GIT_CLEAN_DRY_RUN_FLAGS:
+            has_dry_run = True
+            continue
+        if a in _GIT_CLEAN_MUTATING_FLAGS:
+            return False
+        if len(a) > 2 and a.startswith("-") and not a.startswith("--"):
+            chars = set(a[1:])
+            if "n" in chars:
+                has_dry_run = True
+            if "f" in chars or "i" in chars:
+                return False
+            if not chars.issubset(set("ndxXq")):
+                return False
+            continue
+        if not a.startswith("-"):
+            if not has_dry_run:
+                return False
+            continue
+        if _git_flag_name(a) not in _GIT_CLEAN_READONLY_FLAGS:
+            return False
+    return has_dry_run
+
+
+def _git_is_mutating(rest):
+    sub, sub_args = _git_subcommand(rest)
+    if not sub:
+        return False
+    if sub not in _GITMUT:
+        return False
+    if sub == "worktree":
+        action, action_args = _git_exact_nested_action(sub_args)
+        if action in _GIT_WORKTREE_READONLY_ACTIONS:
+            return not _git_worktree_list_is_readonly(action_args)
+        return True
+    if sub == "stash":
+        action, action_args = _git_exact_nested_action(sub_args)
+        if action == "list":
+            return not _git_stash_list_is_readonly(action_args)
+        if action == "show":
+            return not _git_stash_show_is_readonly(action_args)
+        return True
+    if sub == "clean":
+        return not _git_clean_is_readonly(sub_args)
+    return True
 
 
 def _segments(command: str):
@@ -252,23 +376,7 @@ def _segment_is_mutating(toks) -> bool:
     if prog in _PKG and any(a in ("install", "add", "i") for a in rest):
         return True
     if prog == "git":
-        j = 0
-        takes_arg = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix")
-        while j < len(rest):
-            a = rest[j]
-            if a in takes_arg:
-                j += 2; continue
-            if a.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=")) \
-               or (a.startswith("-c") and len(a) > 2):
-                j += 1; continue
-            if a.startswith("-"):
-                j += 1; continue
-            break
-        sub = rest[j] if j < len(rest) else ""
-        GITMUT = {"commit", "add", "reset", "rebase", "checkout", "switch", "clean",
-                  "merge", "cherry-pick", "apply", "restore", "stash", "rm", "mv",
-                  "pull", "am", "revert", "worktree", "push", "fetch"}
-        return sub in GITMUT
+        return _git_is_mutating(rest)
     return False
 
 

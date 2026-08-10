@@ -23,6 +23,10 @@ from unittest import mock
 
 from consumer import finish_current as finish_ux
 from engine import guard as engine_guard
+from engine.tests.git_guard_command_corpus import (
+    GIT_MUTATING_FAMILY_COMMANDS,
+    GIT_READONLY_FAMILY_COMMANDS,
+)
 
 _REPO = Path(__file__).resolve().parent.parent.parent
 _GUARD = _REPO / "kernel" / "hooks" / "worktree-guard.sh"
@@ -117,6 +121,18 @@ class TestBashGuardWrapperParity(unittest.TestCase):
                     'bash -c "git status"'):
             resp = self._guard(cmd)
             self.assertEqual(resp.get("permission"), "allow", cmd)
+
+    def test_hook_allows_readonly_git_family_forms(self):
+        for cmd in GIT_READONLY_FAMILY_COMMANDS:
+            resp = self._guard(cmd)
+            self.assertEqual(resp.get("permission"), "allow", cmd)
+
+    def test_hook_still_denies_mutating_git_family_forms(self):
+        for cmd in GIT_MUTATING_FAMILY_COMMANDS:
+            resp = self._guard(cmd)
+            self.assertEqual(resp.get("permission"), "deny", cmd)
+            self.assertIn("user_message", resp)
+            self.assertIn("agent_message", resp)
 
     def test_empty_cwd_falls_back_to_workspace_roots(self):
         """Regression (incident 2026-07-06): Cursor's REAL beforeShellExecution payload sends

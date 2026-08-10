@@ -164,6 +164,79 @@ else
   bad "guard permission schema drifted from frozen contract"
 fi
 
+# 3b) Git read-only family classifier UAT: deterministic read-only forms inside mutating
+#     Git families must allow; mutating forms must still deny on an included primary.
+guat_git="$(mktemp -d)"
+repo_git="$guat_git/proj"
+guard_git_cases=""
+if mkdir -p "$repo_git"; then
+  ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES 2>/dev/null || true
+    git init -q "$repo_git" && printf '#\n' > "$repo_git/f" && git -C "$repo_git" add f &&
+    git -C "$repo_git" -c user.email="49759187+KleinPerkins@users.noreply.github.com" -c user.name="KleinPerkins" commit -qm init &&
+    git -C "$repo_git" branch -M main &&
+    git -C "$repo_git" remote add origin "git@github.com:KleinPerkins/awa-contract-temp.git" ) >/dev/null 2>&1
+  guard_git_cases="$(REPO="$repo_git" GUARD="$GUARD" ROOT="$guat_git" python3 - <<'PY'
+import json, os, subprocess, sys
+repo = os.environ["REPO"]
+guard = os.environ["GUARD"]
+root = os.environ["ROOT"]
+cases = [
+    ("git worktree list --porcelain", "allow"),
+    ("git stash list", "allow"),
+    ("git stash show --stat", "allow"),
+    ("git clean --dry-run -d -x", "allow"),
+    ("git clean -n .", "allow"),
+    ("git worktree add ../awa-contract-wt", "deny"),
+    ("git stash pop", "deny"),
+    ("git clean -fdx", "deny"),
+    ("git clean -f -- -n", "deny"),
+]
+out = []
+for cmd, expected in cases:
+    payload = json.dumps({"cwd": repo, "command": cmd})
+    proc = subprocess.run(
+        [guard],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env={"AWA_GOVERNED_ROOT": root, **os.environ},
+    )
+    try:
+        resp = json.loads(proc.stdout or "{}")
+    except Exception:
+        resp = {}
+    out.append({"command": cmd, "expected": expected, "permission": resp.get("permission")})
+print(json.dumps(out))
+PY
+)"
+fi
+rm -rf "$guat_git" 2>/dev/null || true
+if GUARD_CASES="$guard_git_cases" python3 - <<'PY'
+import json, os, sys
+raw = os.environ.get("GUARD_CASES", "")
+if not raw:
+    print("git family guard UAT fixture missing", file=sys.stderr); sys.exit(1)
+cases = json.loads(raw)
+errs = []
+for case in cases:
+    got = case.get("permission")
+    expected = case.get("expected")
+    cmd = case.get("command")
+    if got != expected:
+        errs.append(f"{cmd!r}: expected {expected!r}, got {got!r}")
+    if expected == "deny":
+        if got == "deny":
+            pass  # shape already covered in section 3
+if errs:
+    print("GIT FAMILY GUARD UAT: " + "; ".join(errs), file=sys.stderr); sys.exit(1)
+sys.exit(0)
+PY
+then
+  pass "git read-only family classifier allows read-only forms and denies mutating forms"
+else
+  bad "git read-only family classifier drifted from frozen contract expectations"
+fi
+
 # 4) Lease shape: no component emits a lease yet, so assert the contract DECLARES the frozen shape.
 if CONTRACT="$CONTRACT" python3 - <<'PY'
 import json, os, sys
