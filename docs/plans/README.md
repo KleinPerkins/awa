@@ -53,7 +53,8 @@ lands — this directory already follows the reference shape it derived from.
 |---|---|---|
 | `guard-target-path-precision-v1.md` | COMPLETE — 2026-08-06 | Fix `beforeShellExecution` DENYing mutating commands whose resolved target path is outside every protected primary checkout (e.g. `rm /tmp/x` from inside a protected repo); establishes this `docs/` governance layer itself. |
 | `awa-mcp-evolution-v1.md` | DRAFT — 2026-08-06 | Consolidates the v3/v4 MCP-discoverability floor and expands it: single-source capability registry, deterministic `awa_route`, kernel-gated MCP lifecycle previews, MCP worktree creation, engine-owned dynamic resources, and doc-warden alignment (ADRs 0002–0009). |
-| `git-readonly-command-classifier-v1.md` | DRAFT — 2026-08-10 | Refine the AWA shell guard's Git classifier so deterministic read-only nested commands such as `git worktree list --porcelain`, `git stash list/show`, and `git clean --dry-run` allow while mutating forms stay denied. |
+| `git-readonly-command-classifier-v1.md` | COMPLETE — 2026-08-10 | Refined the AWA shell guard's Git classifier so deterministic read-only nested commands such as `git worktree list --porcelain`, `git stash list/show`, and `git clean --dry-run` allow while mutating forms stay denied; implemented by PR #95. |
+| `git-command-policy-hardening-v1.md` | DRAFT — 2026-08-11 | Prove and govern remote dry-run behavior, then fully classify branch, remote, config, submodule, and sparse-checkout forms with closed read-only grammars and conservative deny defaults. |
 
 ## Related conventions
 

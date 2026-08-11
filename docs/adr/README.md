@@ -69,6 +69,7 @@ lands — this directory already follows the reference shape it derived from.
 | [0007](0007-dynamic-resources-module-boundary.md) | Draft — 2026-08-06 | Expose engine-owned live state via a new `engine/mcp_dynamic_resources.py`, preserving `mcp_resources.py` zero-I/O purity; excludes consumer conversational state; persists no user text. |
 | [0008](0008-adopt-and-reconcile-doc-warden-conventions.md) | Draft — 2026-08-06 | Adopt doc-warden's canonical conventions for new artifacts and reconcile AWA's five local divergences per-divergence; index-column migration deferred to an operator-gated POC 3d. |
 | [0009](0009-tooling-subtraction-policy.md) | Draft — 2026-08-06 | Subtract no MCP surface now (all 9 tools used/tested; the one resource is retained); establish a durable proof-to-kill rule for any future removal. |
+| [0010](0010-remote-dry-run-policy.md) | Draft — 2026-08-11 | Treat all fetch/push forms, including dry-run, as potentially mutating on protected primaries; use a Safe Workspace or scratch repository instead. |
 
 ## Related conventions
 
