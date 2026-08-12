@@ -145,7 +145,8 @@ _GIT_TAKES_ARG = ("-C", "-c", "--git-dir", "--work-tree", "--namespace",
                   "--exec-path", "--super-prefix")
 _GITMUT = {"commit", "add", "reset", "rebase", "checkout", "switch", "clean",
            "merge", "cherry-pick", "apply", "restore", "stash", "rm", "mv",
-           "pull", "am", "revert", "worktree", "push", "fetch"}
+           "pull", "am", "revert", "worktree", "push", "fetch",
+           "branch", "remote", "config", "submodule", "sparse-checkout"}
 _GIT_WORKTREE_READONLY_ACTIONS = {"list"}
 _GIT_STASH_READONLY_ACTIONS = {"list", "show"}
 _GIT_WORKTREE_LIST_FLAGS = {"--porcelain", "-z", "--verbose", "-v"}
@@ -173,6 +174,88 @@ def _git_subcommand(rest):
         break
     sub = rest[j] if j < len(rest) else ""
     return sub, rest[j + 1:] if j < len(rest) else []
+
+
+_GIT_GLOBAL_VALUE_OPTS = {
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--super-prefix",
+}
+_GIT_GLOBAL_FLAG_OPTS = {
+    "-p",
+    "--paginate",
+    "-P",
+    "--no-pager",
+    "--no-replace-objects",
+    "--bare",
+    "--literal-pathspecs",
+    "--glob-pathspecs",
+    "--noglob-pathspecs",
+    "--icase-pathspecs",
+    "--no-optional-locks",
+    "--no-lazy-fetch",
+}
+_GIT_GLOBAL_ATTACHED_PREFIXES = (
+    "--git-dir=",
+    "--work-tree=",
+    "--namespace=",
+    "--super-prefix=",
+    "--config-env=",
+)
+
+
+def _parse_git_invocation(rest):
+    """Strict git prefix parser (parity with engine/guard.py). Returns
+    (global_args, subcommand, sub_args) or None. None means a bare global value
+    option is missing its value, an attached global prefix is empty, or an
+    unrecognized dash-prefixed global token appears (conservative: the caller
+    treats a None parse as mutating via the compatibility fallback). ONLY the
+    VALIDATED global prefix returned here may later name a mutation target, so a
+    family-local flag (for example a branch -C) can never launder the scope."""
+    global_args = []
+    i = 0
+    while i < len(rest):
+        arg = rest[i]
+        if arg in _GIT_GLOBAL_VALUE_OPTS:
+            if i + 1 >= len(rest) or not rest[i + 1]:
+                return None
+            global_args.extend((arg, rest[i + 1]))
+            i += 2
+            continue
+        if arg in _GIT_GLOBAL_FLAG_OPTS:
+            global_args.append(arg)
+            i += 1
+            continue
+        if arg.startswith(_GIT_GLOBAL_ATTACHED_PREFIXES):
+            prefix = next(
+                item for item in _GIT_GLOBAL_ATTACHED_PREFIXES
+                if arg.startswith(item)
+            )
+            if len(arg) == len(prefix):
+                return None
+            global_args.append(arg)
+            i += 1
+            continue
+        if arg.startswith("-c") and len(arg) > 2:
+            global_args.append(arg)
+            i += 1
+            continue
+        if arg.startswith("-"):
+            return None
+        return global_args, arg, rest[i + 1:]
+    return global_args, "", []
+
+
+def _git_global_args_block_readonly(global_args):
+    return any(
+        arg in {"-p", "--paginate", "-c"}
+        or (arg.startswith("-c") and len(arg) > 2)
+        or arg.startswith("--config-env=")
+        for arg in global_args
+    )
 
 
 def _git_exact_nested_action(args):
@@ -244,17 +327,151 @@ def _git_clean_is_readonly(args):
     return has_dry_run
 
 
+_GIT_BRANCH_LIST_FLAGS = {
+    "--list", "-a", "--all", "-r", "--remotes",
+    "-v", "-vv", "--verbose",
+}
+_GIT_CONFIG_PREFIX_FLAGS = {
+    "--local", "--global", "--system", "--worktree",
+    "--includes", "--no-includes", "--null", "-z",
+    "--name-only", "--show-origin", "--show-scope", "--fixed-value",
+}
+_GIT_CONFIG_PREFIX_VALUE_OPTS = {"--file", "--type"}
+_GIT_CONFIG_GETTER_ARITY = {
+    "--list": {0},
+    "-l": {0},
+    "--get": {1, 2},
+    "--get-all": {1, 2},
+    "--get-regexp": {1, 2},
+    "--get-urlmatch": {2},
+    "--get-color": {1, 2},
+    "--get-colorbool": {1, 2},
+}
+
+
+def _git_branch_is_readonly(args):
+    if not args:
+        return True
+    if args == ["--show-current"]:
+        return True
+    seen_list = False
+    saw_pattern = False
+    explicit_boundary = False
+    parsing_flags = True
+    for arg in args:
+        if parsing_flags and arg == "--":
+            explicit_boundary = True
+            parsing_flags = False
+            continue
+        if parsing_flags and arg in _GIT_BRANCH_LIST_FLAGS:
+            seen_list = seen_list or arg == "--list"
+            continue
+        if parsing_flags and arg.startswith("-"):
+            return False
+        if not seen_list:
+            return False
+        if not explicit_boundary and arg.startswith("-"):
+            return False
+        saw_pattern = True
+        parsing_flags = False
+    return seen_list or (not saw_pattern and not explicit_boundary)
+
+
+def _git_remote_is_readonly(args):
+    if not args:
+        return True
+    i = 0
+    if args[i] in ("-v", "--verbose"):
+        i += 1
+        if i == len(args):
+            return True
+    if args[i] == "get-url":
+        i += 1
+        seen_options = set()
+        while i < len(args) and args[i] in ("--push", "--all"):
+            if args[i] in seen_options:
+                return False
+            seen_options.add(args[i])
+            i += 1
+        return (
+            i == len(args) - 1
+            and bool(args[i])
+            and not args[i].startswith("-")
+        )
+    if args[i] == "show":
+        return (
+            i + 2 == len(args) - 1
+            and args[i + 1] == "-n"
+            and bool(args[i + 2])
+            and not args[i + 2].startswith("-")
+        )
+    return False
+
+
+def _git_config_is_readonly(args):
+    i = 0
+    while i < len(args):
+        if args[i] in _GIT_CONFIG_PREFIX_FLAGS:
+            i += 1
+            continue
+        if args[i] in _GIT_CONFIG_PREFIX_VALUE_OPTS:
+            if i + 1 >= len(args):
+                return False
+            i += 2
+            continue
+        break
+    if i >= len(args) or args[i] not in _GIT_CONFIG_GETTER_ARITY:
+        return False
+    return len(args[i + 1:]) in _GIT_CONFIG_GETTER_ARITY[args[i]]
+
+
+def _git_submodule_is_readonly(args):
+    if not args or args[0] != "status":
+        return False
+    i = 1
+    if i < len(args) and args[i] == "--cached":
+        i += 1
+    if i == len(args):
+        return True
+    return args[i] == "--"
+
+
+def _git_sparse_checkout_is_readonly(args):
+    return args == ["list"]
+
+
 def _git_is_mutating(rest):
-    sub, sub_args = _git_subcommand(rest)
-    if not sub:
+    compatibility_sub, _compatibility_args = _git_subcommand(rest)
+    parsed = _parse_git_invocation(rest)
+    if parsed is None:
+        return (
+            not compatibility_sub
+            or compatibility_sub in _GITMUT
+            or any(token in _GITMUT for token in rest)
+        )
+    global_args, sub, sub_args = parsed
+    if not sub or sub not in _GITMUT:
         return False
-    if sub not in _GITMUT:
-        return False
+    if sub in {"fetch", "push"}:
+        return True
+    if _git_global_args_block_readonly(global_args):
+        return True
+    if sub == "branch":
+        return not _git_branch_is_readonly(sub_args)
+    if sub == "remote":
+        return not _git_remote_is_readonly(sub_args)
+    if sub == "config":
+        return not _git_config_is_readonly(sub_args)
+    if sub == "submodule":
+        return not _git_submodule_is_readonly(sub_args)
+    if sub == "sparse-checkout":
+        return not _git_sparse_checkout_is_readonly(sub_args)
     if sub == "worktree":
         action, action_args = _git_exact_nested_action(sub_args)
-        if action in _GIT_WORKTREE_READONLY_ACTIONS:
-            return not _git_worktree_list_is_readonly(action_args)
-        return True
+        return not (
+            action in _GIT_WORKTREE_READONLY_ACTIONS
+            and _git_worktree_list_is_readonly(action_args)
+        )
     if sub == "stash":
         action, action_args = _git_exact_nested_action(sub_args)
         if action == "list":
@@ -435,44 +652,66 @@ def _extract_candidate_targets(prog, rest, cwd):
     return None
 
 
-def _extract_git_target_dirs(rest, cwd):
-    """git's -C / --git-dir / --work-tree flags each redirect a DIFFERENT real
-    mutation surface, and git honors ALL of them simultaneously when several are
-    given together: -C changes git's own effective cwd (and is the fallback
-    git-dir-discovery root, becoming the work tree too whenever --work-tree /
-    GIT_WORK_TREE is absent -- even when --git-dir IS explicitly given); --git-dir
-    names where objects/refs are actually written (commit, index updates, fetch,
-    ...); --work-tree names where checked-out files are written (checkout, reset
-    --hard, clean, ...). A previous version of this function kept only the
-    LAST-seen flag's value as "the" target -- so `git --git-dir=<protected>/.git
-    --work-tree=<safe> commit` was classified solely on the trailing safe
-    --work-tree, even though --git-dir still pointed the actual commit (object +
-    ref write) at the protected primary: a guard bypass. Returns ALL applicable
-    targets (the -C-adjusted cwd, always, plus any explicit --git-dir / --work-tree
-    values) so the caller must prove EVERY one of them safe before converting a
-    deny into an allow (ADR 0001 §4: any single unsafe/unresolved target poisons
-    the whole command)."""
+_GIT_NO_TARGET_NARROWING = {
+    "fetch",
+    "push",
+    "remote",
+    "config",
+    "submodule",
+}
+
+
+def _extract_git_target_dirs(global_args, cwd):
+    """Resolve every real mutation surface named by git VALIDATED global prefix
+    ONLY (the global_args returned by _parse_git_invocation) -- never by
+    rescanning family arguments, so a family-local flag (for example
+    `git branch -C <dir> copied`) can NEVER be reinterpreted as a global -C
+    chdir/target laundering the scope. git honors -C / --git-dir / --work-tree
+    simultaneously: -C changes the effective cwd (and the fallback work tree when
+    --work-tree is absent); --git-dir names where objects/refs are written;
+    --work-tree names where checked-out files land. Returns ALL applicable targets
+    (the -C-adjusted cwd, always, plus any explicit --git-dir / --work-tree) so the
+    caller must prove EVERY one safe before converting a deny into an allow (ADR
+    0001 §4: any single unsafe/unresolved target poisons the whole command).
+    global_args is well-formed by construction -- _parse_git_invocation pairs every
+    bare -C / --git-dir / --work-tree with its value or returns None -- so indexing
+    the value is safe."""
     j, c_path, git_dir, work_tree = 0, cwd, None, None
-    while j < len(rest):
-        a = rest[j]
-        if a == "-C" and j + 1 < len(rest):
-            nxt = rest[j + 1]
+    while j < len(global_args):
+        arg = global_args[j]
+        if arg == "-C":
+            nxt = global_args[j + 1]
             c_path = nxt if os.path.isabs(nxt) else os.path.join(c_path, nxt)
-            j += 2; continue
-        if a.startswith("--git-dir="):
-            git_dir = a.split("=", 1)[1]; j += 1; continue
-        if a == "--git-dir" and j + 1 < len(rest):
-            git_dir = rest[j + 1]; j += 2; continue
-        if a.startswith("--work-tree="):
-            work_tree = a.split("=", 1)[1]; j += 1; continue
-        if a == "--work-tree" and j + 1 < len(rest):
-            work_tree = rest[j + 1]; j += 2; continue
+            j += 2
+            continue
+        if arg.startswith("--git-dir="):
+            git_dir = arg.split("=", 1)[1]
+            j += 1
+            continue
+        if arg == "--git-dir":
+            git_dir = global_args[j + 1]
+            j += 2
+            continue
+        if arg.startswith("--work-tree="):
+            work_tree = arg.split("=", 1)[1]
+            j += 1
+            continue
+        if arg == "--work-tree":
+            work_tree = global_args[j + 1]
+            j += 2
+            continue
         j += 1
     targets = [c_path]
     if git_dir is not None:
-        targets.append(git_dir if os.path.isabs(git_dir) else os.path.join(c_path, git_dir))
+        targets.append(
+            git_dir if os.path.isabs(git_dir)
+            else os.path.join(c_path, git_dir)
+        )
     if work_tree is not None:
-        targets.append(work_tree if os.path.isabs(work_tree) else os.path.join(c_path, work_tree))
+        targets.append(
+            work_tree if os.path.isabs(work_tree)
+            else os.path.join(c_path, work_tree)
+        )
     return targets
 
 
@@ -537,7 +776,13 @@ def _collect_precise_targets(command, cwd):
         prog = os.path.basename(toks[i])
         rest = toks[i + 1:]
         if prog == "git":
-            targets.extend(_extract_git_target_dirs(rest, cwd))
+            parsed = _parse_git_invocation(rest)
+            if parsed is None:
+                return None
+            global_args, sub, _sub_args = parsed
+            if sub in _GIT_NO_TARGET_NARROWING:
+                return None
+            targets.extend(_extract_git_target_dirs(global_args, cwd))
             targets.extend(redirect_targets)
             continue
         found = _extract_candidate_targets(prog, rest, cwd)
