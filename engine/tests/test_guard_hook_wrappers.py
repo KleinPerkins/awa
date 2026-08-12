@@ -134,6 +134,22 @@ class TestBashGuardWrapperParity(unittest.TestCase):
             self.assertIn("user_message", resp)
             self.assertIn("agent_message", resp)
 
+    def test_hook_git_family_target_ambiguity_denies(self):
+        for cmd in (
+            "git branch -C /tmp copied",
+            f"git -C /tmp config --file {self.repo}/.git/config user.name changed",
+            f"git -C /tmp submodule foreach 'rm -rf {self.repo}'",
+            f"git -C /tmp push {self.repo} HEAD:refs/heads/changed",
+        ):
+            resp = self._guard(cmd)
+            self.assertEqual(resp.get("permission"), "deny", cmd)
+            self.assertIn("user_message", resp)
+            self.assertIn("agent_message", resp)
+
+    def test_hook_keeps_python_39_compatible_annotations(self):
+        hook_source = _GUARD.read_text(encoding="utf-8")
+        self.assertNotIn(" | None", hook_source)
+
     def test_empty_cwd_falls_back_to_workspace_roots(self):
         """Regression (incident 2026-07-06): Cursor's REAL beforeShellExecution payload sends
         `cwd: ""` plus `workspace_roots: [...]` (plural, snake_case, a list) whenever the
