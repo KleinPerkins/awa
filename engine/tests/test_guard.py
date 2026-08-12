@@ -161,6 +161,32 @@ class TestMutatingClassifier(unittest.TestCase):
         for cmd in GIT_MUTATING_FAMILY_COMMANDS:
             self.assertTrue(guard.classify_mutating(cmd), cmd)
 
+    def test_git_family_unknown_or_malformed_forms_fail_safe(self):
+        for cmd in (
+            "git -C",
+            "git --unknown-global branch --show-current",
+            "git branch --unknown",
+            "git remote -- get-url origin",
+            "git config --get",
+            "git submodule -- status",
+            "git sparse-checkout check-rules",
+        ):
+            self.assertTrue(guard.classify_mutating(cmd), cmd)
+
+    def test_branch_copy_flag_is_not_global_chdir(self):
+        self.assertTrue(guard.classify_mutating("git branch -C main copied"))
+
+    def test_unmodeled_global_flag_preserves_unrelated_read_behavior(self):
+        self.assertFalse(guard.classify_mutating("git --exec-path=/tmp status"))
+
+    def test_branch_list_invalid_forms_never_crash_to_allow(self):
+        for cmd in (
+            "git branch --list --unknown",
+            "git branch --list --unknown -- topic",
+            "git branch --list --unknown ; rm -rf protected",
+        ):
+            self.assertTrue(guard.classify_mutating(cmd), cmd)
+
 
 class TestDecideShellDegraded(EngineTestCase):
     def _policy_for(self, root: str) -> str:
@@ -560,6 +586,32 @@ class TestDecideShellDegraded(EngineTestCase):
         # .git-internal: the probe is returned UNCHANGED for the caller to resolve (git
         # itself collapses the `..`), never reattributed to /r's parent (`/`).
         self.assertEqual(guard._reattribute_dotgit_probe("/r/.git/.."), "/r/.git/..")
+
+    def test_remote_dry_runs_allow_only_after_safe_workspace_classification(self):
+        repo = self.make_repo()
+        wt = self.add_worktree(repo, "feat/remote-proof")
+        pol = self._policy_for(self._tmp.name)
+        for cmd in ("git fetch --dry-run", "git push --dry-run"):
+            self.assertEqual(guard.decide_shell(repo, cmd, pol).permission, "deny", cmd)
+            self.assertEqual(guard.decide_shell(wt, cmd, pol).permission, "allow", cmd)
+
+    def test_branch_local_copy_flag_cannot_launder_target_scope(self):
+        repo = self.make_repo()
+        outside = self.make_standalone_repo(origin=False)
+        pol = self._policy_for(self._tmp.name)
+        cmd = f"git branch -C {outside} copied"
+        self.assertEqual(guard.decide_shell(repo, cmd, pol).permission, "deny")
+
+    def test_unscoped_family_mutations_cannot_narrow_to_outside_target(self):
+        repo = self.make_repo()
+        outside = self.make_standalone_repo(origin=False)
+        protected_config = Path(repo) / ".git" / "config"
+        pol = self._policy_for(self._tmp.name)
+        for cmd in (
+            f"git -C {outside} config --file {protected_config} user.name changed",
+            f"git -C {outside} submodule foreach true",
+        ):
+            self.assertEqual(guard.decide_shell(repo, cmd, pol).permission, "deny", cmd)
 
 
 class TestCanClean(EngineTestCase):
