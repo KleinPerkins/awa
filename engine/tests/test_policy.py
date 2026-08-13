@@ -254,6 +254,18 @@ class TestDefaultMode(unittest.TestCase):
         self.assertEqual(c.classification, policy.EXCLUDE)
         self.assertEqual(c.reason, "policy default_mode: off")
 
+    def test_explicit_on_overrides_default_mode_off(self):
+        cfg = policy.PolicyConfig(
+            default=policy.INCLUDE,
+            default_mode="off",
+            modes={"proj": "on"},
+        )
+        c = policy.classify("proj", self.top, cfg)
+        self.assertEqual(
+            (c.classification, c.reason),
+            (policy.INCLUDE, "explicit mode: on"),
+        )
+
     def test_invalid_default_mode_maps_to_include(self):
         # An invalid default_mode is not `off`, so it fails safe to include/ON (protected).
         # (policy-check separately WARNs on an unknown default_mode; classification stays safe.)
