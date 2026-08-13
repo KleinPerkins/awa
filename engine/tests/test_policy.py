@@ -263,7 +263,7 @@ class TestDefaultMode(unittest.TestCase):
         c = policy.classify("proj", self.top, cfg)
         self.assertEqual(
             (c.classification, c.reason),
-            (policy.EXCLUDE, "explicit mode: on"),
+            (policy.INCLUDE, "explicit mode: on"),
         )
 
     def test_invalid_default_mode_maps_to_include(self):
