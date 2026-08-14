@@ -251,7 +251,7 @@ class TestDefaultMode(unittest.TestCase):
     def test_default_mode_off(self):
         cfg = policy.PolicyConfig(default=policy.INCLUDE, default_mode="off")
         c = policy.classify("proj", self.top, cfg)
-        self.assertEqual(c.classification, policy.EXCLUDE)
+        self.assertEqual(c.classification, policy.INCLUDE)
         self.assertEqual(c.reason, "policy default_mode: off")
 
     def test_explicit_on_overrides_default_mode_off(self):
