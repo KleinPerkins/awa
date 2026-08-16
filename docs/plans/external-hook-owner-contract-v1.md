@@ -1,7 +1,7 @@
 # External Hook-Owner Contract and AWA v1.5.2 Release
 
 - **Version:** v1
-- **Status:** DRAFT — 2026-08-15
+- **Status:** ACCEPTED — 2026-08-15
 - **Date:** 2026-08-15
 - **Owning repository:** `KleinPerkins/awa` (`~/dev/capabilities/awa`)
 - **Plan-type:** agentic-execution
