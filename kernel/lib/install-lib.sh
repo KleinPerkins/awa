@@ -14,6 +14,132 @@ awa_log()  { printf 'awa-install: %s\n' "$*"; }
 awa_warn() { printf 'awa-install: %s\n' "$*" >&2; }
 awa_die()  { printf 'awa-install: %s\n' "$*" >&2; exit 1; }
 
+# Resolve the persistent hook-file owner without writing either record.
+# $1=hook-owner selection JSON, $2=release-pointer JSON.
+#
+# Precedence is explicit environment -> persisted selection -> release pointer -> direct.
+# Explicit presence is significant: an empty value is invalid rather than "unset". A valid
+# explicit value is the sole repair authority for malformed prior state, so it returns before
+# either record is opened. Every invalid-state diagnostic is fixed and value-free.
+awa_hook_owner_resolve() {
+  local selection="$1" pointer="$2" resolved rc
+  if [ "${AWA_HOOK_OWNER+x}" = "x" ]; then
+    case "$AWA_HOOK_OWNER" in
+      direct|external) printf '%s\n' "$AWA_HOOK_OWNER"; return 0 ;;
+      *)
+        printf '%s\n' "awa-install: hook-owner selection is invalid" >&2
+        return 2
+        ;;
+    esac
+  fi
+
+  resolved="$(AWA_HOOK_OWNER_SELECTION="$selection" AWA_RELEASE_POINTER="$pointer" \
+    python3 - <<'PY'
+import json
+import os
+import re
+import sys
+
+SELECTION_SCHEMA = "awa-hook-owner-selection/v1"
+CONTRACT = "awa-hook-owner/v1"
+POINTER_SCHEMA = "awa-release-pointer/v1"
+MODES = {"direct", "external"}
+MAX_RECORD_BYTES = 65536
+
+
+def load(path):
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(MAX_RECORD_BYTES + 1)
+        if len(raw) > MAX_RECORD_BYTES:
+            raise ValueError
+        return json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        raise SystemExit(2)
+
+
+selection_path = os.environ["AWA_HOOK_OWNER_SELECTION"]
+pointer_path = os.environ["AWA_RELEASE_POINTER"]
+
+if os.path.lexists(selection_path):
+    selection = load(selection_path)
+    if (
+        type(selection) is not dict
+        or set(selection) != {"schema", "contract", "mode"}
+        or selection.get("schema") != SELECTION_SCHEMA
+        or selection.get("contract") != CONTRACT
+        or selection.get("mode") not in MODES
+    ):
+        raise SystemExit(2)
+    print(selection["mode"])
+    raise SystemExit(0)
+
+if not os.path.lexists(pointer_path):
+    print("direct")
+    raise SystemExit(0)
+
+pointer = load(pointer_path)
+legacy_keys = {
+    "schema", "version", "source", "commit", "runtime", "policy", "installed_at"
+}
+if (
+    type(pointer) is not dict
+    or pointer.get("schema") != POINTER_SCHEMA
+    or not legacy_keys.issubset(pointer)
+    or any(type(pointer.get(key)) is not str or not pointer.get(key)
+           for key in legacy_keys)
+):
+    raise SystemExit(2)
+
+owner_keys = {
+    "hook_owner_contract", "hook_owner_mode", "hook_owner_contract_sha256"
+}
+present_owner_keys = owner_keys.intersection(pointer)
+if not present_owner_keys:
+    print("direct")
+    raise SystemExit(0)
+if present_owner_keys != owner_keys:
+    raise SystemExit(2)
+if (
+    pointer.get("hook_owner_contract") != CONTRACT
+    or pointer.get("hook_owner_mode") not in MODES
+    or type(pointer.get("hook_owner_contract_sha256")) is not str
+    or re.fullmatch(r"[0-9a-f]{64}", pointer["hook_owner_contract_sha256"]) is None
+):
+    raise SystemExit(2)
+print(pointer["hook_owner_mode"])
+PY
+  )" || {
+    rc=$?
+    printf '%s\n' "awa-install: hook-owner selection is invalid" >&2
+    [ "$rc" -eq 2 ] && return 2
+    return 2
+  }
+  case "$resolved" in
+    direct|external) printf '%s\n' "$resolved" ;;
+    *)
+      printf '%s\n' "awa-install: hook-owner selection is invalid" >&2
+      return 2
+      ;;
+  esac
+}
+
+awa_sha256_file() {
+  python3 - "$1" <<'PY'
+import hashlib
+import sys
+
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as handle:
+    while True:
+        block = handle.read(1024 * 1024)
+        if not block:
+            break
+        digest.update(block)
+print(digest.hexdigest())
+PY
+}
+
 # NOTE: the atomic-write-with-backup primitive (awa_write_backup) is deliberately NOT defined in
 # this file even though every other installer primitive lives here. It is defined in install.sh
 # instead, which sources this file before defining it, so callers below (awa_mcp_add,

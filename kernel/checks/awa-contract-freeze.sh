@@ -15,6 +15,7 @@ AWA_HOME="${AWA_HOME:-$(cd "$KERNEL_DIR/.." && pwd)}"           # install root (
 CONTRACT="$AWA_HOME/contracts/awa-contract.v1.json"
 DEV_WORKTREE="$AWA_HOME/kernel/bin/dev-worktree.sh"
 GUARD="$AWA_HOME/kernel/hooks/worktree-guard.sh"
+INSTALL_HOOKS="$AWA_HOME/kernel/hooks/install-hooks.sh"
 EMITTER="$AWA_HOME/dashboard/emitter.py"
 
 fail=0
@@ -31,9 +32,137 @@ if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$CONTRACT" 2>/d
   bad "frozen contract is not valid JSON: $CONTRACT"; echo "awa-contract-freeze: FAILED"; exit 1
 fi
 pass "frozen contract present + valid JSON"
-for f in "$DEV_WORKTREE" "$GUARD" "$EMITTER"; do
+for f in "$DEV_WORKTREE" "$GUARD" "$INSTALL_HOOKS" "$EMITTER"; do
   [ -f "$f" ] || bad "role-resolved shim missing: $f"
 done
+
+# 0) awa-hook-owner/v1 is the sole ordered five-role owner contract. Generate the direct
+# projection into a throwaway non-live destination and require exact contract parity. External
+# install/check must exit before creating even the selected destination's parent.
+owner_tmp="$(mktemp -d)"
+owner_direct="$owner_tmp/direct-hooks.json"
+owner_external="$owner_tmp/external-parent/hooks.json"
+owner_install_rc=0
+owner_check_rc=0
+owner_external_install_rc=0
+owner_external_check_rc=0
+AWA_HOOK_OWNER=direct AWA_HOOKS_JSON="$owner_direct" \
+  "$INSTALL_HOOKS" >/dev/null 2>&1 || owner_install_rc=$?
+AWA_HOOK_OWNER=direct AWA_HOOKS_JSON="$owner_direct" \
+  "$INSTALL_HOOKS" --check >/dev/null 2>&1 || owner_check_rc=$?
+AWA_HOOK_OWNER=external AWA_HOOKS_JSON="$owner_external" \
+  "$INSTALL_HOOKS" >/dev/null 2>&1 || owner_external_install_rc=$?
+AWA_HOOK_OWNER=external AWA_HOOKS_JSON="$owner_external" \
+  "$INSTALL_HOOKS" --check >/dev/null 2>&1 || owner_external_check_rc=$?
+if [ "$owner_install_rc" -eq 0 ] && [ "$owner_check_rc" -eq 0 ] && \
+   [ "$owner_external_install_rc" -eq 0 ] && [ "$owner_external_check_rc" -eq 0 ] && \
+   [ ! -e "$owner_tmp/external-parent" ] && \
+   CONTRACT="$CONTRACT" OWNER_DIRECT="$owner_direct" AWA_HOME="$AWA_HOME" python3 - <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+contract = json.load(open(os.environ["CONTRACT"], encoding="utf-8"))
+owner = contract.get("hook_ownership")
+expected_ids = [
+    "worktree.session-context",
+    "worktree.shell-guard",
+    "worktree.file-observer",
+    "recovery.maintenance",
+    "finish.prompt-recall",
+]
+expected_events = [
+    "sessionStart",
+    "beforeShellExecution",
+    "afterFileEdit",
+    "sessionStart",
+    "beforeSubmitPrompt",
+]
+expected_classes = [
+    "host-policy-delegator",
+    "host-policy-delegator",
+    "host-policy-delegator",
+    "installed-awa",
+    "installed-awa",
+]
+errors = []
+if not isinstance(owner, dict):
+    errors.append("missing hook_ownership block")
+else:
+    required = {
+        "schema", "modes", "default_mode", "selection_env",
+        "selection_schema", "external_real_hook_file_writes", "roles",
+    }
+    if not required.issubset(owner):
+        errors.append("hook_ownership required field drift")
+    if owner.get("schema") != "awa-hook-owner/v1":
+        errors.append("hook-owner schema drift")
+    if owner.get("modes") != ["direct", "external"]:
+        errors.append("hook-owner mode vocabulary/order drift")
+    if owner.get("default_mode") != "direct":
+        errors.append("hook-owner direct default drift")
+    if owner.get("selection_env") != "AWA_HOOK_OWNER":
+        errors.append("hook-owner selection env drift")
+    if owner.get("selection_schema") != "awa-hook-owner-selection/v1":
+        errors.append("hook-owner selection schema drift")
+    if owner.get("external_real_hook_file_writes") is not False:
+        errors.append("external hook-file write boundary drift")
+    roles = owner.get("roles")
+    if not isinstance(roles, list) or len(roles) != 5:
+        errors.append("hook-owner role count drift")
+        roles = []
+    if [role.get("id") for role in roles] != expected_ids:
+        errors.append("hook-owner role identity/order drift")
+    if [role.get("event") for role in roles] != expected_events:
+        errors.append("hook-owner event order drift")
+    if [role.get("external_command_path_class") for role in roles] != expected_classes:
+        errors.append("hook-owner external path-class drift")
+
+try:
+    projection = json.load(open(os.environ["OWNER_DIRECT"], encoding="utf-8"))
+except Exception:
+    projection = {}
+hooks = projection.get("hooks") if isinstance(projection, dict) else None
+if projection.get("version") != 1 or not isinstance(hooks, dict):
+    errors.append("direct hook projection shape drift")
+    hooks = {}
+
+home = pathlib.Path(os.environ["AWA_HOME"])
+matched = 0
+for role in roles:
+    if (
+        set(role) != {
+            "id", "event", "direct_command_role",
+            "external_command_path_class", "entry",
+        }
+        or not isinstance(role.get("entry"), dict)
+    ):
+        errors.append(f"role shape drift: {role.get('id')!r}")
+        continue
+    wanted = dict(role["entry"])
+    wanted["command"] = str(
+        (home / role["direct_command_role"]).resolve())
+    rows = hooks.get(role["event"], [])
+    count = rows.count(wanted) if isinstance(rows, list) else 0
+    if count != 1:
+        errors.append(f"direct projection count drift: {role['id']}={count}")
+    matched += count
+if sum(len(rows) for rows in hooks.values() if isinstance(rows, list)) != 5:
+    errors.append("direct projection does not contain exactly five rows")
+if matched != 5:
+    errors.append("direct projection/contract parity incomplete")
+
+if errors:
+    print("; ".join(errors), file=sys.stderr)
+    raise SystemExit(1)
+PY
+then
+  pass "awa-hook-owner/v1 declares five exact roles; direct projection matches; external creates no hook destination"
+else
+  bad "awa-hook-owner/v1 contract/reconciler parity drifted"
+fi
+rm -rf "$owner_tmp" 2>/dev/null || true
 
 # 1) CLI surface: every frozen verb + flag must appear in dev-worktree.sh usage/dispatch.
 if CONTRACT="$CONTRACT" DEV_SRC="$(cat "$DEV_WORKTREE" 2>/dev/null || true)" python3 - <<'PY'

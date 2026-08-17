@@ -859,14 +859,15 @@ def republish_second_close(sb: Sandbox) -> str:
 # (h) hook registration schema that Layer B depends on
 # =====================================================================================
 @transition(Row(
-    id="P2-HOOK-INSTALL", phase="P2", title="install-hooks.sh is idempotent with the current entry schema",
-    precondition="a disposable hooks.json path",
-    inp="install-hooks.sh twice + --check",
-    expected="idempotent bytes; matcher=UserPromptSubmit; failClosed=false; timeout=20",
-    oracle="test_finish_conversation::HookAndDispatcherTest::test_hook_install_check_and_idempotency"))
+    id="P2-HOOK-INSTALL", phase="P2",
+    title="Direct hook install stays idempotent; external lifecycle never accesses the hook file",
+    precondition="disposable direct hooks.json plus an isolated external HOME and sentinel hook file",
+    inp="direct install-hooks twice/check; external install/repair/doctor/uninstall",
+    expected="direct bytes idempotent; external inode/mode/mtime/bytes/backups unchanged and doctor reports host-managed",
+    oracle="test_hook_owner_modes::TestHookOwnerInstall lifecycle + zero-access cases"))
 def hook_install(sb: Sandbox) -> str:
     hooks = sb.data / "hooks.json"
-    env = {**os.environ, "AWA_HOOKS_JSON": str(hooks)}
+    env = {**os.environ, "AWA_HOOKS_JSON": str(hooks), "AWA_HOOK_OWNER": "direct"}
     first = sb.run_raw([str(INSTALL_HOOKS)], env=env)
     check_eq(first.returncode, 0, f"install rc ({first.stderr})")
     one = hooks.read_bytes()
@@ -878,4 +879,54 @@ def hook_install(sb: Sandbox) -> str:
     check_eq(entry["matcher"], "UserPromptSubmit", "matcher")
     check_eq(entry["failClosed"], False, "failClosed=false (advisory; Layer B caveat)")
     check_eq(entry["timeout"], 20, "timeout")
-    return "idempotent; matcher=UserPromptSubmit; failClosed=false; timeout=20"
+
+    external_home = sb.tmp / "external-home"
+    external_hooks = sb.tmp / "external-selected-hooks" / "hooks.json"
+    external_hooks.parent.mkdir(parents=True)
+    external_hooks.write_text(
+        '{"version":1,"hooks":{"beforeReadFile":'
+        '[{"command":"/generic/foreign/sentinel.sh","type":"command","timeout":7}]}}\n',
+        encoding="utf-8")
+
+    def snapshot() -> tuple:
+        current = external_hooks.stat()
+        backups = tuple(sorted(
+            (path.name, path.read_bytes(), stat_mode(path))
+            for path in external_hooks.parent.glob("hooks.json.bak-*")))
+        return (
+            current.st_ino, stat_mode(external_hooks), current.st_size,
+            current.st_mtime_ns, external_hooks.read_bytes(), backups,
+        )
+
+    external_before = snapshot()
+    external_env = {
+        **{key: value for key, value in os.environ.items()
+           if not key.startswith("AWA_") and key not in {
+               "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+               "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+           }},
+        "HOME": str(external_home),
+        "XDG_DATA_HOME": str(external_home / ".local" / "share"),
+        "XDG_CONFIG_HOME": str(external_home / ".config"),
+        "XDG_STATE_HOME": str(external_home / ".local" / "state"),
+        "AWA_HOOKS_JSON": str(external_hooks),
+        "AWA_HOOK_OWNER": "external",
+    }
+    install = sb.run_raw([str(REPO / "install.sh")], env=external_env)
+    check_eq(install.returncode, 0, f"external install rc ({install.stderr})")
+    persisted_env = dict(external_env)
+    persisted_env.pop("AWA_HOOK_OWNER")
+    repair = sb.run_raw([str(REPO / "install.sh"), "--repair"], env=persisted_env)
+    check_eq(repair.returncode, 0, f"external repair rc ({repair.stderr})")
+    doctor = sb.run_raw([str(REPO / "install.sh"), "--doctor"], env=persisted_env)
+    check_eq(doctor.returncode, 0, f"external doctor rc ({doctor.stderr})")
+    check(
+        "hook owner selected: external (host-managed; hook file not inspected by AWA)"
+        in doctor.stdout,
+        "external doctor owner report")
+    uninstall = sb.run_raw([str(REPO / "install.sh"), "--uninstall"], env=persisted_env)
+    check_eq(uninstall.returncode, 0, f"external uninstall rc ({uninstall.stderr})")
+    check_eq(snapshot(), external_before, "external hook inode/mode/mtime/bytes/backups")
+    return (
+        "direct idempotent with matcher/fail-open fields; external "
+        "install/repair/doctor/uninstall left sentinel hook identity and bytes unchanged")

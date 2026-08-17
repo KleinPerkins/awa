@@ -15,6 +15,75 @@
       "dashboard_emitter": "dashboard/emitter.py"
     }
   },
+  "hook_ownership": {
+    "schema": "awa-hook-owner/v1",
+    "modes": ["direct", "external"],
+    "default_mode": "direct",
+    "selection_env": "AWA_HOOK_OWNER",
+    "selection_schema": "awa-hook-owner-selection/v1",
+    "external_real_hook_file_writes": false,
+    "direct_rule": "AWA reconciles exactly the five declared logical roles in the selected Cursor user hook file while preserving unrelated rows.",
+    "external_rule": "The external host owns the complete selected hook file. AWA installs and validates its product runtime but does not read, stat, create, back up, chmod, rewrite, or remove that hook file on install, repair, doctor, or uninstall.",
+    "role_identity_rule": "A logical role is identified by its stable id plus event, never by command-path spelling. Direct and external path projections of one role must not coexist in a converged host matrix.",
+    "host_policy_delegator_rule": "A host-policy-delegator may inject only host policy/root data and then execute the matching installed AWA role. Missing or failed delegation remains fail-open and may not fork guard or session semantics.",
+    "roles": [
+      {
+        "id": "worktree.session-context",
+        "event": "sessionStart",
+        "direct_command_role": "kernel/hooks/worktree-session.sh",
+        "external_command_path_class": "host-policy-delegator",
+        "entry": {
+          "type": "command",
+          "timeout": 5,
+          "failClosed": false
+        }
+      },
+      {
+        "id": "worktree.shell-guard",
+        "event": "beforeShellExecution",
+        "direct_command_role": "kernel/hooks/worktree-guard.sh",
+        "external_command_path_class": "host-policy-delegator",
+        "entry": {
+          "type": "command",
+          "timeout": 20,
+          "failClosed": false
+        }
+      },
+      {
+        "id": "worktree.file-observer",
+        "event": "afterFileEdit",
+        "direct_command_role": "kernel/hooks/worktree-guard.sh",
+        "external_command_path_class": "host-policy-delegator",
+        "entry": {
+          "type": "command",
+          "timeout": 20
+        }
+      },
+      {
+        "id": "recovery.maintenance",
+        "event": "sessionStart",
+        "direct_command_role": "kernel/hooks/awa-recovery-maintenance.sh",
+        "external_command_path_class": "installed-awa",
+        "entry": {
+          "type": "command",
+          "timeout": 5,
+          "failClosed": false
+        }
+      },
+      {
+        "id": "finish.prompt-recall",
+        "event": "beforeSubmitPrompt",
+        "direct_command_role": "kernel/hooks/before-submit-prompt.sh",
+        "external_command_path_class": "installed-awa",
+        "entry": {
+          "type": "command",
+          "matcher": "UserPromptSubmit",
+          "timeout": 20,
+          "failClosed": false
+        }
+      }
+    ]
+  },
   "cli": {
     "tool": "kernel/bin/dev-worktree.sh",
     "tool_frozen": false,

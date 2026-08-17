@@ -30,18 +30,46 @@ make verify             # tests + contract freeze + zero-link + install --check
 ```
 
 `install.sh` copies a self-contained runtime into `$XDG_DATA_HOME/awa/current`, writes a config env
-(`$XDG_CONFIG_HOME/awa/env`), merges the Cursor hooks (a fail-open soft backstop) into
-`~/.cursor/hooks.json`, registers an add-only `awa` MCP server in `~/.cursor/mcp.json`, and writes a
-self-describing release pointer. When `AWA_GOVERNED_ROOT` is configured it also publishes the
-product-owned dashboard seed into Cursor's machine-local Canvas directory. There is **no required**
-sibling-repo dependency — a fresh clone installs on its own. `bootstrap.sh` is a one-command
-"clone + install" convenience.
+(`$XDG_CONFIG_HOME/awa/env`), reconciles hook ownership as described below, registers an add-only
+`awa` MCP server in `~/.cursor/mcp.json`, and writes a self-describing release pointer. When
+`AWA_GOVERNED_ROOT` is configured it also publishes the product-owned dashboard seed into Cursor's
+machine-local Canvas directory. There is **no required** sibling-repo dependency — a fresh clone
+installs on its own. `bootstrap.sh` is a one-command "clone + install" convenience.
 
 To put AWA on your `PATH`, source the generated env (or add it to your shell profile):
 
 ```bash
 source "${XDG_CONFIG_HOME:-$HOME/.config}/awa/env"
 ```
+
+### Cursor hook-file owner
+
+The `awa-hook-owner/v1` contract has two modes:
+
+- `direct` (the fresh and legacy default) — AWA reconciles its five fail-open/observation hook
+  roles in the selected Cursor user hook file while preserving unrelated rows.
+- `external` — another host owns the complete hook file. Set `AWA_HOOK_OWNER=external` for the
+  first install or transition. AWA persists that choice in
+  `$XDG_CONFIG_HOME/awa/hook-owner.json`; later install/repair/doctor/uninstall calls preserve it
+  without needing the environment variable.
+
+External mode performs zero reads or writes of the selected hook file across those four lifecycle
+paths: no stat/open, parent creation, backup, chmod, rewrite, or removal. Doctor reports
+`hook owner selected: external (host-managed; hook file not inspected by AWA)` and validates only
+AWA-owned selection, release-pointer, contract digest, runtime/version/commit, and script evidence.
+External uninstall removes AWA-owned non-hook state but leaves host rows untouched and tells the
+host to reconcile them.
+
+An external host can stage the complete direct rollback projection without changing the live file:
+
+```bash
+AWA_HOOK_OWNER=direct \
+AWA_HOOKS_JSON="$staging_hooks_json" \
+"$AWA_HOME/kernel/hooks/install-hooks.sh"
+```
+
+Validate that staging file with the same command plus `--check`; make the complete owner live
+atomically before retiring the external owner.
 
 ### Point AWA at your repos (the policy overlay)
 
@@ -166,7 +194,7 @@ the referenced file forward to `on`.
 | Command | Effect |
 |---|---|
 | `./install.sh` | Install / reconcile (idempotent) |
-| `./install.sh --repair` | Force re-copy the runtime + re-wire hooks/mcp |
+| `./install.sh --repair` | Force re-copy the runtime + reconcile the selected hook-owner mode and MCP |
 | `./install.sh --doctor` | Read-only health check of the install |
 | `./install.sh --check` | CI-safe static preflight (writes nothing to `$HOME`) |
 | `./install.sh --uninstall [--keep-state]` | Remove the install (`--keep-state` preserves recovery state) |
@@ -336,8 +364,9 @@ ARCHITECTURE.md / SECURITY.md   the design invariant + the Cluster-D security le
 
 `engine/__init__.py:__version__` is the engine version; releases are tagged (`vX.Y.Z`). The kernel
 contract in `contracts/awa-contract.v1.json` freezes **behavior** (verbs/flags, the `awa-worktree/v1`
-shape, the guard permission schema, the lease shape) — not file locations, which are informational
-and resolved by role. A removal/rename is a breaking change requiring `awa-contract.v2.json`.
+shape, guard permissions, lease shape, and additive `awa-hook-owner/v1`) — not file locations,
+which are informational and resolved by role. A removal/rename is a breaking change requiring
+`awa-contract.v2.json`.
 
 ## License
 

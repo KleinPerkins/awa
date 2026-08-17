@@ -428,11 +428,31 @@ classifier mirrors.
 ## Install & standalone shape
 
 `install.sh` is the Standalone-System-Package (SSP) entry point: it copies the runtime into
-`$XDG_DATA_HOME/awa/current`, writes a config env (`AWA_HOME`, `AWA_POLICY`, optional
-`AWA_GOVERNED_ROOT`), merges the Cursor hooks (soft backstop, fail-open), registers an add-only
-`awa` MCP server, ensures the local-disk state dir, and writes a self-describing release pointer.
-It is idempotent and backup-before-write, with `--repair`, `--doctor`, `--check`, and
-`--uninstall [--keep-state]` verbs. No sibling-repo dependency: a fresh clone installs on its own.
+`$XDG_DATA_HOME/awa/current`, writes a config env (`AWA_HOME`, `AWA_POLICY`, `AWA_HOOK_OWNER`,
+optional `AWA_GOVERNED_ROOT`), registers an add-only `awa` MCP server, ensures the local-disk state
+dir, and writes a self-describing release pointer. It is idempotent and backup-before-write, with
+`--repair`, `--doctor`, `--check`, and `--uninstall [--keep-state]` verbs. No sibling-repo
+dependency: a fresh clone installs on its own.
+
+Hook-file ownership is the additive `awa-hook-owner/v1` block in the canonical behavior contract.
+The strict machine-local selection at `$XDG_CONFIG_HOME/awa/hook-owner.json` resolves from an
+explicit `AWA_HOOK_OWNER=direct|external`, then persisted selection, then a compatible release
+pointer, with `direct` only as the fresh/legacy default. Invalid or ambiguous state refuses before
+hook or selection mutation; only a valid explicit value repairs malformed state.
+
+In `direct`, AWA reconciles the contract's exact five roles into the selected user hook file. In
+`external`, the host owns the entire file transaction and AWA performs zero selected-hook-file
+reads or writes on install, repair, doctor, and uninstall. A host-policy delegator may inject only
+policy/root data before executing the installed guard/session role; recovery maintenance and
+finish recall still point at installed AWA. The role ID plus event—not command spelling—is identity.
+The four runtime hook scripts and finish executor remain unchanged, so this owner selection does not
+move the guard, recovery, heartbeat, or literal-`Close` authority off the kernel-first path.
+
+The release pointer advertises the selected mode, `awa-hook-owner/v1`, and the installed canonical
+contract SHA-256. Doctor requires selection/pointer/runtime/contract agreement. A direct projection
+can be built and checked against an explicit non-live `AWA_HOOKS_JSON` staging path while external
+remains persisted; making that complete owner live atomically is the host's rollback transaction,
+not an AWA lifecycle side effect.
 
 ## Security
 
