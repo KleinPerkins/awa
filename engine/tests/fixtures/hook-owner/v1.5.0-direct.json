@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "{{RUNTIME}}/kernel/hooks/worktree-session.sh",
+        "type": "command",
+        "timeout": 5,
+        "failClosed": false
+      },
+      {
+        "command": "{{RUNTIME}}/kernel/hooks/awa-recovery-maintenance.sh",
+        "type": "command",
+        "timeout": 5,
+        "failClosed": false
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "{{RUNTIME}}/kernel/hooks/worktree-guard.sh",
+        "type": "command",
+        "timeout": 20,
+        "failClosed": false
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "{{RUNTIME}}/kernel/hooks/before-submit-prompt.sh",
+        "type": "command",
+        "matcher": "UserPromptSubmit",
+        "timeout": 20,
+        "failClosed": false
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "{{RUNTIME}}/kernel/hooks/worktree-guard.sh",
+        "type": "command",
+        "timeout": 20
+      }
+    ],
+    "beforeReadFile": [
+      {
+        "command": "{{HOST_ROOT}}/foreign/read-observer.sh",
+        "type": "command",
+        "timeout": 7
+      }
+    ]
+  }
+}

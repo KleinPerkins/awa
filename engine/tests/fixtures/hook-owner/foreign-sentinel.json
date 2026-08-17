@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeReadFile": [
+      {
+        "command": "{{HOST_ROOT}}/foreign/sentinel.sh",
+        "type": "command",
+        "timeout": 7
+      }
+    ]
+  }
+}
