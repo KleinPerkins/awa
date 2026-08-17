@@ -16,6 +16,29 @@
 #   sessionStart         -> false  (fire-and-forget context; never blocks)
 set -euo pipefail
 
+MODE="install"
+case "${1:-}" in
+  --check) MODE="check" ;;
+  "") MODE="install" ;;
+  *) printf 'usage: %s [--check]\n' "$0" >&2; exit 2 ;;
+esac
+
+HOOK_OWNER="${AWA_HOOK_OWNER-direct}"
+case "$HOOK_OWNER" in
+  direct) ;;
+  external)
+    printf '%s\n' "install-hooks: hook owner external; selected hook file not inspected by AWA"
+    exit 0
+    ;;
+  *)
+    printf '%s\n' "install-hooks: hook-owner selection is invalid" >&2
+    exit 2
+    ;;
+esac
+
+# The selected destination is not even resolved until after the external-owner early exit above.
+# This ordering is part of awa-hook-owner/v1: external mode performs zero selected-hook-file
+# reads, stats, directory creation, chmod, backups, or writes.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"   # kernel/hooks
 HOOKS_JSON="${AWA_HOOKS_JSON:-$HOME/.cursor/hooks.json}"
 SESSION_HOOK="$SCRIPT_DIR/worktree-session.sh"
@@ -24,13 +47,6 @@ PROMPT_HOOK="$SCRIPT_DIR/before-submit-prompt.sh"
 # Phase 3: a SECOND, fail-open sessionStart hook (engine retention maintenance) installed BESIDE the
 # kernel-only worktree-session.sh without changing it. Both coexist as distinct sessionStart entries.
 MAINT_HOOK="$SCRIPT_DIR/awa-recovery-maintenance.sh"
-
-MODE="install"
-case "${1:-}" in
-  --check) MODE="check" ;;
-  "") MODE="install" ;;
-  *) printf 'usage: %s [--check]\n' "$0" >&2; exit 2 ;;
-esac
 
 if [ "$MODE" = "check" ]; then
   HOOKS_JSON="$HOOKS_JSON" SESSION_HOOK="$SESSION_HOOK" GUARD_HOOK="$GUARD_HOOK" \

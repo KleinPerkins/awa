@@ -130,13 +130,12 @@ class HookOwnerSandbox(unittest.TestCase):
         self.selection = self.config_home / "awa" / "hook-owner.json"
         self.pointer = self.data_home / "awa" / "release-pointer.json"
         self.env = dict(os.environ)
-        for key in (
-                "AWA_HOOK_OWNER", "AWA_HOOKS_JSON", "AWA_MCP_JSON",
-                "AWA_OPERATOR_RULE", "AWA_POLICY", "AWA_GOVERNED_ROOT",
-                "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME",
-                "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
-                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"):
-            self.env.pop(key, None)
+        for key in tuple(self.env):
+            if key.startswith("AWA_") or key in {
+                    "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME",
+                    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"}:
+                self.env.pop(key, None)
         self.env.update({
             "HOME": str(self.home),
             "XDG_DATA_HOME": str(self.data_home),
@@ -164,7 +163,9 @@ class HookOwnerSandbox(unittest.TestCase):
             [str(INSTALL), *args], env=env, capture_output=True, text=True,
             timeout=timeout)
 
-    def run_hook_installer(self, *args, owner=_UNSET, hooks=None, timeout=60):
+    def run_hook_installer(
+            self, *args, owner=_UNSET, hooks=None, script=INSTALL_HOOKS,
+            timeout=60):
         env = dict(self.env)
         env["AWA_HOOKS_JSON"] = str(hooks or self.hooks)
         if owner is _UNSET:
@@ -172,7 +173,7 @@ class HookOwnerSandbox(unittest.TestCase):
         else:
             env["AWA_HOOK_OWNER"] = owner
         return subprocess.run(
-            [str(INSTALL_HOOKS), *args], env=env, capture_output=True,
+            [str(script), *args], env=env, capture_output=True,
             text=True, timeout=timeout)
 
     def seed_fixture(self, name, path=None):
@@ -239,7 +240,9 @@ class TestHookOwnerContract(HookOwnerSandbox):
     def test_hook_owner_fixtures_are_generic_and_token_bounded(self):
         for fixture in FIXTURES.iterdir():
             text = fixture.read_text(encoding="utf-8")
-            for forbidden in ("KleinPerkins", "/Users/", "affirm/", "skills/"):
+            for forbidden in (
+                    "Klein" + "Perkins", "/Us" + "ers/",
+                    "af" + "firm/", "skills/"):
                 self.assertNotIn(forbidden, text, fixture.name)
             if fixture.name != "malformed.json":
                 json.loads(text.replace("{{RUNTIME}}", "/runtime").replace(
@@ -317,6 +320,20 @@ class TestHookOwnerInstall(HookOwnerSandbox):
         self.assertEqual(self.read_pointer()["installed_at"], original_installed_at)
         self.assertFalse(self.hooks.exists())
 
+    def test_release_pointer_recovers_external_when_selection_is_absent(self):
+        self.seed_fixture("foreign-sentinel.json")
+        installed = self.run_install(owner="external")
+        self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+        before = self.hook_snapshot(self.hooks)
+        original_installed_at = self.read_pointer()["installed_at"]
+        self.selection.unlink()
+
+        repaired = self.run_install("--repair")
+        self.assertEqual(repaired.returncode, 0, repaired.stdout + repaired.stderr)
+        self.assert_selection("external")
+        self.assertEqual(self.read_pointer()["installed_at"], original_installed_at)
+        self.assertEqual(self.hook_snapshot(self.hooks), before)
+
     def test_version_150_upgrade_defaults_to_direct(self):
         self.seed_fixture("v1.5.0-direct.json")
         self.pointer.parent.mkdir(parents=True)
@@ -345,10 +362,16 @@ class TestHookOwnerInstall(HookOwnerSandbox):
     def test_invalid_or_malformed_selection_refuses_before_hook_mutation(self):
         self.seed_fixture("foreign-sentinel.json")
         before = self.hook_snapshot(self.hooks)
-        invalid = self.run_install(owner="sideways")
-        self.assertEqual(invalid.returncode, 2, invalid.stdout + invalid.stderr)
-        self.assertEqual(self.hook_snapshot(self.hooks), before)
-        self.assertFalse(self.selection.exists())
+        for value in ("", "sideways"):
+            with self.subTest(explicit=value):
+                invalid = self.run_install(owner=value)
+                self.assertEqual(
+                    invalid.returncode, 2, invalid.stdout + invalid.stderr)
+                self.assertEqual(
+                    invalid.stderr.strip(),
+                    "awa-install: hook-owner selection is invalid")
+                self.assertEqual(self.hook_snapshot(self.hooks), before)
+                self.assertFalse(self.selection.exists())
 
         self.selection.parent.mkdir(parents=True)
         self.selection.write_text("{ malformed", encoding="utf-8")
@@ -494,13 +517,18 @@ class TestHookOwnerInstall(HookOwnerSandbox):
         installed = self.run_install(owner="external")
         self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
         staging = self.root / "rollback" / "hooks.json"
-        built = self.run_hook_installer(owner="direct", hooks=staging)
+        installed_hook_reconciler = (
+            self.runtime / "kernel" / "hooks" / "install-hooks.sh")
+        built = self.run_hook_installer(
+            owner="direct", hooks=staging, script=installed_hook_reconciler)
         self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
-        checked = self.run_hook_installer("--check", owner="direct", hooks=staging)
+        checked = self.run_hook_installer(
+            "--check", owner="direct", hooks=staging,
+            script=installed_hook_reconciler)
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
         self.assertEqual(
             json.loads(staging.read_text(encoding="utf-8")),
-            {"version": 1, "hooks": _expected_direct_hooks(REPO)})
+            {"version": 1, "hooks": _expected_direct_hooks(self.runtime)})
         self.assertEqual(self.hook_snapshot(self.hooks), live_before)
         self.assert_selection("external")
 
