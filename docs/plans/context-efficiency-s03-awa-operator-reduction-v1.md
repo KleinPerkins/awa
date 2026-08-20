@@ -78,9 +78,9 @@ Required local commands:
 
 ```bash
 git status --short --branch
-python3 -m unittest discover -s tests -p 'test_*.py'
-python3 -m unittest discover -s consumer -p 'test_*.py'
+make test
 make verify
+make verify-install
 git diff --check
 ```
 
