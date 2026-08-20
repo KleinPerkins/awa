@@ -56,6 +56,7 @@ lands — this directory already follows the reference shape it derived from.
 | `git-readonly-command-classifier-v1.md` | COMPLETE — 2026-08-10 | Refined the AWA shell guard's Git classifier so deterministic read-only nested commands such as `git worktree list --porcelain`, `git stash list/show`, and `git clean --dry-run` allow while mutating forms stay denied; implemented by PR #95. |
 | `git-command-policy-hardening-v1.md` | DRAFT — 2026-08-11 | Prove and govern remote dry-run behavior, then fully classify branch, remote, config, submodule, and sparse-checkout forms with closed read-only grammars and conservative deny defaults. |
 | `external-hook-owner-contract-v1.md` | ACCEPTED — 2026-08-15 | Add a persistent direct/external hook-file owner contract, preserve direct standalone defaults and all v1.5.1 behavior, and gate a tested v1.5.2 release for the serial Skills/Dev handoff. |
+| `context-efficiency-s03-awa-operator-reduction-v1.md` | DRAFT — 2026-08-20 | Conditional Release 1 plan to reduce only the AWA-owned `awa-operator` projection enough to close the S-01/S-02 static-target shortfall while preserving finish, retain, router/kernel, and operator-safety invariants. |
 
 ## Related conventions
 
