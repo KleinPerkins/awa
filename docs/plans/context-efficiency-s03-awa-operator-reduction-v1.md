@@ -70,7 +70,7 @@ Reduction direction:
 1. Fetch AWA `origin/main`, verify S-01/S-02 PRs are merged, and re-confirm S-03 shortfall from content-safe counts only.
 2. Create a Safe Workspace via `~/dev/_ops/bin/dev-worktree.sh ensure` and follow the printed `move_agent_to_root` instruction if Cursor can perform it. If Cursor cannot move because of branch-worktree conflicts, continue only in the printed safe worktree and never edit the primary checkout.
 3. Draft a candidate edit to `consumer/operator-skill.md` only.
-4. Derive installed projection bytes through the standard AWA install path (`make install` or `make repair`) or an explicitly documented equivalent that includes install-generated YAML frontmatter; never measure stale `~/.cursor/rules/awa-operator.mdc` or source-only bytes.
+4. Derive installed projection bytes in a throwaway `HOME`/XDG environment through the standard AWA install path, or with an explicitly documented non-live equivalent that includes install-generated YAML frontmatter. Do not run `make install`, `make repair`, or any real-`$HOME` write before the exact-digest operator gate; never measure stale `~/.cursor/rules/awa-operator.mdc` or source-only bytes.
 5. Measure the candidate `awa-operator` projection with the compatible v2 context-measurement tool against the installed full-file selector.
 6. Build a semantic-invariant checklist mapping every item in §3 to retained source text or test coverage.
 7. Stop for an exact-digest operator gate before marking the implementation PR ready. The gate must name candidate source SHA-256, candidate installed/projection SHA-256, before/after chars and words, expected shortfall closure, and rollback command.
