@@ -19,7 +19,7 @@ The E-09 baseline row is:
 
 | Projection | Source file | Installed E-09 path | E-09 characters | E-09 words |
 |---|---|---|---:|---:|
-| `awa-operator` | `consumer/operator-skill.md` | `/Users/laurence.duggan/.cursor/rules/awa-operator.mdc` | 5,585 | 732 |
+| `awa-operator` | `consumer/operator-skill.md` | `/Users/laurence.duggan/.cursor/rules/awa-operator.mdc` | 8,206 | 1,016 |
 
 The current projected Release 1 shortfall after S-01 and source-only S-02 is about 2,240 characters and 241 words. S-03 should target at least a 2,500-character and 260-word reduction buffer, but must stop before weakening any hard safety rule.
 
