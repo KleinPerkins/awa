@@ -45,14 +45,17 @@ Out of scope:
 Implementation must preserve:
 
 - direct finish phrases start preview only; negated, quoted, hypothetical, documentation, examples, feature requests, and discussion do not;
+- direct closeout wording is matched before generic routing;
+- the `beforeSubmitPrompt` preview hook is convenience only, fails open, and creates no challenge for unsupported Cloud, background, primary, absent, or multi-root contexts;
 - `Commit`, `Retain`, `Mixed`, and `Cancel` choice handling, and exact case-sensitive `Close` as the only destructive close authorization;
 - attachment/extra-word/boolean/approval-click refusal; case/trim variants of `Close` return the exact safety instruction and never authorize;
 - retain/restore/delete artifact semantics, row selections, exact artifact-id delete, and secret handling;
-- commit delivery requirements: GitHub repository, merge commits enabled, exact-head merge commit on live default branch, complete passing checks, network only in Commit/Mixed, and fresh warning after Commit/Retain/Mixed;
+- commit delivery requirements: GitHub repository, merge commits enabled, exact-head merge commit on live default branch, complete passing checks, squash/rebase-only repositories unsupported, network only in Commit/Mixed, and fresh warning after Commit/Retain/Mixed;
 - successful Close reporting: workspace removed, branch retained/deleted result, agent stops, chat remains open, and no further task tools;
-- router proposes only; AWA verbs execute; kernel owns consequence confirmation; CR9 catalog-derived destructive confirmation; live `affects_shared_ref`;
+- router proposes only; AWA verbs execute; kernel owns consequence confirmation; CR9 catalog-derived destructive confirmation; live `affects_shared_ref`; when router is absent, degrade to ask plus six explicit options and never guess a destructive action;
 - verify-real-outcome, plain-language honest narration, feedback record shape, PM-facing `pm_view` boundary, and raw router/kernel internals never shown to PMs;
 - kernel-first/off-switch invariant: safety holds when the router is absent, and the kernel guard/refuse/audit path never depends on router output;
+- `confirm=True` remains old-copy `cleanup` compatibility only and is never accepted for `finish_current`;
 - all A0 fix-pass hardening guards listed in the current source.
 
 Reduction direction:
@@ -67,10 +70,11 @@ Reduction direction:
 1. Fetch AWA `origin/main`, verify S-01/S-02 PRs are merged, and re-confirm S-03 shortfall from content-safe counts only.
 2. Create a Safe Workspace via `~/dev/_ops/bin/dev-worktree.sh ensure` and follow the printed `move_agent_to_root` instruction if Cursor can perform it. If Cursor cannot move because of branch-worktree conflicts, continue only in the printed safe worktree and never edit the primary checkout.
 3. Draft a candidate edit to `consumer/operator-skill.md` only.
-4. Measure the candidate `awa-operator` projection with the compatible v2 context-measurement tool against the same full-file selector.
-5. Build a semantic-invariant checklist mapping every item in §3 to retained source text or test coverage.
-6. Stop for an exact-digest operator gate before marking the implementation PR ready. The gate must name candidate source SHA-256, candidate installed/projection SHA-256, before/after chars and words, expected shortfall closure, and rollback command.
-7. After approval, open a draft PR, run Bugbot, fix applicable findings, run the verification gates in §5, then mark ready. Do not arm auto-merge or bypass checks.
+4. Derive installed projection bytes through the standard AWA install path (`make install` or `make repair`) or an explicitly documented equivalent that includes install-generated YAML frontmatter; never measure stale `~/.cursor/rules/awa-operator.mdc` or source-only bytes.
+5. Measure the candidate `awa-operator` projection with the compatible v2 context-measurement tool against the installed full-file selector.
+6. Build a semantic-invariant checklist mapping every item in §3 to retained source text or test coverage.
+7. Stop for an exact-digest operator gate before marking the implementation PR ready. The gate must name candidate source SHA-256, candidate installed/projection SHA-256, before/after chars and words, expected shortfall closure, and rollback command.
+8. After approval, open a draft PR, run Bugbot, fix applicable findings, run the verification gates in §5, then mark ready. Do not arm auto-merge or bypass checks.
 
 ## 5. Verification
 
