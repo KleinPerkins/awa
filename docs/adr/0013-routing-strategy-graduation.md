@@ -1,17 +1,17 @@
-# ADR 0004: Routing-strategy graduation — deterministic-first, router-fallback gated on the scorecard
+# ADR 0013: Routing-strategy graduation — deterministic-first, router-fallback gated on the scorecard
 Status: draft — 2026-08-06
 
 ## Decision
 
-Ship deterministic-first routing (ADR 0003) as the default. Treat an out-of-engine router
+Ship deterministic-first routing (ADR 0012) as the default. Treat an out-of-engine router
 *fallback* (the "fuse" strategy: deterministic-first plus an optional `source:router_suggestion`
 proposal) as a separately gated enhancement that graduates only if it beats deterministic routing on
 the frozen 96-run scorecard (18 eligible scenarios incl. 8 safety-critical + 6 negative controls, 2
 model classes × 2 reps, with v4's split-rep rule). The router fallback is **never** a dependency:
 deterministic routes must work with the router (and daemon, and SQLite) absent
-(optional-component-off invariant). This ADR **complements** ADR 0003 today; if measurement later
-reverses ADR 0003's routing scope, that reversal is recorded as a new ADR carrying
-`Supersedes: ADR-0003` with a bidirectional cross-link — it is not pre-declared here, because the
+(optional-component-off invariant). This ADR **complements** ADR 0012 today; if measurement later
+reverses ADR 0012's routing scope, that reversal is recorded as a new ADR carrying
+`Supersedes: ADR-0012` with a bidirectional cross-link — it is not pre-declared here, because the
 measurement has not run.
 
 ## Why
@@ -50,4 +50,4 @@ measurement has not run.
   tested); the router's routing/safety/confirmation fields are never trusted.
 - Defers/creates: the graduation *measurement* is a plan work item (M6 bulk matrix + M7 Phase 2),
   not performed by this ADR; its outcome is an explicit GO/NO-GO fork for the operator. Cross-links:
-  ADR 0003 (routing front door this graduates, bidirectional), plan §M7 (Phase 2 gate).
+  ADR 0012 (routing front door this graduates, bidirectional), plan §M7 (Phase 2 gate).

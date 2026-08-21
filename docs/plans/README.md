@@ -23,7 +23,7 @@ lands — this directory already follows the reference shape it derived from.
    (no competing versions expected) may omit the `-vN` suffix.
 3. **Freeze-on-approval.** Once a version is owner-approved (or superseded by a newer
    version), it is **frozen immutable** — never edit it again, including for typos, and
-   (per doc-warden POLICY §9, adopted for new plans by ADR 0008) **not even a
+   (per doc-warden POLICY §9, adopted for new plans by ADR 0017) **not even a
    status-bullet edit**. A revision is always a **new** `-v<N+1>.md` file, preserving the
    prior version byte-identically, with the pointer stated explicitly in the new file's
    `**Supersedes:**` bullet; the prior version's frozen/superseded status is recorded in
@@ -40,7 +40,7 @@ lands — this directory already follows the reference shape it derived from.
 ## Convention reconciliation with doc-warden (2026-08-06)
 
 > **New plans adopt doc-warden's canonical shape going forward** — see the ADR-set meta-decision
-> [`../adr/0008-adopt-and-reconcile-doc-warden-conventions.md`](../adr/0008-adopt-and-reconcile-doc-warden-conventions.md).
+> [`../adr/0017-adopt-and-reconcile-doc-warden-conventions.md`](../adr/0017-adopt-and-reconcile-doc-warden-conventions.md).
 > New plans use doc-warden's status vocabulary `DRAFT → ACCEPTED → SUPERSEDED` (the local
 > `APPROVED — FROZEN` / `COMPLETE` values remain valid for existing records). This index keeps its local
 > `File | Status | One-line description` columns for now so the existing `guard-…` row stays
@@ -52,7 +52,7 @@ lands — this directory already follows the reference shape it derived from.
 | File | Status | One-line description |
 |---|---|---|
 | `guard-target-path-precision-v1.md` | COMPLETE — 2026-08-06 | Fix `beforeShellExecution` DENYing mutating commands whose resolved target path is outside every protected primary checkout (e.g. `rm /tmp/x` from inside a protected repo); establishes this `docs/` governance layer itself. |
-| `awa-mcp-evolution-v1.md` | DRAFT — 2026-08-06 | Consolidates the v3/v4 MCP-discoverability floor and expands it: single-source capability registry, deterministic `awa_route`, kernel-gated MCP lifecycle previews, MCP worktree creation, engine-owned dynamic resources, and doc-warden alignment (ADRs 0002–0009). |
+| `awa-mcp-evolution-v1.md` | DRAFT — 2026-08-06 | Consolidates the v3/v4 MCP-discoverability floor and expands it: single-source capability registry, deterministic `awa_route`, kernel-gated MCP lifecycle previews, MCP worktree creation, engine-owned dynamic resources, and doc-warden alignment (ADRs 0011–0018). |
 | `git-readonly-command-classifier-v1.md` | COMPLETE — 2026-08-10 | Refined the AWA shell guard's Git classifier so deterministic read-only nested commands such as `git worktree list --porcelain`, `git stash list/show`, and `git clean --dry-run` allow while mutating forms stay denied; implemented by PR #95. |
 | `git-command-policy-hardening-v1.md` | DRAFT — 2026-08-11 | Prove and govern remote dry-run behavior, then fully classify branch, remote, config, submodule, and sparse-checkout forms with closed read-only grammars and conservative deny defaults. |
 | `external-hook-owner-contract-v1.md` | ACCEPTED — 2026-08-15 | Add a persistent direct/external hook-file owner contract, preserve direct standalone defaults and all v1.5.1 behavior, and gate a tested v1.5.2 release for the serial Skills/Dev handoff. |

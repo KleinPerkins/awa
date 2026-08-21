@@ -1,4 +1,4 @@
-# ADR 0006: MCP worktree creation + path whitelisting — fused ensure-reuse and disposable scratch dir
+# ADR 0015: MCP worktree creation + path whitelisting — fused ensure-reuse and disposable scratch dir
 Status: draft — 2026-08-06
 
 ## Decision
@@ -45,5 +45,5 @@ glob-metachar `mode='off'` key.
   rule holds at the MCP boundary.
 - Defers/creates: the MCP worktree-create tool and the disposable-dir provisioning are plan work
   items (M3), plus an M6 safety test that whitelisting-never-downgrades-primary. Cross-links: ADR
-  0003 (route surfaces `ensure`), ADR 0005 (same kernel-gated, non-self-authorizing discipline),
+  0012 (route surfaces `ensure`), ADR 0014 (same kernel-gated, non-self-authorizing discipline),
   plan §M3/§M6.

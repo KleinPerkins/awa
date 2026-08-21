@@ -1,4 +1,4 @@
-# ADR 0005: Lifecycle verbs via MCP — preview/propose only, kernel-gated by an operator chat-turn
+# ADR 0014: Lifecycle verbs via MCP — preview/propose only, kernel-gated by an operator chat-turn
 Status: draft — 2026-08-06
 
 ## Context
@@ -37,7 +37,7 @@ the MCP tool — that checks it. An agent cannot self-authorize.
 - **MCP pure-routing-only, forever (status quo — superseded).** The catalog already promises
   `protect`/`save`/`resume`/`cleanup` over MCP (`intent-catalog.v1.json:29`/`102`/`83`/`122`) but no
   executor backs them (`operator_loop.py:151`,`:276`,`:389`). Leaving that permanently unbuilt would
-  strand a declared capability; this is a build gap to close, not a deliberate exclusion (ADR 0009).
+  strand a declared capability; this is a build gap to close, not a deliberate exclusion (ADR 0018).
 - **MCP-preview + kernel-gate (chosen).** Reuse the proven two-phase preview→authorize path:
   `dev-worktree.sh clean --finish-current --preview` is read-only, and removal requires
   `--authorization` to equal exactly `Close` under the finish-only session gate
@@ -59,7 +59,7 @@ the MCP tool — that checks it. An agent cannot self-authorize.
 - Must stay true: the kernel remains authoritative with the engine/MCP off; the envelope is one-use
   and root/session/generation-bound; preview never mutates.
 - Defers/creates: closes the `operator_loop.executor` build gap (a gap, not a subtraction — ADR
-  0009) as plan work items in M3/M6. Explicitly overrides the v3/v4 out-of-scope line as an approved
-  scope change (conflict #6). Cross-links: ADR 0006 (worktree creation reuses the same non-downgrade
-  discipline), ADR 0009 (build-gap vs subtraction), plan §M3/§M6 (safety tests:
+  0018) as plan work items in M3/M6. Explicitly overrides the v3/v4 out-of-scope line as an approved
+  scope change (conflict #6). Cross-links: ADR 0015 (worktree creation reuses the same non-downgrade
+  discipline), ADR 0018 (build-gap vs subtraction), plan §M3/§M6 (safety tests:
   agent-cannot-self-authorize).
