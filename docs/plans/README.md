@@ -57,6 +57,7 @@ lands — this directory already follows the reference shape it derived from.
 | `git-command-policy-hardening-v1.md` | DRAFT — 2026-08-11 | Prove and govern remote dry-run behavior, then fully classify branch, remote, config, submodule, and sparse-checkout forms with closed read-only grammars and conservative deny defaults. |
 | `external-hook-owner-contract-v1.md` | ACCEPTED — 2026-08-15 | Add a persistent direct/external hook-file owner contract, preserve direct standalone defaults and all v1.5.1 behavior, and gate a tested v1.5.2 release for the serial Skills/Dev handoff. |
 | `context-efficiency-s03-awa-operator-reduction-v1.md` | COMPLETE — 2026-08-20 | Reduced only the AWA-owned `awa-operator` projection in PR #116 and recorded hermetic v2 measurement, Bugbot, and fresh-agent canary evidence in `live-verify/RESULTS-context-efficiency-s03-20260820.md`. |
+| `guard-fast-forward-primary-carve-out-v1.md` | DRAFT — 2026-08-21 | Additive carve-out (ADR 0011) letting an agent `git merge --ff-only` a protected primary's current branch to its tracked upstream with no operator step, while every other merge form and all fetch/push/pull stay denied. |
 
 ## Related conventions
 

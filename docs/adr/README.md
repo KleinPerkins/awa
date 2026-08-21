@@ -70,6 +70,7 @@ lands — this directory already follows the reference shape it derived from.
 | [0008](0008-adopt-and-reconcile-doc-warden-conventions.md) | Draft — 2026-08-06 | Adopt doc-warden's canonical conventions for new artifacts and reconcile AWA's five local divergences per-divergence; index-column migration deferred to an operator-gated POC 3d. |
 | [0009](0009-tooling-subtraction-policy.md) | Draft — 2026-08-06 | Subtract no MCP surface now (all 9 tools used/tested; the one resource is retained); establish a durable proof-to-kill rule for any future removal. |
 | [0010](0010-remote-dry-run-policy.md) | Draft — 2026-08-11 | Treat all fetch/push forms, including dry-run, as potentially mutating on protected primaries; use a Safe Workspace or scratch repository instead. |
+| [0011](0011-fast-forward-primary-carve-out.md) | Draft — 2026-08-21 | Allow a single `git merge --ff-only` of the current branch to its tracked upstream on a protected primary as an additive deny→allow carve-out (ADR 0001 lineage), delegating runtime safety to git's `--ff-only` guarantee; every other merge form and all fetch/push/pull stay denied (ADR 0010). |
 
 ## Related conventions
 
