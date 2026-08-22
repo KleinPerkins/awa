@@ -1,369 +1,492 @@
-# Guard Fast-Forward Primary Carve-Out — Let an agent fast-forward a protected primary without an operator step
+# Guard Fast-Forward Primary Maintenance Carve-Out — refresh and advance a protected primary without turning it into a workspace
 
 - **Version:** v1
 - **Status:** DRAFT — 2026-08-21
 - **Date:** 2026-08-21
 - **Owning repository:** `KleinPerkins/awa` (`~/dev/capabilities/awa`)
 - **Plan-type:** agentic-execution
-- **Relates to:** ADR 0011 (authorizes this design), ADR 0001 (additive-only mutation-scope
-  doctrine), ADR 0010 (fetch/push remain mutating), `docs/plans/git-command-policy-hardening-v1.md`
-  (sibling classifier plan whose Task 5 currently fast-forwards primaries only behind the operator
-  override)
-- **Review provenance:** `prompt-architect`-scoped draft authored from live guard-source verification
-  (AWA `main` @ `9737d3d`, v1.5.2); design-acceptance-only, implementation gated on a separate
-  operator instruction.
+- **Relates to:** ADR 0001 (additive-only mutation-scope doctrine), draft ADR 0010
+  (remote Git policy), draft ADR 0011 (primary fast-forward policy), and
+  `docs/plans/git-command-policy-hardening-v1.md`
+- **Review provenance:** Refined against live AWA `main` @ `9737d3d` and Skills `main` @
+  `3a13f72` using the four-test `plan-refine` method plus a Critical-band review swarm
+  (one probe, four territory reviewers, one verifier). No implementation has started.
+- **Governance blocker:** This plan may remain a mutable draft, but it MUST NOT become
+  ACCEPTED and Task 1 MUST NOT start until draft ADRs 0010 and 0011 are revised in
+  lockstep to authorize the maintenance boundary below. This `plan-refine` pass did not
+  have authority to edit either ADR.
 
-**Goal:** Add a narrow, additive carve-out so that on an INCLUDED PRIMARY checkout, a single
-`git merge --ff-only [<tracked-upstream>]` of the current branch is ALLOWED (converting today's
-enforced `deny` into an `allow`), while every other primary mutation — including every
-non-fast-forward merge, every extra flag, and all fetch/push/pull forms — stays denied.
+**Goal:** Let an agent perform the two Git operations actually required to keep a clean
+protected primary checkout current with its configured upstream:
 
-**Architecture:** Implement the allowance at the decision layer (`engine/guard.py::decide_shell` and
-the kernel `kernel/hooks/worktree-guard.sh` `check_probe` mirror), parallel to the ADR 0001
-target-narrowing and BEFORE the enforced deny. `merge` stays in `_GITMUT` and keeps classifying as
-mutating; a new pure predicate `_is_safe_ff_only_merge(command)` recognizes only the exact closed
-fast-forward grammar. Runtime fast-forward/clean-tree safety is delegated to git's own `--ff-only`
-guarantee; the guard proves only the command shape. Kernel-first duplication-with-parity is retained.
+1. refresh the configured upstream; then
+2. fast-forward the currently checked-out branch to that upstream.
 
-**Tech stack:** Python stdlib, Bash, Git 2.50.1 behavior baseline, `unittest`, AWA contract-freeze
-UAT, runnerless PR automation, and the `KleinPerkins/skills` capability-lifecycle binding.
+Both operations remain honestly classified as mutating. They receive a narrow
+decision-layer allowance only when command shape and live repository state prove that the
+agent is doing maintenance, not development work. Commits, branch changes, rewrites,
+conflict resolution, arbitrary refs/refspecs, cleanup, and every other primary mutation
+remain denied.
 
-> **For agentic workers:** REQUIRED SUB-SKILL — use `subagent-driven-development` or `executing-plans`
-> to implement this plan task-by-task. Each work item's steps use checkbox (`- [ ]`) syntax for
-> progress tracking. Do NOT begin Task 1 until the Owner GO/NO-GO gate in §4 is satisfied by a
-> separate, explicit operator instruction.
+**Architecture:** Add one state-aware primary-maintenance recognizer to
+`engine/guard.py::decide_shell` and mirror it in the kernel hook's embedded Python plus
+`check_probe`. The recognizer accepts only an exact upstream fetch or
+fast-forward-only merge, rejects wrappers/assignments/path-qualified executables, binds
+all operands to the current branch's configured remote-tracking upstream, and requires an
+attached, idle checkout plus a clean state before branch advancement. `fetch` and `merge`
+stay in `_GITMUT`; the allowance lives immediately before the existing ADR 0001 target
+carve-out and enforced deny. Any parse, state, or parity uncertainty falls through to that
+deny.
+
+**Tech stack:** Python stdlib, Bash 3.2, Git 2.50.1 behavior baseline, `unittest`, AWA
+contract-freeze UAT, runnerless PR automation, and the governed `KleinPerkins/skills`
+Flavor-2 release binding.
+
+> **For agentic workers:** Do not implement this draft. A separate explicit operator
+> instruction is required after the governance blocker above is closed and the owner
+> accepts this plan. Execute work items in order and use each checkbox as the work ledger.
 
 ---
 
-## Global Constraints
+## Global constraints
 
-- Execute only in an AWA Safe Workspace (linked worktree); never edit the primary checkout directly.
-- Preserve kernel-first operation: `kernel/hooks/worktree-guard.sh` must not import `engine.guard` or
-  depend on the daemon; hook-internal failure must still degrade to allow.
-- The carve-out is additive-only (ADR 0001 §1): it may only ever convert a `deny` into an `allow`. It
-  must never convert an `allow` into a `deny`, never weaken any existing deny, and any deviation or
-  uncertainty must resolve to the enforced deny.
-- Keep `merge` mutating in `classify_mutating`/`_git_is_mutating`. The allowance lives ONLY in
-  `decide_shell`/`check_probe`. Fast-forward-allow cases are verified as decision-layer allows, never
-  by moving them into the read-only corpus.
-- `fetch`, `push`, and `pull` receive no allowance on protected primaries (ADR 0010). `git pull
-  --ff-only` stays denied because it embeds a fetch.
-- No git global option qualifies in v1 (`-C`, `--git-dir`, `--work-tree`, `--namespace`,
-  `--super-prefix`, `-c`, `-p`/`--paginate`, `--config-env=`); no prefix wrapper qualifies.
-- Do not change host modes, host policy, Cursor hook wiring, or the frozen permission JSON schema
-  (`contracts/awa-contract.v1.json`). Permission values/response shapes are unchanged.
-- Keep the engine and hook mirrors behaviorally identical through the shared corpus and live-hook
-  parity tests. No generated/imported shared classifier module.
-- Keep every already-approved plan and accepted ADR byte-identical; reconcile completed/superseded
-  status in the mutable index rows only.
-- Python 3.9 compatibility inside the hook heredoc (no `X | None` annotations); Bash 3.2 safety (no
-  bare apostrophes inside the embedded-Python heredoc). Use no third-party Python dependency.
-- Merging this plan and ADR 0011 ACCEPTS THE DESIGN ONLY. Implementation begins only after a separate,
-  explicit operator instruction to execute this accepted plan.
+- Execute only in an AWA Safe Workspace (linked worktree); never edit source in a primary
+  checkout.
+- Preserve kernel-first operation: `kernel/hooks/worktree-guard.sh` must not import
+  `engine.guard`, depend on the daemon, or change the product-wide fail-open behavior for a
+  genuine hook-internal failure.
+- Keep `fetch` and `merge` mutating in `classify_mutating` / `_git_is_mutating`. The new
+  lane is a named decision-layer exception, never a read-only reclassification.
+- The exception is additive-only under ADR 0001: it may convert the existing primary
+  `deny` to `allow` only when both command and live state are affirmatively proven. A
+  malformed command, missing upstream, in-progress operation, target mismatch, or
+  inspection failure keeps the deny; dirty/local-only/divergent state keeps the
+  branch-advancement deny.
+- Permit no development operation on primary: no `add`, `commit`, `checkout`, `switch`,
+  `reset`, `rebase`, `cherry-pick`, `revert`, ordinary merge, conflict resolution, stash,
+  branch mutation, worktree mutation, or file mutation.
+- Permit no unnecessary maintenance family in v1: `pull`, `push`, `remote update`,
+  `remote prune`, `fetch --prune`, `gc`, `maintenance`, explicit tag operations,
+  arbitrary fetch options/refspecs/URLs, and explicit submodule recursion stay denied.
+- A fetch allowance explicitly accepts necessary common-repository writes (objects,
+  configured remote-tracking refs, `FETCH_HEAD`, and Git's ordinary fetch bookkeeping).
+  Never describe fetch as read-only or isolated by a linked worktree.
+- Permit no Git global option. Repository hooks, content filters, transport helpers,
+  credential helpers, automatic tag following, and ordinary automatic maintenance remain
+  trusted configured Git behavior, not a second AWA sandbox boundary. Their outcomes are
+  covered by postcondition checks and plain-language failure handling.
+- Reject every leading `VAR=value` assignment, prefix wrapper, path-qualified executable,
+  redirect, control operator, command substitution, and additional shell segment.
+- Keep engine and kernel behavior identical through one shared command/state corpus,
+  source-hook parity tests, and installed-hook contract UAT. Do not create a shared runtime
+  import that puts the engine on the kernel path.
+- Keep the frozen permission schema (`contracts/awa-contract.v1.json`), host modes, host
+  policy, and Cursor hook wiring unchanged.
+- Use Python 3.9-compatible syntax in the hook heredoc and Bash 3.2-compatible shell.
+- Keep accepted plans/ADRs byte-identical. Draft ADR reconciliation is a separate,
+  explicitly authorized documentation action before this plan can be accepted.
 
 ## 1. Purpose
 
-An agent that merges work via a Safe Workspace/branch (or whose branch merged remotely) cannot land
-it into the local **primary** `main`, because `git merge --ff-only origin/main` on a protected
-primary classifies as mutating and is denied (`engine/guard.py` line ~966; hook line ~1184). The only
-escapes are an operator relaunch in a Safe Workspace or `DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1`. This
-plan implements ADR 0011: a fast-forward is uniquely safe (no dirty work to lose given AWA's own
-no-other-mutation invariant; no history rewrite/merge-commit/conflict; reversible via reflog +
-`ORIG_HEAD`), so it is allowed without an operator step, while every other primary mutation stays
-denied.
+AWA currently treats every `fetch`, `pull`, and `merge` as mutating and denies them on an
+INCLUDED PRIMARY checkout. This prevents development work on the primary, but it also
+prevents the primary from being maintained after work merges through a Safe Workspace or
+remote PR.
+
+The former draft solved only the second half: it allowed a shape-only
+`git merge --ff-only [ref]` while requiring fetch in a linked worktree. Fresh verification
+showed why that is the wrong boundary:
+
+- the primary and every linked worktree resolve to the same Git common directory;
+- they resolve `refs/remotes/origin/main` to the same file under that common directory;
+- therefore, a fetch from a linked worktree updates the same object database and
+  remote-tracking refs as a fetch invoked from the primary.
+
+Requiring the agent to relocate before fetch protects no additional common-repository
+state. It only adds an operator/agent detour. The useful boundary is instead:
+
+- **maintenance is allowed** when it can only refresh the configured upstream and advance
+  a clean current branch by fast-forward; and
+- **work remains denied** when it creates local history, changes branch identity, resolves
+  divergence, targets another ref/repository, or changes files for any other purpose.
 
 ## 2. Scope and non-goals
 
 In scope:
 
-- Prove `git merge --ff-only` runtime behavior in an offline, isolated fixture.
-- Add a pure `_is_safe_ff_only_merge(command)` predicate enforcing the ADR 0011 closed grammar.
-- Wire it as an additive allow in `engine/guard.py::decide_shell`, before the enforced deny.
-- Mirror it in the kernel hook (`check_probe` + a `safe_ff` signal from the embedded Python).
-- Extend the shared corpus and decision/parity/contract tests with the allow set and an exhaustive
-  near-miss deny set.
-- Bump the AWA product version and ship through the governed PR/release/promotion path.
+- One exact upstream-fetch grammar with zero or one remote operand that must equal the
+  current branch's configured upstream remote.
+- One exact fast-forward grammar with zero or one ref operand that must resolve to the
+  current branch's configured upstream ref.
+- Local, bounded live-state checks proving a clean, attached, idle checkout with one
+  remote-tracking upstream; the merge lane additionally proves `HEAD` equal to or
+  ancestral to the live upstream.
+- Plain-language refusal reasons for unsupported shape, local work, missing upstream,
+  local-only/divergent history, and inspection failure.
+- Engine/kernel/shared-corpus/installed-hook parity and offline behavior evidence.
+- README, architecture, and security-policy updates replacing the prior all-mutations
+  default-deny description with the exact maintenance exception and caller postcondition.
+- A minor product release, isolated candidate-install proof, governed Skills pointer
+  promotion, live repair, and final dogfood.
 
 Non-goals:
 
-- No remote/network allowance; fetch/push/pull stay denied on protected primaries (ADR 0010).
-- No `merge` reclassification to read-only; no change to `classify_mutating`'s meaning.
-- No git global option or wrapper allowance; no arbitrary-ref, multi-ref, or revision-expression ref.
-- No `--autostash`, `--no-verify`, strategy, squash, sign, or any non-`--ff-only` flag.
-- No runtime ancestry/clean-tree pre-check in the guard (delegated to git `--ff-only`); a future ADR
-  may revisit.
-- No host policy/mode change, no Cursor hook-wiring change, no frozen contract v2.
+- No generic "maintenance mode" and no blanket bypass for Git.
+- No `git pull`; the two atomic operations keep refresh and advancement failures distinct.
+- No push, explicit prune, remote update, GC, explicit tag/submodule maintenance,
+  arbitrary remote, URL, refspec, or ref.
+- No branch switching, detached-HEAD repair, divergence repair, reset, rebase, merge
+  commit, conflict resolution, or auto-stash.
+- No default-branch discovery or branch switching. The allowance maintains only the
+  already-attached current branch; requiring its configured remote-tracking upstream and
+  denying local-ahead/divergent history is the relevant safety boundary.
+- No hook/filter/transport-helper sandbox. Those configured components are trusted
+  repository maintenance behavior, just as they already are when Git runs in a linked
+  worktree; AWA remains a work-protection boundary, not an arbitrary-code sandbox.
+- No new executable-identity attestation. Bare `git` uses the same ambient shell/PATH
+  trust boundary as the existing guard; inline PATH changes, wrappers, and explicit
+  executable paths remain rejected so this exception cannot widen that boundary.
+- No Git global-option allowance.
+- No contract v2, host-policy change, mode change, or new operator-facing CLI verb.
+- No cross-command lock or immutable-OID handoff. The guard checks the live upstream
+  immediately before merge, and Git's `--ff-only` remains the final atomic ancestry gate:
+  a concurrent upstream move can only yield another upstream descendant, a no-op, or a
+  refusal—never a merge commit, history rewrite, or conflict resolution.
 
-## 3. Background and context (live-state verification)
+## 3. Live-state verification
 
-Verified 2026-08-21 against AWA `main` @ `9737d3d`, `engine.__version__ = 1.5.2`, latest tag
-`v1.5.2`:
+Verified 2026-08-21:
 
-- `engine/guard.py`: `_GITMUT` (lines ~32–35) includes `merge`; `_git_is_mutating` (line ~327) has no
-  merge predicate → merge returns `True`. `decide_shell(cwd, command, policy_path, *,
-  allow_primary=False)` (line ~918): after `classify_mutating` (line ~528) is True, the ADR 0001
-  additive narrowing runs `_collect_precise_targets` (line ~958) and otherwise returns the enforced
-  `deny` (line ~966). For `git merge --ff-only`, `_collect_precise_targets` resolves the target to the
-  cwd primary, so it does not already allow — the carve-out must be a distinct check ahead of the
-  deny.
-- Helpers reused by the predicate already exist: `_segments` (line ~405), `_parse_git_invocation`
-  (line ~99), `_has_glob_metachar` (line ~562), `_REDIRECT_OPS` (line ~401).
-- `kernel/hooks/worktree-guard.sh`: `_GITMUT` (lines ~146–147); embedded-Python emits `is_mutating`,
-  `has_mut_targets`, `mut_targets` (lines ~600, ~818, ~858–864); bash `check_probe` (line ~1142)
-  applies the additive narrowing (lines ~1172–1181) then the enforced deny (lines ~1184–1187);
-  `DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1` short-circuits at line ~1002.
-- Shared corpus: `engine/tests/git_guard_command_corpus.py`; parity test:
-  `engine/tests/test_guard_hook_wrappers.py`; classifier/decision tests: `engine/tests/test_guard.py`;
-  contract-freeze UAT: `kernel/checks/awa-contract-freeze.sh`.
-- Linked worktrees share the primary object store + `refs/remotes/*` (a Safe Workspace's
-  `git rev-parse --git-common-dir` resolves to the primary `.git`), so fetch-from-worktree +
-  ff-only-merge-in-primary needs no primary fetch.
+- AWA remote `main` is `9737d3d`; design PR #120 is DRAFT at `a743ad7`, docs-only, and
+  has no implementation. This refinement is an uncommitted two-file plan-surface delta
+  atop that head.
+- `engine.__version__` and `pyproject.toml` report `1.5.2`; latest published tag is
+  `v1.5.2`.
+- `engine/guard.py` keeps `fetch`, `pull`, and `merge` in `_GITMUT`; fetch is
+  unconditionally mutating; `decide_shell` denies confirmed mutations on an included
+  primary after the ADR 0001 target carve-out.
+- `kernel/hooks/worktree-guard.sh::check_probe` independently mirrors that deny and
+  intentionally remains off the engine critical path.
+- The AWA primary and its linked Safe Workspace both resolve:
+  - common directory: `~/dev/capabilities/awa/.git`
+  - `refs/remotes/origin/main`:
+    `~/dev/capabilities/awa/.git/refs/remotes/origin/main`
+- Official Git documentation confirms:
+  - no-argument `git fetch` uses the current branch's configured upstream remote (falling
+    back to `origin` only when no upstream exists), applies configured fetch refspecs, and
+    writes fetched names/OIDs to `FETCH_HEAD`;
+  - fetch may auto-follow reachable tags, recurse into submodules when configured, and run
+    automatic maintenance;
+  - `--ff-only` advances only by fast-forward and otherwise exits non-zero;
+  - `--no-overwrite-ignore` prevents merge from overwriting ignored untracked files;
+  - any ref-updating Git command may invoke `reference-transaction`, successful merge
+    invokes `post-merge`, and index writes may invoke `post-index-change`; hook lookup is
+    controlled by `core.hooksPath`;
+  - a `filter` attribute can invoke configured smudge/process commands when blobs are
+    written to the worktree.
+- These configured Git effects are explicitly accepted as repository maintenance, not
+  treated as agent-authored work; the plan verifies and narrates their resulting state.
+- The Skills binding is clean at `3a13f72` and consistently pins AWA `v1.5.2` commit
+  `a2b13f7` in both `global/tools/awa/meta.yml` and `tool.yml`.
 
-## 4. Approach
+## 4. Decision and approach
 
-**Owner GO/NO-GO gate:** merging this document and ADR 0011 accepts the design and policy, not
-execution. An implementer must receive a separate explicit operator instruction before Task 1. NO-GO
-leaves the accepted artifacts frozen and makes no source, version, release, downstream, or host
-change.
+### 4.1 Closed maintenance grammar
 
-The predicate is a pure boolean over the command string. `True` means "exactly the safe fast-forward
-grammar"; `False` means "not proven safe" and therefore leaves the existing deny in place. Reference
-implementation (engine; the hook mirrors it annotation-free):
+The recognizer accepts one shell segment and exact bare executable token `git`. It rejects
+leading assignments, wrappers, executable paths, redirects, control operators, and command
+substitution.
 
-```python
-import re
+**Upstream refresh:**
 
-_GIT_FF_UPSTREAM_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+$")
-
-
-def _git_ref_is_allowed_upstream(token: str) -> bool:
-    """A single tracked-upstream-shaped ref: @{upstream}/@{u}, or <remote>/<name> with no
-    leading dash and no glob metacharacter. Everything else (bare branch, HEAD~1, glob) -> False."""
-    if token in ("@{upstream}", "@{u}"):
-        return True
-    if token.startswith("-") or _has_glob_metachar(token):
-        return False
-    return bool(_GIT_FF_UPSTREAM_RE.match(token))
-
-
-def _is_safe_ff_only_merge(command: str) -> bool:
-    """True ONLY for a single-segment, wrapper-free, global-option-free
-    `git merge --ff-only [<tracked-upstream>]` with no other flag and at most one allowlisted
-    upstream ref. Additive carve-out (ADR 0011): used to convert a deny into an allow on an included
-    primary; any deviation returns False (conservative -> deny)."""
-    try:
-        segs = _segments(command)
-    except ValueError:
-        return False
-    if len(segs) != 1:
-        return False
-    toks = segs[0]
-    if any(t in _REDIRECT_OPS for t in toks):
-        return False
-    # Only leading VAR=value assignments may precede a BARE git (reject every prefix wrapper).
-    j = 0
-    while j < len(toks) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[j]):
-        j += 1
-    if j >= len(toks) or os.path.basename(toks[j]) != "git":
-        return False
-    parsed = _parse_git_invocation(toks[j + 1:])
-    if parsed is None:
-        return False
-    global_args, sub, sub_args = parsed
-    if global_args or sub != "merge":
-        return False
-    saw_ff_only = False
-    ref_count = 0
-    for a in sub_args:
-        if a == "--ff-only":
-            saw_ff_only = True
-            continue
-        if a.startswith("-"):
-            return False
-        ref_count += 1
-        if ref_count > 1 or not _git_ref_is_allowed_upstream(a):
-            return False
-    return saw_ff_only
+```text
+git fetch
+git fetch <upstream-remote>
 ```
 
-Wiring in `decide_shell`, inside the existing `if classify_mutating(command):` branch, BEFORE the
-`_collect_precise_targets` narrowing and the deny:
+Rules:
 
-```python
-    if classify_mutating(command):
-        if _is_safe_ff_only_merge(command):
-            return _allow(
-                "fast-forward-only update of the current branch to its tracked upstream "
-                "(ADR 0011 additive carve-out); git --ff-only guarantees no merge commit, "
-                "no history rewrite, and abort-not-clobber",
-                cls.classification)
-        targets = _collect_precise_targets(command, cwd)
-        ...  # unchanged ADR 0001 narrowing, then the unchanged enforced deny
+- no Git global option and no fetch option;
+- zero positional operands, or exactly one operand byte-equal to the configured upstream
+  remote;
+- a configured remote-tracking upstream MUST exist before either form qualifies;
+- no URL, refspec, `--`, stdin refspec, tag/prune/all/recurse/force/dry-run form, or second
+  operand qualifies.
+
+**Fast-forward current branch:**
+
+```text
+git merge --ff-only --no-overwrite-ignore
+git merge --ff-only --no-overwrite-ignore @{u}
+git merge --ff-only --no-overwrite-ignore @{upstream}
+git merge --ff-only --no-overwrite-ignore <configured-upstream-short-name>
 ```
 
-Kernel mirror: the embedded Python computes `is_safe_ff = _is_safe_ff_only_merge(cmd)` and prints
-`is_safe_ff=1|0` alongside `is_mutating`; `check_probe` returns `respond_allow` when
-`is_mutating=1` and `is_safe_ff=1`, positioned before the additive-target block and the deny (and
-after the `is_uncertain_include` ask path, which is unchanged).
+Rules:
+
+- no Git global option;
+- merge arguments contain exactly `--ff-only --no-overwrite-ignore`, in that order,
+  followed by zero or one ref;
+- an explicit ref token must be exactly `@{u}`, `@{upstream}`, or the computed
+  `<upstream-remote>/<upstream-branch>` short name, and Git must resolve it to the same
+  full remote-tracking ref as `@{upstream}`;
+- the former broad slash-token regex is removed; lexical resemblance to `origin/main` is
+  never enough;
+- no second flag, second ref, revision expression, OID, `--`, or shell
+  variable/substitution qualifies.
+
+All allowed forms still return `classify_mutating(command) is True`.
+
+### 4.2 Live maintenance context
+
+After command-shape recognition and before any allow, both mirrors perform only local,
+bounded Git inspection in the command's cwd:
+
+1. Confirm the repo is the included primary already classified by the outer guard.
+2. Confirm `HEAD` is attached to a local branch.
+3. Resolve exactly one configured upstream and require it to be a remote-tracking ref.
+4. Resolve its remote name; for `fetch <remote>`, require byte equality.
+5. Read every configured `remote.<upstream>.fetch` refspec and require each positive
+   destination to stay under `refs/remotes/<upstream>/`; source-only negative refspecs may
+   narrow that set. Require at least one positive mapping from the configured upstream
+   source branch to the exact configured upstream destination. Missing destinations,
+   tag/local-branch destinations, malformed refspecs, stale upstream mappings, and any
+   other namespace are not proven maintenance.
+6. Require no merge, rebase, cherry-pick, revert, am, sequencer, or bisect state.
+7. Reject repository-retargeting/config-injection environment state visible to the guard
+   (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`,
+   `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_CONFIG`,
+   `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, any `GIT_CONFIG_*` entry, `GIT_EXEC_PATH`,
+   `GIT_NAMESPACE`, `GIT_SHALLOW_FILE`, `GIT_REPLACE_REF_BASE`,
+   `GIT_NO_REPLACE_OBJECTS`, `GIT_CEILING_DIRECTORIES`, and
+   `GIT_DISCOVERY_ACROSS_FILESYSTEM`).
+8. Require a clean index and worktree, including untracked files
+   (`git status --porcelain --untracked-files=all` is empty).
+9. For merge only:
+   - require an explicit ref, if present, to resolve to the same full upstream ref;
+   - require `git merge-base --is-ancestor HEAD @{upstream}` to succeed, proving no
+     local-only or divergent commit exists;
+   - let the executed `--ff-only` command re-enforce ancestry atomically.
+
+Every inspection uses `GIT_OPTIONAL_LOCKS=0`, has a bounded timeout, and uses closed output
+parsing. Missing, ambiguous, non-zero, timed-out, or malformed output means "not proven
+maintenance" and falls through to the existing deny. Fetch completion does not authorize
+merge permanently; the second command receives a fresh full check, and `--ff-only`
+rechecks the moving ref safely at execution.
+
+### 4.3 Accepted effects and protected effects
+
+Accepted maintenance effects:
+
+- fetch may write objects, `FETCH_HEAD`, configured remote-tracking refs, shallow/partial
+  clone metadata, and ordinary fetch bookkeeping in the shared common repository;
+- fetch may invoke configured hooks/transport/credential helpers, auto-follow reachable
+  tags, and run ordinary automatic maintenance;
+- safe configured-refspec validation prevents explicit writes to local branches, tags,
+  and unrelated namespaces;
+- merge may advance only the current branch to its upstream descendant and update
+  `HEAD`, index, worktree, reflog, and `ORIG_HEAD`;
+- merge may invoke configured repository hooks, fsmonitor, submodule behavior, and content
+  filters; these are accepted trusted maintenance effects, and the caller checks their
+  resulting state immediately afterward.
+
+Still protected:
+
+- local commit creation or rewrite;
+- switching/creating/deleting branches;
+- any local-only or divergent history;
+- arbitrary remote/ref/refspec updates;
+- chained commands, wrappers, environment laundering, or target relocation;
+- every unrelated mutation already denied today.
+
+### 4.4 Decision-layer wiring
+
+Engine:
+
+```text
+if classify_mutating(command):
+    maintenance = classify_primary_maintenance(command, cwd)
+    if maintenance.allowed:
+        return allow(maintenance.reason)
+    # existing ADR 0001 target narrowing
+    # existing enforced deny
+```
+
+Kernel:
+
+- embedded Python computes the same command kind and live-state verdict;
+- it emits a closed `maintenance_kind=none|fetch|fast_forward` value plus a bounded reason
+  code;
+- `check_probe` allows only a non-`none` result after the existing uncertain-classification
+  ask gate and before ADR 0001 target narrowing;
+- predicate false/unknown falls through to the existing deny;
+- a genuine hook-internal crash retains the product-wide fail-open behavior unchanged.
+
+No permission value, response shape, policy mode, or contract schema changes.
+
+### 4.5 Plain-language feedback
+
+Maintenance-shaped refusals get specific, tested copy:
+
+- **Unsupported form:** nothing ran; show the exact supported operation forms and state that
+  extra flags/targets remain blocked.
+- **Dirty primary:** nothing ran because local files exist; tell the agent to preserve or
+  move that work before maintenance.
+- **Detached/missing upstream:** nothing ran because AWA could not identify one tracked
+  destination; tell the agent to repair branch tracking in a Safe Workspace.
+- **Unsafe fetch configuration:** nothing ran because the configured fetch destination
+  is broader than this maintenance lane; tell the agent to repair that configuration in a
+  Safe Workspace.
+- **Ahead/diverged:** nothing ran because the primary contains local-only or conflicting
+  history; tell the agent to reconcile it in a Safe Workspace.
+- **Inspection failure:** nothing ran because safety could not be established; do not
+  suggest disabling protection or setting the session-wide override for routine
+  maintenance.
+
+After each allowed maintenance command, the caller MUST verify clean status before
+continuing. If configured repository automation leaves residue, the caller states that
+maintenance ran but the primary is no longer clean, stops, preserves the state, and
+diagnoses it from a Safe Workspace rather than resetting the primary. This is a
+caller/postcondition contract, not copy emitted by the pre-execution guard.
+
+Unrelated primary mutations keep the existing generic denial.
 
 ## 5. Work items
 
-### Task 1: Prove fast-forward runtime behavior offline
+### Owner GO/NO-GO gate
+
+Before Task 1:
+
+- [ ] Revise draft ADR 0010 so its remote-command rule distinguishes unnecessary remote
+  dry-runs/push from the accepted upstream-fetch maintenance operation and removes the
+  false linked-worktree-isolation rationale.
+- [ ] Revise draft ADR 0011 from "merge-only" to the exact fetch + fast-forward lane,
+  including live-state preconditions and accepted configured Git effects.
+- [ ] Re-run doc-warden and design review on the ADR/plan set.
+- [ ] Obtain explicit owner acceptance plus a separate instruction to implement.
+
+If any box is open, STOP. No source, test, version, release, Skills, or host change is
+authorized.
+
+### Task 1: Prove the maintenance state envelope offline
 
 **Files:**
-- Create: `engine/tests/test_git_ff_only_merge_behavior.py`
-- Test: `engine/tests/test_git_ff_only_merge_behavior.py`
+- Create: `engine/tests/test_git_primary_maintenance_behavior.py`
+- Test: `engine/tests/test_git_primary_maintenance_behavior.py`
 
 **Interfaces:**
-- Consumes: `engine.tests.helpers.EngineTestCase`, the local `git` executable, isolated temporary
-  repositories (mirror the fixture style of `engine/tests/test_git_remote_dry_run_behavior.py`).
-- Produces: `TestGitFfOnlyMergeBehavior` with tests proving: (a) fast-forward advances the current
-  branch to a descendant and updates the work tree; (b) an up-to-date ref is a no-op; (c) a divergent
-  ref aborts with a non-zero exit and leaves `HEAD` unchanged; (d) `--ff-only` refuses (non-zero,
-  unchanged `HEAD`) when a dirty tracked file would be overwritten; (e) a `post-merge` hook runs on a
-  real fast-forward. Each assertion records the host `git --version`.
+- Consumes: local Git, isolated bare remote, one primary clone, one linked worktree,
+  and representative repository configuration.
+- Produces: reproducible evidence for shared-common-dir fetch effects and
+  upstream-bound fast-forward effects.
 
-- [ ] **Step 1 — Write the isolated behavior-proof test** covering (a)–(e) above in local bare/clone
-  fixtures with `GIT_CONFIG_GLOBAL=os.devnull`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0`; no
-  network.
-- [ ] **Step 2 — Run the proof**
+- [ ] Build a fully local fixture with global/system config disabled and no network.
+- [ ] Prove primary and linked worktree resolve the same common directory and upstream
+  tracking ref.
+- [ ] From the primary, run the canonical upstream fetch and assert:
+  - expected objects, tracking ref, and `FETCH_HEAD` update;
+  - `HEAD`, current local branch, index, worktree, and unrelated refs do not change;
+  - no remote ref changes.
+- [ ] Run the canonical fast-forward and assert:
+  - `HEAD` becomes the upstream descendant with no merge commit;
+  - index/worktree are clean and match the target;
+  - configured hook/filter fixtures execute according to ordinary Git behavior and their
+    resulting state is observed rather than attributed to agent-authored work;
+  - an ignored untracked path that the target would overwrite causes Git to refuse with
+    that path unchanged;
+  - the linked worktree's branch, index, and worktree files remain unchanged while shared
+    upstream metadata updates are visible there.
+- [ ] Move the upstream ref between a simulated preflight and merge, then prove the
+  executed merge yields only an upstream-descendant fast-forward, a no-op, or a refusal.
+- [ ] Prove equal/up-to-date is a no-op and divergence exits non-zero with `HEAD`
+  unchanged.
+- [ ] Make a configured fetch or merge hook leave residue, prove the postcondition detects
+  it, and assert the maintenance flow stops without reset/cleanup or a second command.
+- [ ] Record `git --version` in test diagnostics.
 
 ```bash
-python3 -m unittest engine.tests.test_git_ff_only_merge_behavior
+python3 -m unittest engine.tests.test_git_primary_maintenance_behavior
 ```
 
-Expected: `OK`; the tests positively demonstrate the `--ff-only` fast-forward/no-op/abort/refuse
-semantics and post-merge-hook execution without network access.
+Expected: `OK`.
 
-- [ ] **Step 3 — Commit**
+**Definition of done:** The test observes the exact allowed state envelope rather than
+claiming fetch is read-only or treating trusted configured Git effects as a separate AWA
+sandbox boundary.
 
-```bash
-git add engine/tests/test_git_ff_only_merge_behavior.py
-git commit -m "test(guard): prove git merge --ff-only fast-forward/abort semantics"
-```
-
-**Definition of done:** The `--ff-only` safety properties ADR 0011 relies on are reproducible in an
-offline fixture, with the host git version recorded.
-
-### Task 2: Implement and test the engine carve-out
+### Task 2: Implement the engine recognizer and state-aware decision
 
 **Files:**
 - Modify: `engine/guard.py`
 - Modify: `engine/tests/git_guard_command_corpus.py`
 - Modify: `engine/tests/test_guard.py`
-- Test: `engine/tests/test_guard.py`
 
 **Interfaces:**
-- Consumes: existing `_segments`, `_parse_git_invocation`, `_has_glob_metachar`, `_REDIRECT_OPS`,
-  `classify_mutating`, `decide_shell`.
-- Produces: `_git_ref_is_allowed_upstream(token)`, `_is_safe_ff_only_merge(command)`, and the
-  `decide_shell` additive-allow branch (§4). A new corpus tuple `GIT_FF_ONLY_MERGE_ALLOW` (allowed on
-  a primary) and `GIT_FF_ONLY_MERGE_NEAR_MISS_DENY` (denied on a primary), plus the invariant that
-  every command in BOTH tuples still returns `classify_mutating(...) is True`.
+- Consumes: existing shell segmentation, Git invocation parser, Git context resolution,
+  and `decide_shell`.
+- Produces: a closed command recognizer, bounded live-state inspector, maintenance reason
+  codes, and decision-layer allow.
 
-- [ ] **Step 1 — Extend the corpus** with the exhaustive allow and near-miss sets:
-
-```python
-GIT_FF_ONLY_MERGE_ALLOW = (
-    "git merge --ff-only",
-    "git merge --ff-only @{upstream}",
-    "git merge --ff-only @{u}",
-    "git merge --ff-only origin/main",
-    "git merge --ff-only upstream/release/1.2",
-)
-
-GIT_FF_ONLY_MERGE_NEAR_MISS_DENY = (
-    "git merge",
-    "git merge origin/main",
-    "git merge --no-ff origin/main",
-    "git merge --ff-only --no-verify",
-    "git merge --ff-only --autostash",
-    "git merge --ff-only --squash origin/main",
-    "git merge --ff-only -X theirs origin/main",
-    "git merge --ff-only -S",
-    "git merge --ff-only -m msg",
-    "git merge --ff-only origin/main topic",
-    "git merge --ff-only feature-branch",
-    "git merge --ff-only HEAD~1",
-    "git merge --ff-only -- origin/main",
-    "git merge --ff-only 'origin/*'",
-    "git -C /tmp merge --ff-only origin/main",
-    "git -c core.pager=less merge --ff-only origin/main",
-    "git --paginate merge --ff-only origin/main",
-    "git pull --ff-only",
-    "sudo git merge --ff-only origin/main",
-    "git merge --ff-only origin/main && rm -rf protected",
-    "git merge --ff-only origin/main > /tmp/log",
-)
-```
-
-- [ ] **Step 2 — Add classifier + decision tests, verify they FAIL first.** In
-  `TestMutatingClassifier`, assert `guard.classify_mutating(cmd) is True` for EVERY command in both
-  new tuples (the carve-out must not make any of them read-only). In `TestDecideShellDegraded`, for a
-  primary repo `repo` and policy `pol`: assert `decide_shell(repo, cmd, pol).permission == "allow"`
-  for each `GIT_FF_ONLY_MERGE_ALLOW`, and `== "deny"` for each `GIT_FF_ONLY_MERGE_NEAR_MISS_DENY`;
-  and assert each allow case still allows in a linked worktree.
+- [ ] Add shared `PRIMARY_MAINTENANCE_ALLOW_SHAPES` and
+  `PRIMARY_MAINTENANCE_NEAR_MISS_DENY` corpora. Every entry in both MUST still classify
+  mutating.
+- [ ] Add fail-before decision tests for the canonical fetch and fast-forward forms.
+- [ ] Add command-shape negatives for:
+  - any fetch option; URL/refspec/stdin/all/prune/recurse/force/dry-run/multiple operands;
+  - merge missing/reordering either required safety flag, any extra merge flag, any `-c`
+    value, or any other global option;
+  - leading `PATH=`, `GIT_DIR=`, `GIT_WORK_TREE=`, and `GIT_CONFIG_COUNT=`;
+  - `env`, `command`, `sudo`, path-qualified `/tmp/git`, chain, redirect, substitution;
+  - wrong named ref, OID, revision expression, second ref, shell variable/substitution,
+    and extra flag;
+  - `pull`, `push`, `remote update`, `remote prune`, `gc`, and `maintenance`.
+- [ ] Add live-state fixtures for:
+  - clean attached branch + one upstream (allow);
+  - optional fetch remote exact match plus omitted/`@{u}`/`@{upstream}`/short-name merge
+    operands bound to the exact upstream (allow);
+  - fetch and fast-forward both deny with dirty tracked/untracked files; detached HEAD,
+    missing upstream, local upstream,
+    wrong remote/ref, unsafe or stale configured fetch destination, local-ahead,
+    divergence, every in-progress state, timeout, malformed output, and risky visible Git
+    environment (deny).
+- [ ] Implement the recognizer and local inspector with bounded subprocess calls.
+- [ ] Wire the allow inside the mutating branch before ADR 0001 narrowing.
+- [ ] Assert linked-worktree and non-included behavior remains unchanged.
 
 ```bash
-python3 -m unittest engine.tests.test_guard.TestMutatingClassifier engine.tests.test_guard.TestDecideShellDegraded
+python3 -m unittest \
+  engine.tests.test_guard.TestMutatingClassifier \
+  engine.tests.test_guard.TestDecideShellDegraded
 ```
 
-Expected: the decision tests FAIL (fast-forward currently denies on a primary); the classifier
-assertions PASS already.
+Expected: fail before implementation, then `OK`.
 
-- [ ] **Step 3 — Implement `_git_ref_is_allowed_upstream`, `_is_safe_ff_only_merge`, and the
-  `decide_shell` additive-allow branch** exactly per §4.
-- [ ] **Step 4 — Run the tests, verify they PASS**
+**Definition of done:** Only the closed command + live-state intersection allows; every
+near miss keeps the prior deny; classification remains mutating.
 
-```bash
-python3 -m unittest engine.tests.test_guard.TestMutatingClassifier engine.tests.test_guard.TestDecideShellDegraded
-```
-
-Expected: `OK`.
-
-- [ ] **Step 5 — Commit**
-
-```bash
-git add engine/guard.py engine/tests/git_guard_command_corpus.py engine/tests/test_guard.py
-git commit -m "feat(guard): allow fast-forward-only update of a protected primary (ADR 0011)"
-```
-
-**Definition of done:** On a primary, exactly the ADR 0011 grammar allows and every near-miss denies;
-all cases still classify mutating; worktree behavior is unchanged.
-
-### Task 3: Mirror the kernel hook and freeze live-hook parity
+### Task 3: Mirror the kernel hook and prove source/installed parity
 
 **Files:**
 - Modify: `kernel/hooks/worktree-guard.sh`
 - Modify: `engine/tests/test_guard_hook_wrappers.py`
 - Modify: `kernel/checks/awa-contract-freeze.sh`
-- Test: `engine/tests/test_guard_hook_wrappers.py`
 
 **Interfaces:**
-- Consumes: Task 2's grammar and the shared corpus tuples.
-- Produces: the embedded-Python `_git_ref_is_allowed_upstream`/`_is_safe_ff_only_merge` (annotation-
-  free), an `is_safe_ff` output line, a `check_probe` allow branch, and contract-freeze UAT coverage.
+- Consumes: Task 2's shared corpora and state fixture builder.
+- Produces: annotation-free embedded-Python recognizer/inspector, closed reason codes,
+  `check_probe` allow branch, source-hook parity, and installed-hook UAT.
 
-- [ ] **Step 1 — Write failing hook parity tests.** Assert the live hook returns `allow` for every
-  `GIT_FF_ONLY_MERGE_ALLOW` command on a primary probe and `deny` for every
-  `GIT_FF_ONLY_MERGE_NEAR_MISS_DENY`; reassert the hook contains no `X | None` annotations.
-
-```bash
-python3 -m unittest engine.tests.test_guard_hook_wrappers
-```
-
-Expected: FAIL on the fast-forward allow cases before the mirror change.
-
-- [ ] **Step 2 — Mirror the predicate and wiring** into the hook's embedded Python (annotation-free;
-  apostrophe-free comments/docstrings), emit `is_safe_ff=1|0`, and add the `check_probe` allow branch
-  (mutating included primary + `is_safe_ff=1` → `respond_allow`), before the additive-target block and
-  the deny. Do NOT import `engine.guard`.
-- [ ] **Step 3 — Extend contract-freeze UAT** with exact allow cases (`git merge --ff-only`,
-  `git merge --ff-only origin/main`, `git merge --ff-only @{u}`) and exact deny cases (`git merge`,
-  `git merge --no-ff origin/main`, `git merge --ff-only --no-verify`, `git merge --ff-only feature-branch`,
-  `git -C /tmp merge --ff-only origin/main`, `git pull --ff-only`). Keep `contracts/awa-contract.v1.json`
-  unchanged.
-- [ ] **Step 4 — Run hook + contract checks, verify they PASS**
+- [ ] Add failing source-hook tests for every allow shape, shape near miss, and live-state
+  case from Task 2.
+- [ ] Mirror command parsing and state checks in the hook without importing the engine.
+- [ ] Ensure predicate false/unknown falls through to deny while a forced genuine
+  hook-internal failure still exercises the existing fail-open contract.
+- [ ] Drive one shared stateful adversarial corpus through `decide_shell`, the source hook,
+  and the installed/role-resolved hook.
+- [ ] Keep contract UAT lean: one canonical fetch allow, one canonical fast-forward allow,
+  and representative denials for dirty state, wrong upstream/ref, environment laundering,
+  Git global option, fetch refspec, and pull/push.
+- [ ] Keep `contracts/awa-contract.v1.json` unchanged.
 
 ```bash
 python3 -m unittest engine.tests.test_guard_hook_wrappers
@@ -372,45 +495,43 @@ AWA_HOME="$(pwd)" bash kernel/checks/awa-contract-freeze.sh
 
 Expected: `OK` and `awa-contract-freeze: OK`.
 
-- [ ] **Step 5 — Commit**
+**Definition of done:** Engine, source hook, and installed hook agree for both command and
+state; uncertainty never widens the maintenance allowance.
 
-```bash
-git add kernel/hooks/worktree-guard.sh engine/tests/test_guard_hook_wrappers.py kernel/checks/awa-contract-freeze.sh
-git commit -m "fix(kernel): mirror fast-forward primary carve-out (ADR 0011)"
-```
-
-**Definition of done:** The live Cursor hook, engine mirror, shared corpus, and contract UAT return
-identical allow/deny outcomes for the fast-forward grammar and its near-misses.
-
-### Task 4: Prepare the release version and verify the complete implementation
+### Task 4: Add operator feedback, prepare the version, and verify the whole branch
 
 **Files:**
+- Modify: `engine/guard.py`
+- Modify: `kernel/hooks/worktree-guard.sh`
+- Modify: `engine/tests/test_guard.py`
+- Modify: `engine/tests/test_guard_hook_wrappers.py`
 - Modify: `engine/__init__.py`
 - Modify: `pyproject.toml`
-- Test: `engine/tests/test_git_ff_only_merge_behavior.py`, `engine/tests/test_guard.py`,
-  `engine/tests/test_guard_hook_wrappers.py`
+- Modify: `README.md`
+- Modify: `ARCHITECTURE.md`
+- Modify: `SECURITY.md`
 
 **Interfaces:**
-- Consumes: Tasks 1–3 and the current `1.5.2` version declarations.
-- Produces: a synchronized next product version with an unchanged `contracts/awa-contract.v1.json`.
+- Produces: plain-language maintenance refusal reasons and synchronized next minor
+  version.
 
-- [ ] **Step 1 — Verify the release precondition and choose the next version.** Re-verify the latest
-  tag live (`git fetch --tags origin`; `gh release list`). This adds new allowed behavior, so bump the
-  MINOR component (expected `1.6.0` from `1.5.2`); if releases have advanced, recompute the next
-  unused version rather than overwriting newer work. Assert both `engine.__version__` and
-  `pyproject.toml` currently read `1.5.2` (or the actual current value) before editing.
-- [ ] **Step 2 — Bump both version declarations** (`engine/__init__.py` `__version__` and
-  `pyproject.toml` `version`) to the chosen version.
-- [ ] **Step 3 — Verify version identity**
+- [ ] Add exact-copy tests for unsupported form, dirty, missing upstream, divergence,
+  unsafe fetch configuration, and inspection failure; assert routine-maintenance copy
+  never recommends disabling AWA, resetting the primary, or using the primary override.
+- [ ] Update README/architecture/security guard policy so it names the exact maintenance
+  exception, preserves the default deny for development, records accepted configured Git
+  behavior, and requires the caller's post-command clean-status check.
+- [ ] Re-verify the live latest release/tag without mutating a primary. This new allowed
+  behavior requires a MINOR bump (expected `1.6.0` from `1.5.2`; recompute if releases
+  advanced).
+- [ ] Update both version declarations and verify identity.
 
 ```bash
 test "$(make -s version)" = "<chosen-version>"
-```
-
-- [ ] **Step 4 — Run all required gates**
-
-```bash
-python3 -m unittest engine.tests.test_git_ff_only_merge_behavior engine.tests.test_guard engine.tests.test_guard_hook_wrappers
+python3 -m unittest \
+  engine.tests.test_git_primary_maintenance_behavior \
+  engine.tests.test_guard \
+  engine.tests.test_guard_hook_wrappers
 bash engine/tests/run-tests.sh
 AWA_HOME="$(pwd)" bash kernel/checks/awa-contract-freeze.sh
 make verify
@@ -418,89 +539,96 @@ make verify-install
 git diff --check origin/main...HEAD
 ```
 
-Expected: all commands exit `0`; behavior proof stays offline; contract schema remains v1.
+- [ ] Run Bugbot over the complete implementation branch; fix every valid finding and
+  rerun focused/full verification until clean.
 
-- [ ] **Step 5 — Run defect review until clean.** Run Bugbot over the complete branch; fix every valid
-  finding; rerun focused + full verification; repeat until Bugbot reports no defects.
-- [ ] **Step 6 — Commit**
+**Definition of done:** Copy is plain and actionable, versions agree, every local gate
+passes, and complete-branch defect review is clean.
 
-```bash
-git add engine/__init__.py pyproject.toml
-git commit -m "release: prepare AWA <chosen-version>"
-```
-
-**Definition of done:** Both version sources report the chosen version, all gates pass, and the branch
-has a clean Bugbot review.
-
-### Task 5: Ship, release, promote, and reconcile
+### Task 5: Ship, stage-prove, release, promote, and reconcile
 
 **Files:**
 - No additional AWA source files unless review finds a defect.
-- Modify in a separate governed `KleinPerkins/skills` Safe Workspace (only on release GO):
-  `global/tools/awa/meta.yml`, `global/tools/awa/tool.yml`, `global/tools/awa/README.md`,
-  `.eco-registry.lock`.
+- Later, in a separately governed `KleinPerkins/skills` Safe Workspace:
+  `global/tools/awa/meta.yml`, `global/tools/awa/tool.yml`,
+  `global/tools/awa/README.md`, `.eco-registry.lock`.
 
 **Interfaces:**
-- Consumes: the verified AWA branch and normal AWA/skills PR automation.
-- Produces: merged source, an optional approved release, a promoted skills binding, a repaired host
-  install, and clean local/remote branch state.
+- Consumes: Tasks 1–4, the exact verified AWA merge commit, isolated install fixtures,
+  runnerless PR automation, and explicit release/promotion/live-install GO.
+- Produces: the immutable release, synchronized Skills binding, repaired live host,
+  maintained protected primaries, and clean branch/worktree state.
 
-- [ ] **Step 1 — Push and open the implementation PR** (`git push -u origin HEAD`; `gh pr create`
-  with a Summary + Test plan body). Keep the ADR/plan-only PR (this document) separate from the
-  implementation PR.
-- [ ] **Step 2 — Let governed automation merge.** Wait for `pr-automation / verify` and reviewer-App
-  approval. NEVER call `gh pr merge --auto`, enable/disable native auto-merge, or bypass the
-  reviewer-App gate — in this repo only the reviewer App arms native auto-merge.
-- [ ] **Step 3 — Verify the exact merged revision from the Safe Workspace** (`gh pr view --json
-  mergeCommit`; assert it is an ancestor of `origin/main` and carries the chosen version). No primary
-  checkout is mutated from the linked worktree.
-- [ ] **Step 4 — Obtain release/promotion GO.** Before tagging, publishing a GitHub release, changing
-  the skills binding, or repairing the live host install, obtain explicit operator approval.
-- [ ] **Step 5 — On GO, tag and publish the exact merge** (`git tag <v>`; `git push origin <v>`;
-  `gh release create <v> --verify-tag --generate-notes`). Review notes as cumulative from the latest
-  published release.
-- [ ] **Step 6 — Promote through the governed capability lifecycle.** In a fresh `KleinPerkins/skills`
-  Safe Workspace (`dev-worktree.sh ensure` + move to root), bind `global/tools/awa` to the immutable
-  release commit, refresh the human-readable version/commit references, run `eco-lock.sh write/check`
-  and `verify-skills.sh`, and open a governed PR; wait for the skills reviewer automation to merge.
-- [ ] **Step 7 — Reconcile protected primaries and live-check the host.** Fast-forwarding the
-  protected AWA and skills primaries to the merged `origin/main` is now itself an ALLOWED carve-out —
-  once this plan ships, `git merge --ff-only origin/main` no longer requires
-  `DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1`. For each primary: confirm clean + on `main`, fetch from a Safe
-  Workspace (fetch stays denied on the primary), then `git merge --ff-only origin/main` on the
-  primary; then repair the host overlay and run `dev-worktree.sh doctor`. Use diagnostic-only guard
-  checks to confirm one allow (`git merge --ff-only origin/main`) and the deny near-misses on a
-  protected primary. (This step is the plan's own dogfood of ADR 0011.)
-- [ ] **Step 8 — Clean the merged branch.** Delete the merged remote feature branch(es) through the
-  normal governed cleanup path; leave the Safe Workspace and primary clean.
+- [ ] Push and open a separate implementation PR with Summary + Test plan. Keep the
+  design-only PR separate.
+- [ ] Wait for runnerless `pr-automation / verify` and reviewer-App governance. Never
+  call `gh pr merge --auto`, change auto-merge state, bypass checks, or force-push.
+- [ ] Verify the exact merge commit is on live `main` and carries the chosen version.
+- [ ] Before publication, install the exact merge commit into an isolated HOME/XDG
+  fixture and run installed-hook dogfood:
+  - canonical fetch allow;
+  - canonical upstream-bound fast-forward allow;
+  - dirty/wrong-upstream/environment/refspec/pull/push denials;
+  - final clean state and exact `HEAD == @{upstream}`.
+- [ ] Obtain explicit release/promotion/live-install GO. A failed isolated proof leaves
+  the old release, Skills pin, and live install untouched.
+- [ ] On GO, tag and publish the exact verified merge commit.
+- [ ] In a fresh Skills Safe Workspace, update both immutable commit pins and readable
+  version references, regenerate/check the ecosystem lock, run Skills verification, and
+  open the separately governed PR. Wait for its reviewer automation.
+- [ ] Repair the live host to the published release and run `dev-worktree.sh doctor`.
+- [ ] Dogfood each clean protected primary with the exact lane:
 
-**Definition of done:** Source is merged, publication occurs only after explicit GO, the downstream
-binding and host install point at the verified release, the protected primaries are fast-forwarded via
-the new carve-out, and no orphan branch/worktree state remains.
+```bash
+git fetch
+git status --short
+git merge --ff-only --no-overwrite-ignore
+git status --short
+```
+
+- [ ] Require empty status output after each maintenance command. Then verify attached
+  branch, configured upstream, and `HEAD == @{upstream}`; verify representative near
+  misses still deny.
+- [ ] Clean merged feature branches/worktrees through the normal governed cleanup path.
+
+**Definition of done:** Candidate behavior is proven before publication; source release,
+Skills pin, and live host converge on the exact verified commit; protected primaries are
+clean and current; no orphan branch/worktree state remains.
 
 ## 6. Acceptance criteria
 
-- `git merge --ff-only` runtime safety (fast-forward / no-op / abort / refuse-to-clobber / post-merge
-  hook) is reproducibly proven offline with the host git version recorded.
-- On a protected primary, exactly the ADR 0011 grammar allows; every enumerated near-miss denies;
-  linked-worktree behavior is unchanged.
-- `classify_mutating`/`_git_is_mutating` still report every fast-forward-merge form as mutating; the
-  allowance exists only in `decide_shell`/`check_probe`.
-- fetch/push/pull remain denied on protected primaries (ADR 0010 intact).
-- Engine, live hook, shared corpus, and contract UAT agree; no new dependency enters the hook path;
-  hook-internal failure still degrades to allow; the frozen contract schema is unchanged.
-- AWA reports the chosen version from both version sources and all verification gates pass.
-- ADR 0011 and this plan remain byte-identical once accepted; sibling accepted ADRs/plans are
-  untouched, their status reconciled in the index rows only.
+- The governing draft ADRs and this plan describe the same two-operation maintenance
+  boundary before any implementation begins.
+- On an included primary, only canonical upstream fetch and upstream-bound ff-only merge
+  allow, and only in the proven live state.
+- Fetch and merge remain classified mutating; no broader consumer mistakes them for
+  read-only commands.
+- Primary and linked-worktree common-state behavior is proven, not described as isolated.
+- Dirty work prevents both maintenance operations. Detached, missing/local/wrong upstream,
+  local-ahead, divergent,
+  in-progress, unsafe/stale configured fetch destination, wrong ref, malformed, timed-out,
+  retargeted, wrapped, chained, redirected, and extra-option cases deny in engine, source
+  hook, and installed hook as applicable.
+- Configured Git hooks, filters, helpers, tag following, and ordinary maintenance retain
+  standard Git behavior; postconditions surface any residue. The merge refuses to
+  overwrite ignored untracked files and cannot create a merge commit or resolve
+  divergence.
+- Pull, push, explicit prune, remote update, GC/maintenance, branch mutation, arbitrary
+  remote/ref/refspec, and every development command remain denied.
+- Maintenance failures produce specific plain-language next steps and never recommend a
+  blanket bypass.
+- The permission contract, host policy/modes, and kernel-first boundary remain unchanged.
+- Isolated installed-host dogfood passes before release/promotion; source release, Skills
+  pin, and live host converge only after explicit GO.
 
 ## 7. Rollback
 
-- Before merge: revert the relevant local commit or push a correcting commit; never amend pushed
-  commits.
-- After merge: use a normal `git revert` PR. Never rewrite `main`.
-- After release publication: never move or delete the tag; publish a corrective patch version.
-- If downstream install smoke fails: revert the `KleinPerkins/skills` descriptor through its governed
-  PR path and reinstall the previous release.
-- ADR 0011 and this plan become byte-identical once accepted; any material policy reversal (removing
-  the carve-out, widening the grammar, adding a runtime pre-check, or any remote allowance) uses a
-  higher-numbered ADR and a `-v2` successor plan.
+- Before merge: correct with a new commit; never amend a pushed commit.
+- After merge but before release: revert through a normal PR; the old Skills pin/live
+  release remain untouched.
+- After release: never move/delete the tag; publish a corrective patch and revert the
+  Skills pointer through its governed PR.
+- If the live install fails, reinstall the previous immutable release and run
+  `dev-worktree.sh doctor`; do not reset a primary.
+- Remove or narrow the allowance only through a new ADR plus successor plan after this
+  plan is accepted; accepted artifacts remain byte-identical.
