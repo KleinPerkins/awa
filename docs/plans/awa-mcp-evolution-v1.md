@@ -4,7 +4,7 @@
 **Status:** DRAFT — 2026-08-06
 **Date:** 2026-08-06
 **Owning repository:** `KleinPerkins/awa` (`~/dev/capabilities/awa`)
-**Review provenance:** Consolidates the Cursor-local plans `awa_mcp_discoverability_2c3d4da6` (v3, 265 lines) and `awa_mcp_discoverability_d3f4a896` (v4, 322 lines) — v4 is the floor and is a verified strict superset of v3. v4 was hardened by a `deep`-band swarm review (1 probe + 4 territory reviewers + 1 independent verifier; verifier adjudicated at historical commit `@160b2fa`, NOT current HEAD `bb85a5c`), which folded six open gaps as FG1–FG6 and dropped one false-positive. This plan additionally incorporates the operator brief of 2026-08-06 and its eight accompanying ADRs (`docs/adr/0002`–`0009`), which are DRAFT and gate this plan's approval.
+**Review provenance:** Consolidates the Cursor-local plans `awa_mcp_discoverability_2c3d4da6` (v3, 265 lines) and `awa_mcp_discoverability_d3f4a896` (v4, 322 lines) — v4 is the floor and is a verified strict superset of v3. v4 was hardened by a `deep`-band swarm review (1 probe + 4 territory reviewers + 1 independent verifier; verifier adjudicated at historical commit `@160b2fa`, NOT current HEAD `bb85a5c`), which folded six open gaps as FG1–FG6 and dropped one false-positive. This plan additionally incorporates the operator brief of 2026-08-06 and its eight accompanying ADRs (`docs/adr/0011`–`0018`), which are DRAFT and gate this plan's approval.
 
 ---
 
@@ -20,7 +20,7 @@ resources are **never** authorization; the kernel remains the sole authority for
 destructive effect, and every optional component (router, daemon, SQLite) must be absent-safe.
 
 This plan consolidates the entire v4 floor (verified as a strict superset of v3 — nothing subtracted)
-and augments it with the eight ADRs `docs/adr/0002`–`0009`. It ends at **DRAFT**: it is the execution
+and augments it with the eight ADRs `docs/adr/0011`–`0018`. It ends at **DRAFT**: it is the execution
 record awaiting the operator's GO, at which point its status moves to ACCEPTED in the index (the file
 itself is then byte-identical-frozen; a material revision becomes `awa-mcp-evolution-v2.md`).
 
@@ -29,22 +29,22 @@ itself is then byte-identical-frozen; a material revision becomes `awa-mcp-evolu
 ### 2.1 In scope
 
 - A single-source, in-engine MCP capability registry (`engine/mcp_catalog.py`) that drives every
-  consumer (ADR 0002 / FG4).
+  consumer (ADR 0011 / FG4).
 - A deterministic, in-engine `awa_route` front door with a pinned closed `awa-route/v1` schema and a
-  finish-recognizer parity gate (ADR 0003 / FG1–FG2), plus `awa_workspace_check` and strictly-additive
+  finish-recognizer parity gate (ADR 0012 / FG1–FG2), plus `awa_workspace_check` and strictly-additive
   result-envelope normalization (FG1), and a technical MCP mode-off glob-metachar restriction (FG3).
 - **NEW (operator requirement 1):** MCP lifecycle tools for `protect`/`save`/`resume`/`cleanup`/
   `finish` as **preview/propose surfaces only**, whose mutating/destructive step executes solely
   through the existing kernel gate, authorized only by a one-use operator-chat-turn envelope the
-  kernel checks (ADR 0005).
+  kernel checks (ADR 0014).
 - **NEW (operator requirement 5):** MCP-initiated worktree provisioning — fused `dev-worktree.sh ensure`
   reuse (primary) + an optional disposable whitelisted scratch dir (secondary), with a hard
-  never-downgrade-primary-protection constraint (ADR 0006).
+  never-downgrade-primary-protection constraint (ADR 0015).
 - **NEW (operator requirement 2):** read-only dynamic resources exposing engine-owned live state via a
-  new `engine/mcp_dynamic_resources.py`, preserving `mcp_resources.py` purity (ADR 0007).
+  new `engine/mcp_dynamic_resources.py`, preserving `mcp_resources.py` purity (ADR 0016).
 - Privacy-safe usage bookkeeping (M5), a hardened verification gate (M6), and — reworked — doc-warden
   alignment + local-convention reconciliation, plus the optional gated router-reuse Phase 2 (M7; ADRs
-  0004, 0008, 0009).
+  0013, 0017, 0018).
 
 ### 2.2 Out of scope (non-goals)
 
@@ -54,36 +54,36 @@ itself is then byte-identical-frozen; a material revision becomes `awa-mcp-evolu
   class, confirmation, or authorization; MCP SDK migration; Cloud claims; a metrics dashboard
   (inherited verbatim from the v4 floor "Out of scope").
 - Giving `doc-warden`'s engine a call-site outside `~/dev`, any cpp/eco-registry participation, a
-  `.doc-warden.yml` in this repo, or wiring doc-warden into AWA CI/Makefile (ADR 0008, safety).
+  `.doc-warden.yml` in this repo, or wiring doc-warden into AWA CI/Makefile (ADR 0017, safety).
 - Flipping any ADR or this plan to accepted/ACCEPTED without the operator's GO.
 
 ### 2.3 The six pre-resolved operator decisions (recorded; do not reopen without operator override)
 
 1. Lifecycle verbs become first-class MCP functions but **preview/propose only**; authorization/
    execution stays kernel-gated (exact-`Close`, active-root heartbeat, bundle-or-refuse), triggerable
-   only by an explicit operator chat-turn — never agent self-authorization. → ADR 0005.
+   only by an explicit operator chat-turn — never agent self-authorization. → ADR 0014.
 2. Dynamic resources are in scope; architect-discretion on the exact set; operator-approval on final
-   scope. → ADR 0007.
+   scope. → ADR 0016.
 3. M7 is fully reworked around doc-warden alignment **and** reconciling AWA's pre-existing local
-   `docs/adr` + `docs/plans` convention. → ADR 0008, §5 M7.
+   `docs/adr` + `docs/plans` convention. → ADR 0017, §5 M7.
 4. Cursor cloud agents are out of scope (see §2.2).
 5. MCP worktree creation is fused primary (`dev-worktree.sh ensure` reuse) + secondary (disposable
    whitelisted scratch dir), with a hard non-downgrade constraint on primary-checkout protection. →
-   ADR 0006.
+   ADR 0015.
 6. No blanket protection for existing MCP tooling — only actively-used or policy-locked surface needs
    proof-to-kill; nothing qualifies for subtraction today (all 9 tools used/tested; the one resource
-   is RETAIN-verdicted on its own narrow merits, not locked against dynamic siblings). → ADR 0009.
+   is RETAIN-verdicted on its own narrow merits, not locked against dynamic siblings). → ADR 0018.
 
 ### 2.4 Two v4-floor "Out of scope" lines this plan deliberately overrides
 
 The v3 and v4 Cursor plans both list, under "Out of scope and kill criteria": *"MCP execution of
 ensure/clean/save/resume/finish; dynamic resources containing paths/leases/commands/modes/recovery/
 contracts"* (`awa_mcp_discoverability_d3f4a896.plan.md:314`). Operator requirements 1 and 2 **override**
-these two lines as a documented, operator-approved scope change — not a silent contradiction. ADR 0005
-(lifecycle) and ADR 0007 (dynamic resources) each name this override explicitly, and both preserve the
+these two lines as a documented, operator-approved scope change — not a silent contradiction. ADR 0014
+(lifecycle) and ADR 0016 (dynamic resources) each name this override explicitly, and both preserve the
 underlying safety intent the original lines protected: no MCP self-authorization of a mutating verb
-(ADR 0005), and engine-owned-state-only resources that never touch consumer conversational state or
-persist user text (ADR 0007).
+(ADR 0014), and engine-owned-state-only resources that never touch consumer conversational state or
+persist user text (ADR 0016).
 
 ## 3. Background and context (verified live-state @ `bb85a5c`)
 
@@ -109,7 +109,7 @@ The single static resource's live-verify evidence (`live-verify/RESULTS-MCP-GUID
 returned verdict **RETAIN** (`:5`): it added no *routing* improvement (0/8 → 8/8 inline; 8/8 inline+resource,
 `:10`–`12`) **because it duplicates the inline guidance**, and its retained value is the proven explicit
 on-demand fetch. This is evidence against one static, duplicative resource — **not** a policy lock
-against new dynamic resources (see ADR 0007, ADR 0009).
+against new dynamic resources (see ADR 0016, ADR 0018).
 
 ### 3.2 Lifecycle vocabulary + the executor build gap
 
@@ -119,7 +119,7 @@ against new dynamic resources (see ADR 0007, ADR 0009).
 write/destructive verbs (`protect`/`resume`/`save`/`cleanup`) carry `"tool_path":"mcp"` but have **no**
 implemented MCP tool or executor: `OperatorLoop.executor` is an injected callback defaulting to `None`
 (`consumer/operator_loop.py:151`, assigned `:158`) with is-`None` guards at both dispatch sites. This is
-the build gap ADR 0005 closes — a gap, not a subtraction (ADR 0009). `finish_current` is `tool_path:cli`,
+the build gap ADR 0014 closes — a gap, not a subtraction (ADR 0018). `finish_current` is `tool_path:cli`,
 so its MCP surface is preview/hand-off only. Finish authorization is the exact literal `Close`
 (case-sensitive, no casefold: `consumer/finish_current.py:333`–`334`; variant rejection
 `close_must_be_exact` at `:343`; recognizer `recognize_finish` at `:308`), via a two-phase
@@ -137,15 +137,15 @@ worktrees under the managed location, and prints `move_agent_to_root`. `classify
 `_reject_broad_off` (`:138`) rejects fully-broad `off` keys (`_BROAD_OFF_RELS = {".", "*", "**"}` and
 `_is_pure_glob()` all-metachar, `:133`–`135`, `:142`) but **not** a partial glob like `vendor/*` — so
 `awa_mode_set(rel='vendor/*', mode='off')` currently passes and would disable a whole subtree. This is
-**FG3**, addressed at the MCP boundary by ADR 0006.
+**FG3**, addressed at the MCP boundary by ADR 0015.
 
 ### 3.4 Guardrails already test-enforced (must stay true)
 
 - **Engine⇎consumer/router contamination boundary:** `engine/tests/test_consumer_contamination_structural.py`
   AST-scans every `engine/*.py` (excluding `tests/`) for `consumer`/`intent_router` imports plus a
-  router-artifact usage scan, asserting zero. `awa_route` (ADR 0003) and the dynamic-resources module
-  (ADR 0007) therefore use only the engine capability graph / engine-owned state.
-- **`mcp_resources.py` zero-I/O purity:** pinned by its docstring + tests; ADR 0007 adds a *sibling*
+  router-artifact usage scan, asserting zero. `awa_route` (ADR 0012) and the dynamic-resources module
+  (ADR 0016) therefore use only the engine capability graph / engine-owned state.
+- **`mcp_resources.py` zero-I/O purity:** pinned by its docstring + tests; ADR 0016 adds a *sibling*
   module rather than extending it.
 - **Egress hygiene** (`consumer/egress.py`): only PM-facing copy uses the jargon-free gate; agent-facing
   diagnostics are exempt. Any new PM-facing string reuses the same narrow named exception as the finish
@@ -201,29 +201,29 @@ Carried forward verbatim in intent from the v4 floor:
 
 - **N1 — MCP never self-authorizes a mutating/destructive lifecycle verb.** The operator-chat-turn
   envelope only decides *which* caller may hand the literal token to the kernel; it is not a new
-  authority (ADR 0005).
+  authority (ADR 0014).
 - **N2 — Whitelisting never downgrades an included primary checkout's protection.** The MCP boundary
-  rejects any glob-metachar `mode='off'` key and can only add advisory/standalone scope (ADR 0006,
+  rejects any glob-metachar `mode='off'` key and can only add advisory/standalone scope (ADR 0015,
   mirroring FG3).
 - **N3 — Dynamic resources are engine-owned-state-only and never persist user text.** The new module is
   read-only, excludes consumer conversational state (contamination boundary), and its tests assert no
-  user/prompt text is persisted (ADR 0007).
+  user/prompt text is persisted (ADR 0016).
 
 ### 3.7 Current → target tool inventory
 
 - **Kept (9, descriptions tightened, envelopes normalized additively):** `awa_status`, `awa_lease_read`,
   `awa_guard_shell`, `awa_mode_list`, `awa_mode_get`, `awa_mode_set`, `awa_mode_remove`, `awa_mode_repair`,
   `awa_mode_sync`.
-- **Added (discoverability floor):** `awa_route` (M2, ADR 0003), `awa_workspace_check` (M3, FG1).
+- **Added (discoverability floor):** `awa_route` (M2, ADR 0012), `awa_workspace_check` (M3, FG1).
 - **Added (this plan's expansion):** lifecycle preview tools for `protect`/`save`/`resume`/`cleanup`/
-  `finish` (M3, ADR 0005, preview-only + kernel-gated); an MCP worktree-create tool + disposable-dir
-  provisioning (M3, ADR 0006); read-only dynamic resources via `engine/mcp_dynamic_resources.py` (M4,
-  ADR 0007).
+  `finish` (M3, ADR 0014, preview-only + kernel-gated); an MCP worktree-create tool + disposable-dir
+  provisioning (M3, ADR 0015); read-only dynamic resources via `engine/mcp_dynamic_resources.py` (M4,
+  ADR 0016).
 - **Deferred/optional (gated proof):** out-of-engine router wrapper feeding `awa_route`'s fuzzy fallback
-  — now **required-but-gated** (M7 Phase 2, ADR 0004, operator-gated on the scorecard, never a
+  — now **required-but-gated** (M7 Phase 2, ADR 0013, operator-gated on the scorecard, never a
   dependency); MCP prompts (M4, host-exposure + paired-benefit gated).
 
-No blind renames/removals this release; nothing is subtracted (ADR 0009).
+No blind renames/removals this release; nothing is subtracted (ADR 0018).
 
 ### 3.8 Fix groups (FG1–FG6) as work-item anchors
 
@@ -251,9 +251,9 @@ Primary discoverability is what Cursor gives agents automatically (tool name, de
 `initialize.instructions`) plus one obvious, deterministic `awa_route` tool resolved entirely from the
 engine-owned capability graph. Resources and prompts stay secondary and must earn retention with
 evidence. `awa_route` selects and explains; it never executes, authorizes, confirms, or converts natural
-language into exact `Close`. The registry (ADR 0002) is the one authority every consumer reads.
+language into exact `Close`. The registry (ADR 0011) is the one authority every consumer reads.
 
-### 4.2 Kernel-gated lifecycle via an operator-chat-turn envelope (ADR 0005)
+### 4.2 Kernel-gated lifecycle via an operator-chat-turn envelope (ADR 0014)
 
 The MCP lifecycle tools surface a **preview** (read-only) of what would happen and **propose** the exact
 kernel invocation. The actual mutating/destructive step runs only through the existing kernel gate:
@@ -262,16 +262,16 @@ operator's authorization is a one-use, root/session/generation-bound, exact-lite
 from a real operator chat turn (reusing the `finish_current` mechanism); the **kernel** re-derives and
 checks it. No MCP tool may emit `Close`, and an agent cannot self-authorize (invariant N1).
 
-### 4.3 Engine-owned dynamic resources (ADR 0007)
+### 4.3 Engine-owned dynamic resources (ADR 0016)
 
 Expose engine-owned live state (paths, leases, modes, contracts, CLI verb list, recovery, active-root,
 clean receipts) via a **new** sibling module `engine/mcp_dynamic_resources.py`, leaving
 `engine/mcp_resources.py` and its tests byte-true. Consumer conversational state is excluded by the
 contamination boundary. The module is read-only and persists no user text (invariant N3).
 
-### 4.4 doc-warden alignment + local-convention reconciliation (ADR 0008)
+### 4.4 doc-warden alignment + local-convention reconciliation (ADR 0017)
 
-Author the ADRs/plan at the existing `docs/adr` + `docs/plans` roots; number ADRs from 0002 (0001 is
+Author the ADRs/plan at the existing `docs/adr` + `docs/plans` roots; number ADRs from 0011 (0001 is
 accepted/untouched). New artifacts adopt doc-warden's canonical **entry** shape and vocabulary going
 forward (`draft|accepted|superseded` for ADRs; `DRAFT|ACCEPTED|SUPERSEDED` for plans; byte-identical-
 forever with no inline `> Update —` exception). The two index tables keep AWA's local columns for now
@@ -286,14 +286,14 @@ this repo.
 
 | ADR | Decision | Primary milestone(s) |
 |---|---|---|
-| [0002](../adr/0002-mcp-capability-registry-single-source.md) | `engine/mcp_catalog.py` single-source registry (FG4) | M1 |
-| [0003](../adr/0003-awa-route-deterministic-in-engine-front-door.md) | Deterministic in-engine `awa_route` + closed `awa-route/v1` + finish parity (FG1/FG2) | M2 |
-| [0004](../adr/0004-routing-strategy-graduation.md) | Deterministic-first, router-fallback gated on the scorecard (complements 0003) | M7 Phase 2 |
-| [0005](../adr/0005-lifecycle-verbs-via-mcp-preview-kernel-gated.md) | Lifecycle MCP tools preview-only + kernel-gated; overrides a v4 out-of-scope line | M3, M6 |
-| [0006](../adr/0006-mcp-worktree-creation-and-path-whitelisting.md) | Fused `ensure` reuse + disposable scratch dir; never downgrade primary (FG3 mirror) | M3, M6 |
-| [0007](../adr/0007-dynamic-resources-module-boundary.md) | New `engine/mcp_dynamic_resources.py`; overrides a v4 out-of-scope line | M4, M6 |
-| [0008](../adr/0008-adopt-and-reconcile-doc-warden-conventions.md) | Adopt + reconcile doc-warden conventions (meta-ADR for 0002–0009) | M7 |
-| [0009](../adr/0009-tooling-subtraction-policy.md) | Subtract nothing now; proof-to-kill rule | M7 |
+| [0011](../adr/0011-mcp-capability-registry-single-source.md) | `engine/mcp_catalog.py` single-source registry (FG4) | M1 |
+| [0012](../adr/0012-awa-route-deterministic-in-engine-front-door.md) | Deterministic in-engine `awa_route` + closed `awa-route/v1` + finish parity (FG1/FG2) | M2 |
+| [0013](../adr/0013-routing-strategy-graduation.md) | Deterministic-first, router-fallback gated on the scorecard (complements 0012) | M7 Phase 2 |
+| [0014](../adr/0014-lifecycle-verbs-via-mcp-preview-kernel-gated.md) | Lifecycle MCP tools preview-only + kernel-gated; overrides a v4 out-of-scope line | M3, M6 |
+| [0015](../adr/0015-mcp-worktree-creation-and-path-whitelisting.md) | Fused `ensure` reuse + disposable scratch dir; never downgrade primary (FG3 mirror) | M3, M6 |
+| [0016](../adr/0016-dynamic-resources-module-boundary.md) | New `engine/mcp_dynamic_resources.py`; overrides a v4 out-of-scope line | M4, M6 |
+| [0017](../adr/0017-adopt-and-reconcile-doc-warden-conventions.md) | Adopt + reconcile doc-warden conventions (meta-ADR for 0011–0018) | M7 |
+| [0018](../adr/0018-tooling-subtraction-policy.md) | Subtract nothing now; proof-to-kill rule | M7 |
 
 ## 5. Work items
 
@@ -335,7 +335,7 @@ up the harness (with a travelling fallback).**
   **or** fallback explicitly recorded and wired to the M6 gate.
 - **Handoff state:** M1 has a frozen target set and a known measurement path.
 
-### M1 — Canonical MCP capability registry (ADR 0002 / FG4)
+### M1 — Canonical MCP capability registry (ADR 0011 / FG4)
 
 **WI-M1-01 — Create `engine/mcp_catalog.py` and re-point every consumer in lockstep.**
 - **Objective:** one pure-Python registry is the sole source for tools/list, validation, ordering, short
@@ -351,7 +351,7 @@ up the harness (with a travelling fallback).**
   M4 (resources register as a route kind).
 - **Session/PR boundary:** one PR: registry + lockstep consumer refactor + derivation test.
 - **Allowed mutations:** `engine/` MCP modules; generated doc; tests. **No** runtime I/O in the registry
-  (determinism); `mcp_resources.py` stays pure (ADR 0007).
+  (determinism); `mcp_resources.py` stays pure (ADR 0016).
 - **Non-goals:** adding `awa_route` (M2) or new tools (M3).
 - **Steps:** (1) author the registry as pure constants + validators; (2) derive `tools/list`, argument
   validation, ordering, and a **short** `initialize.instructions` from it; (3) split `render_guidance`
@@ -364,7 +364,7 @@ up the harness (with a travelling fallback).**
 - **Definition of done:** every consumer derives from the one registry; derivation + drift gates green.
 - **Handoff state:** M2 can resolve routes from a governed graph.
 
-### M2 — `awa_route`: deterministic in-engine front door (ADR 0003 / FG1–FG2)
+### M2 — `awa_route`: deterministic in-engine front door (ADR 0012 / FG1–FG2)
 
 **WI-M2-01 — Add `awa_route` with a pinned closed `awa-route/v1` schema + finish-recognizer parity.**
 - **Objective:** one deterministic front door that selects+explains a route, never executes/authorizes.
@@ -398,7 +398,7 @@ up the harness (with a travelling fallback).**
 ### M3 — Intent-shaped tools, safer results, and the expansion surfaces
 
 M3 carries the v4 floor (workspace-check + additive envelope + FG3) **and** the operator's new lifecycle
-(ADR 0005) and worktree-creation (ADR 0006) surfaces. Default is augment-in-place; a split into a
+(ADR 0014) and worktree-creation (ADR 0015) surfaces. Default is augment-in-place; a split into a
 separate `M3b` is a GO/NO-GO fork (§6.5) flagged for operator approval — the WI structure below is
 organized so the split, if approved, is a clean cut along WI boundaries.
 
@@ -426,7 +426,7 @@ organized so the split, if approved, is a clean cut along WI boundaries.
 - **Definition of done:** workspace-check shipped; envelopes additive; FG3 closed with a biting test.
 - **Handoff state:** the protection model is computable and the mode-off subtree hole is closed.
 
-**WI-M3-02 — Lifecycle MCP tools: preview/propose only, kernel-gated (ADR 0005, overrides a v4
+**WI-M3-02 — Lifecycle MCP tools: preview/propose only, kernel-gated (ADR 0014, overrides a v4
 out-of-scope line; closes the executor build gap).**
 - **Objective:** give the catalog's `mcp` lifecycle verbs a preview surface while all effects stay behind
   the kernel gate.
@@ -454,7 +454,7 @@ out-of-scope line; closes the executor build gap).**
 - **Definition of done:** lifecycle verbs discoverable over MCP; every effect kernel-gated; N1 test green.
 - **Handoff state:** the declared `mcp` catalog verbs finally have a safe surface.
 
-**WI-M3-03 — MCP worktree creation + path whitelisting / disposable dir (ADR 0006).**
+**WI-M3-03 — MCP worktree creation + path whitelisting / disposable dir (ADR 0015).**
 - **Objective:** fused MCP worktree provisioning that reuses the kernel creation path and offers a
   disposable scratch dir, never downgrading primary protection.
 - **Owning repo:** KleinPerkins/awa.
@@ -479,7 +479,7 @@ out-of-scope line; closes the executor build gap).**
   disposable dir; N2 test green.
 - **Handoff state:** agents can request isolation over MCP without weakening protection.
 
-### M4 — Resources and conditional prompts (dynamic resources now required, ADR 0007)
+### M4 — Resources and conditional prompts (dynamic resources now required, ADR 0016)
 
 **WI-M4-01 — New `engine/mcp_dynamic_resources.py` for engine-owned live state; prompts host-gated.**
 - **Objective:** expose read-only engine-owned live state as dynamic resources without touching
@@ -490,7 +490,7 @@ out-of-scope line; closes the executor build gap).**
   exposure + paired benefit.
 - **Interfaces/contracts:** authoritative shapes — lease/identity (`contracts/awa-contract.v1.json`),
   frozen CLI verbs, `clean_receipt/v1`, `active_root/v1`; each dynamic resource registered through the
-  ADR 0002 registry as a `resource` route kind.
+  ADR 0011 registry as a `resource` route kind.
 - **Prerequisites:** WI-M1-01 (registry), WI-M0-01 (host exposure branch).
 - **Dependencies:** M6 adds the no-user-text-persistence test.
 - **Session/PR boundary:** one PR (prompts split to a follow-up PR if host exposure is marginal).
@@ -504,7 +504,7 @@ out-of-scope line; closes the executor build gap).**
 - **Tests/commands:** no-user-text-persistence test; `mcp_resources.py` byte-true assertion; URI-set drift
   gate (M6); `make verify`.
 - **Evidence to retain:** N3 test output; resource-uniqueness mapping to M0 scenarios.
-- **Rollback:** revert PR; the one static resource remains (ADR 0009 retention).
+- **Rollback:** revert PR; the one static resource remains (ADR 0018 retention).
 - **Definition of done:** dynamic resources shipped via the new module; purity + N3 green.
 - **Handoff state:** live engine state is inspectable read-only over MCP, safely.
 
@@ -586,16 +586,16 @@ human tier).**
 
 ### M7 — Docs, doc-warden reconciliation, gated router reuse, subtraction, release (REWORKED)
 
-**WI-M7-01 — doc-warden alignment + local-convention reconciliation + POC-3d coordination (ADR 0008).**
+**WI-M7-01 — doc-warden alignment + local-convention reconciliation + POC-3d coordination (ADR 0017).**
 - **Objective:** land this repo's governance docs conforming to doc-warden while explicitly reconciling
   AWA's pre-existing local convention, and record the owning-repo side of doc-warden's POC 3d.
 - **Owning repo:** KleinPerkins/awa (the POC-3d overlay-to-pointer conversion is a **separate**
   Operator-GO-gated change on the `~/dev` side — named here, not executed here).
-- **Scope:** ADRs 0002–0009 (this set); this plan; augmented `docs/adr/README.md`, `docs/plans/README.md`
+- **Scope:** ADRs 0011–0018 (this set); this plan; augmented `docs/adr/README.md`, `docs/plans/README.md`
   (new rows + reconciliation prose, existing 0001/guard rows byte-untouched); augmented `AGENTS.md`
   (marker block). This WI is the artifact you are reading being delivered.
 - **Interfaces/contracts:** doc-warden templates (`~/dev/_ops/doc-warden/templates/*`); POLICY §2/§3/§9/
-  §10/§12; the five-divergence reconciliation table (ADR 0008 Decision).
+  §10/§12; the five-divergence reconciliation table (ADR 0017 Decision).
 - **Prerequisites:** operator GO on this plan flips the artifacts to accepted; authoring itself is
   complete at DRAFT.
 - **Dependencies:** meta-WI for the whole set.
@@ -604,7 +604,7 @@ human tier).**
   doc-warden engine call-site in this repo; **no** cpp/eco-registry participation.
 - **Non-goals:** migrating the index *columns* now (deferred, operator-gated, index-only, POC 3d);
   touching ADR 0001 or the guard plan; the `~/dev` overlay-to-pointer conversion.
-- **Steps:** (1) author 0002–0009 in doc-warden entry shape/vocabulary; (2) author this plan; (3) add
+- **Steps:** (1) author 0011–0018 in doc-warden entry shape/vocabulary; (2) author this plan; (3) add
   index rows in local columns + reconciliation prose; (4) augment `AGENTS.md`; (5) run a read-only
   `~/dev/_ops/bin/doc-warden.sh check KleinPerkins/awa` dry-run *from* `~/dev` (or manual shape
   validation if awa is not yet a configured target) and record the result.
@@ -616,7 +616,7 @@ human tier).**
   POLICY §3, resolved to CONFORMANT under the deferred POC-3d migration); reconciliation recorded.
 - **Handoff state:** doc-warden's POC 3d has a conforming owning-repo to point at.
 
-**WI-M7-02 — Optional router reuse Phase 2 — required-but-gated (ADR 0004).**
+**WI-M7-02 — Optional router reuse Phase 2 — required-but-gated (ADR 0013).**
 - **Objective:** measure and, only if it beats deterministic routing on the frozen scorecard, graduate an
   out-of-engine router fallback — never a dependency.
 - **Owning repo:** KleinPerkins/awa (router wrapper is `consumer/`-owned, out-of-engine).
@@ -626,8 +626,8 @@ human tier).**
 - **Interfaces/contracts:** `consumer/router-pin.json` immutable `base_sha`; the `router-seam` CI job;
   the scorecard + split-rep rule as the graduation gate.
 - **Prerequisites:** WI-M6-01/02 (the scorecard must have run).
-- **Dependencies:** its outcome is a GO/NO-GO fork (§6.5); if measurement reverses ADR 0003's routing
-  scope, that reversal is a **new** ADR carrying `Supersedes: ADR-0003` (bidirectional cross-link), not a
+- **Dependencies:** its outcome is a GO/NO-GO fork (§6.5); if measurement reverses ADR 0012's routing
+  scope, that reversal is a **new** ADR carrying `Supersedes: ADR-0012` (bidirectional cross-link), not a
   silent edit.
 - **Session/PR boundary:** its own PR (owns its launcher/`install.sh`/`mcp.json`-entry migration +
   rollback).
@@ -643,14 +643,14 @@ human tier).**
   shipped — deterministic-first unchanged.
 - **Handoff state:** routing strategy is measured, not assumed.
 
-**WI-M7-03 — Subtraction policy, release, and named rollback proof (ADR 0009).**
+**WI-M7-03 — Subtraction policy, release, and named rollback proof (ADR 0018).**
 - **Objective:** ship only retained/added surfaces, record the proof-to-kill rule, and back the rollback
   claim with a named test.
 - **Owning repo:** KleinPerkins/awa.
 - **Scope:** docs/contracts update (README/ARCHITECTURE/SECURITY/install-doctor/docstrings/live runbooks/
   `verify-live-verify.sh`/`egress-gate.v1.json` for real PM-facing additions); minor version bump +
   changelog; ship gate.
-- **Interfaces/contracts:** ADR 0009 proof-to-kill rule; the M6 rollback regression; FG5 count/URI drift
+- **Interfaces/contracts:** ADR 0018 proof-to-kill rule; the M6 rollback regression; FG5 count/URI drift
   gates.
 - **Prerequisites:** M6 green; WI-M7-01 docs landed.
 - **Dependencies:** last WI before release.
@@ -707,13 +707,13 @@ Every row is a release-blocking, machine-checkable item unless marked human-tier
 
 | # | Conflict | Reconciliation | ADR | Test / gate |
 |---|---|---|---|---|
-| 1 | Kernel-first vs MCP lifecycle verbs | MCP previews; execution via the existing kernel gate; the envelope only decides which caller hands the literal token to the kernel — not a new authority | 0005 | Agent-cannot-self-authorize test; preview-never-mutates test (WI-M6-01, N1) |
-| 2 | Contamination boundary vs dynamic resources | Engine-owned state only; consumer conversational state stays CLI/hook-only | 0007 | Contamination scan extends to the new module; dynamic-resource scope test (WI-M6-01) |
-| 3 | `mcp_resources.py` purity vs "dynamic" | New sibling module; existing module + tests byte-true | 0007 | `mcp_resources.py` byte-true assertion; no-user-text-persistence test (N3) |
-| 4 | Egress hygiene vs richer surfaces | Agent-facing diagnostics exempt; any new PM-facing string reuses the same narrow named egress exception as the finish warning | 0005/0007 | `test_egress_surfaces.py` extended only for real PM-facing additions |
-| 5 | Optional-component-off vs router in-scope | Carry v4's SHA-pinned, lazily-invoked, bounded, present-and-absent-tested design; "in scope" = gated + measured, never mandatory | 0004 | router-present/absent tests; `router-seam` job; `make verify` router-uninstalled (WI-M7-02) |
-| 6 | v4 "out of scope" lines vs new requirements 1 & 2 | Both overrides named explicitly as approved scope changes; underlying safety intent preserved | 0005/0007 | ADR override notes + N1/N3 tests |
-| 7 | doc-warden byte-identical-forever vs AWA's `> Update —` exception | New ADRs (0002+) adopt doc-warden's stricter no-exception rule; ADR 0001 not retroactively touched | 0008 | doc-warden shape dry-run; supersede-only discipline (no in-place edits) |
+| 1 | Kernel-first vs MCP lifecycle verbs | MCP previews; execution via the existing kernel gate; the envelope only decides which caller hands the literal token to the kernel — not a new authority | 0014 | Agent-cannot-self-authorize test; preview-never-mutates test (WI-M6-01, N1) |
+| 2 | Contamination boundary vs dynamic resources | Engine-owned state only; consumer conversational state stays CLI/hook-only | 0016 | Contamination scan extends to the new module; dynamic-resource scope test (WI-M6-01) |
+| 3 | `mcp_resources.py` purity vs "dynamic" | New sibling module; existing module + tests byte-true | 0016 | `mcp_resources.py` byte-true assertion; no-user-text-persistence test (N3) |
+| 4 | Egress hygiene vs richer surfaces | Agent-facing diagnostics exempt; any new PM-facing string reuses the same narrow named egress exception as the finish warning | 0014/0016 | `test_egress_surfaces.py` extended only for real PM-facing additions |
+| 5 | Optional-component-off vs router in-scope | Carry v4's SHA-pinned, lazily-invoked, bounded, present-and-absent-tested design; "in scope" = gated + measured, never mandatory | 0013 | router-present/absent tests; `router-seam` job; `make verify` router-uninstalled (WI-M7-02) |
+| 6 | v4 "out of scope" lines vs new requirements 1 & 2 | Both overrides named explicitly as approved scope changes; underlying safety intent preserved | 0014/0016 | ADR override notes + N1/N3 tests |
+| 7 | doc-warden byte-identical-forever vs AWA's `> Update —` exception | New ADRs (0011+) adopt doc-warden's stricter no-exception rule; ADR 0001 not retroactively touched | 0017 | doc-warden shape dry-run; supersede-only discipline (no in-place edits) |
 
 ### 6.4 POC specifications
 
@@ -737,14 +737,14 @@ This plan and its eight ADRs are **DRAFT**. Operator GO is required to move them
 (index-tracked; files then byte-identical-frozen). The following residual forks are surfaced, not
 silently resolved:
 
-- **F1 — doc-warden index-column migration (ADR 0008).** New index rows are in AWA's local columns to
+- **F1 — doc-warden index-column migration (ADR 0017).** New index rows are in AWA's local columns to
   preserve the protected 0001/guard rows. Migrating to doc-warden's canonical columns
   (`ADR | Title | Status | Date` and `Plan | Status | Date | Notes`) is a deferred, operator-gated,
   index-only change under doc-warden's POC 3d. **Decision needed:** approve the deferral (recommended) or
   migrate now.
-- **F2 — ADR-0004 routing graduation.** Whether to ship the gated router fallback depends on the M6
+- **F2 — ADR-0013 routing graduation.** Whether to ship the gated router fallback depends on the M6
   scorecard, which has not run. **Decision needed at M7 Phase 2:** graduate only on a passing gate; if
-  measurement reverses ADR 0003's scope, author a superseding ADR.
+  measurement reverses ADR 0012's scope, author a superseding ADR.
 - **F3 — M3 split.** Default is augment-in-place (WI-M3-01/02/03 in one milestone). **Decision needed:**
   approve keeping M3 whole (recommended, honors the floor) or split the lifecycle (M3-02) and worktree
   (M3-03) surfaces into an `M3b`.
@@ -753,7 +753,7 @@ silently resolved:
 
 ## 7. Rollback
 
-- **Documentation (this PR):** revert the branch; `docs/adr/0002`–`0009`, this plan, the two index-row
+- **Documentation (this PR):** revert the branch; `docs/adr/0011`–`0018`, this plan, the two index-row
   additions, and the `AGENTS.md` marker block are all additive. ADR 0001, the guard plan, and the
   continual-learning-memory section are byte-untouched, so revert is clean and total.
 - **Per-milestone build rollback:** every build WI is a single revertible PR with no launcher/entry
@@ -763,7 +763,7 @@ silently resolved:
 - **Release rollback (M7):** reinstall the prior release with no config/state migration.
 - **Immutability note:** once this plan is ACCEPTED it is byte-identical-frozen; a material revision is a
   new `awa-mcp-evolution-v2.md` carrying a `Supersedes:` pointer, with only the index row mutable
-  (doc-warden POLICY §9; ADR 0008). Accepted ADRs are likewise supersede-only — no in-place edits, not
-  even a status-bullet edit, and no inline `> Update —` correction for the 0002+ set.
+  (doc-warden POLICY §9; ADR 0017). Accepted ADRs are likewise supersede-only — no in-place edits, not
+  even a status-bullet edit, and no inline `> Update —` correction for the 0011+ set.
 
 

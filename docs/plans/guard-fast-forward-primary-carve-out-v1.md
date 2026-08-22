@@ -6,13 +6,15 @@
 - **Owning repository:** `KleinPerkins/awa` (`~/dev/capabilities/awa`)
 - **Plan-type:** agentic-execution
 - **Relates to:** ADR 0001 (additive-only mutation-scope doctrine), draft ADR 0010
-  (remote Git policy), draft ADR 0011 (primary fast-forward policy), and
+  (remote Git policy), draft ADR 0019 (primary fast-forward policy), and
   `docs/plans/git-command-policy-hardening-v1.md`
-- **Review provenance:** Refined against live AWA `main` @ `9737d3d` and Skills `main` @
+- **Review provenance:** Refined against AWA `main` @ `9737d3d` and Skills `main` @
   `3a13f72` using the four-test `plan-refine` method plus a Critical-band review swarm
-  (one probe, four territory reviewers, one verifier). No implementation has started.
+  (one probe, four territory reviewers, one verifier), then conflict-reconciled against
+  AWA `main` @ `01053f6` (a docs-only ADR renumbering change). No implementation has
+  started.
 - **Governance blocker:** This plan may remain a mutable draft, but it MUST NOT become
-  ACCEPTED and Task 1 MUST NOT start until draft ADRs 0010 and 0011 are revised in
+  ACCEPTED and Task 1 MUST NOT start until draft ADRs 0010 and 0019 are revised in
   lockstep to authorize the maintenance boundary below. This `plan-refine` pass did not
   have authority to edit either ADR.
 
@@ -157,9 +159,9 @@ Non-goals:
 
 Verified 2026-08-21:
 
-- AWA remote `main` is `9737d3d`; design PR #120 is DRAFT at `a743ad7`, docs-only, and
-  has no implementation. This refinement is an uncommitted two-file plan-surface delta
-  atop that head.
+- AWA remote `main` was freshly fetched at `01053f6`; design PR #120's pre-resolution
+  head was `a743ad7`, and the branch remains docs-only with no implementation. The base
+  branch's new 0011–0018 ADR range moved this draft carve-out ADR mechanically to 0019.
 - `engine.__version__` and `pyproject.toml` report `1.5.2`; latest published tag is
   `v1.5.2`.
 - `engine/guard.py` keeps `fetch`, `pull`, and `merge` in `_GITMUT`; fetch is
@@ -360,7 +362,7 @@ Before Task 1:
 - [ ] Revise draft ADR 0010 so its remote-command rule distinguishes unnecessary remote
   dry-runs/push from the accepted upstream-fetch maintenance operation and removes the
   false linked-worktree-isolation rationale.
-- [ ] Revise draft ADR 0011 from "merge-only" to the exact fetch + fast-forward lane,
+- [ ] Revise draft ADR 0019 from "merge-only" to the exact fetch + fast-forward lane,
   including live-state preconditions and accepted configured Git effects.
 - [ ] Re-run doc-warden and design review on the ADR/plan set.
 - [ ] Obtain explicit owner acceptance plus a separate instruction to implement.

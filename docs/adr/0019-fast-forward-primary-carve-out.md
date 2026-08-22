@@ -1,4 +1,4 @@
-# ADR 0011: Fast-forward-only update of a protected primary's current branch is an allowed carve-out
+# ADR 0019: Fast-forward-only update of a protected primary's current branch is an allowed carve-out
 Status: draft — 2026-08-21
 
 ## Context

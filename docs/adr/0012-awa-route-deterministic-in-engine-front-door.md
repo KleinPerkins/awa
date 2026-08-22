@@ -1,9 +1,9 @@
-# ADR 0003: awa_route — a deterministic, in-engine routing front door
+# ADR 0012: awa_route — a deterministic, in-engine routing front door
 Status: draft — 2026-08-06
 
 ## Decision
 
-Add one MCP tool, `awa_route`, resolved entirely from the ADR 0002 capability graph. It exposes a
+Add one MCP tool, `awa_route`, resolved entirely from the ADR 0011 capability graph. It exposes a
 pinned, closed `awa-route/v1` schema — a `version` discriminator, closed enums for `state`
 (including an explicit `invalid_request` reject branch), `source`, `route_kind`, `persistence`, and
 `risk`; bounded `candidates[]`/`next_actions[]`; and the authority constants `executed: false` and
@@ -29,7 +29,7 @@ So the discoverability answer is a deterministic tool, and the only safe place f
   docstring at `:59`; `rglob("*.py")` at `:61`) and asserts zero `consumer`/`intent_router` imports
   (`for bad in ("consumer", "intent_router")` at `:65`) plus a router-artifact usage scan
   (`:68`–`70`). An in-engine router is therefore structurally impossible here by design.
-- **Deterministic-in-engine (chosen).** `awa_route` resolves only from ADR 0002's engine-owned
+- **Deterministic-in-engine (chosen).** `awa_route` resolves only from ADR 0011's engine-owned
   graph, so the contamination invariant stays trivially intact and the route table has one source.
   The pinned closed schema makes "never leaks on any branch" testable (an M6 test asserts
   `executed`/`authorized` are literal constant `false` in every branch including `invalid_request`,
@@ -49,9 +49,9 @@ So the discoverability answer is a deterministic tool, and the only safe place f
   recognizer and never emits `Close`; kernel exact-`Close` authorization
   (`consumer/finish_current.py:333`–`334`) remains the sole gate. The authority constants and the
   parity gate are release-blocking.
-- Must stay true: `awa_route` reads only the ADR 0002 graph (no consumer/router import), the schema
+- Must stay true: `awa_route` reads only the ADR 0011 graph (no consumer/router import), the schema
   stays additive-within-`v1`, and the parity gate runs in `make verify`.
 - Defers/creates: the routing *strategy* (deterministic-only vs a gated router fallback) is
-  measured and graduated in ADR 0004 — which complements this ADR today and would supersede its
-  routing scope only if measurement reverses it. Cross-links: ADR 0002 (graph), ADR 0004 (routing
-  graduation, bidirectional), ADR 0005 (lifecycle preview routes surface here as `consumer_flow`).
+  measured and graduated in ADR 0013 — which complements this ADR today and would supersede its
+  routing scope only if measurement reverses it. Cross-links: ADR 0011 (graph), ADR 0013 (routing
+  graduation, bidirectional), ADR 0014 (lifecycle preview routes surface here as `consumer_flow`).

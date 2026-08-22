@@ -1,4 +1,4 @@
-# ADR 0007: Dynamic resources — a new engine-owned module, preserving mcp_resources.py purity
+# ADR 0016: Dynamic resources — a new engine-owned module, preserving mcp_resources.py purity
 Status: draft — 2026-08-06
 
 ## Context
@@ -47,7 +47,7 @@ assert no user/prompt text is ever persisted.
 ## Consequences
 
 - Enables: read-only exposure of engine-owned live state (paths/leases/modes/contracts/CLI
-  verbs/recovery/active-root/clean receipts) as dynamic resources registered through the ADR 0002
+  verbs/recovery/active-root/clean receipts) as dynamic resources registered through the ADR 0011
   registry.
 - Forecloses: any exposure of consumer-side conversational state (contamination boundary); any user
   or prompt text persisted for telemetry; any dynamic resource becoming a routing dependency.
@@ -55,5 +55,5 @@ assert no user/prompt text is ever persisted.
   read-only, bounded, and persists no user text; resources never hold authorization.
 - Defers/creates: `engine/mcp_dynamic_resources.py` and its no-user-text-persistence tests are plan
   work items (M4/M6); explicitly overrides the v3/v4 out-of-scope line as an approved scope change
-  (conflict #6). Cross-links: ADR 0002 (registered as a `resource` route kind), ADR 0009 (the one
+  (conflict #6). Cross-links: ADR 0011 (registered as a `resource` route kind), ADR 0018 (the one
   static resource is retained, not policy-locked against these dynamic siblings), plan §M4/§M6.
