@@ -1,4 +1,4 @@
-# ADR 0008: Adopt AND reconcile doc-warden conventions in the AWA repo
+# ADR 0017: Adopt AND reconcile doc-warden conventions in the AWA repo
 Status: draft — 2026-08-06
 
 ## Context
@@ -29,8 +29,8 @@ wording").
 
 ## Decision
 
-Place the new ADRs (0002+) and this plan at the existing `docs/adr` and `docs/plans` roots, number
-ADRs sequentially from 0002, and adopt doc-warden's canonical template shape and vocabulary for
+Place the new ADRs (0011+) and this plan at the existing `docs/adr` and `docs/plans` roots, number
+ADRs sequentially from 0011, and adopt doc-warden's canonical template shape and vocabulary for
 **new** artifacts going forward, reconciling the five divergences per-divergence (below). Augment —
 not replace — `AGENTS.md` with the marker-delimited pointer block (POLICY §10 rule 6). Record that
 AWA is the **owning-repo** side of doc-warden's pending M4 / POC 3d, and that the `~/dev` `_ops/awa/`
@@ -49,7 +49,7 @@ Per-divergence resolution:
    change.
 4. **Plan status vocabulary** — new plans use doc-warden `DRAFT | ACCEPTED | SUPERSEDED`; this plan
    is `DRAFT`.
-5. **ADR immutability** — new ADRs (0002+) adopt doc-warden's stricter byte-identical-forever rule
+5. **ADR immutability** — new ADRs (0011+) adopt doc-warden's stricter byte-identical-forever rule
    (POLICY §9) with **no** inline `> Update —` exception (supersede-only). ADR 0001 is not
    retroactively re-governed. The plan-side analog is reconciled identically: the local
    `docs/plans/README.md` previously permitted a one-line status-bullet note on a superseded (frozen)
@@ -91,6 +91,6 @@ Per-divergence resolution:
 - Must stay true: ADR 0001 and the `guard` plan row stay byte-identical; new ADRs are
   supersede-only; the index tables stay internally consistent until the operator-gated migration.
 - Defers/creates: the index-column migration and the `~/dev` overlay-to-pointer conversion are
-  Operator-GO-gated POC 3d work (plan §M7). This is the meta-ADR for the whole 0002–0009 set.
-  Cross-links: all of ADR 0002–0009 (vocabulary/shape they follow), ADR 0009 (subtraction policy),
+  Operator-GO-gated POC 3d work (plan §M7). This is the meta-ADR for the whole 0011–0018 set.
+  Cross-links: all of ADR 0011–0018 (vocabulary/shape they follow), ADR 0018 (subtraction policy),
   plan §M7 (executes this reconciliation).

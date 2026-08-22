@@ -15,7 +15,7 @@ decision, read `docs/adr/README.md` — the ADR format, numbering, and status
 convention, plus an index of every record.
 
 The `doc-warden` governance block below restates these locations in the fleet-standard
-marker format (see [`docs/adr/0008-adopt-and-reconcile-doc-warden-conventions.md`](docs/adr/0008-adopt-and-reconcile-doc-warden-conventions.md));
+marker format (see [`docs/adr/0017-adopt-and-reconcile-doc-warden-conventions.md`](docs/adr/0017-adopt-and-reconcile-doc-warden-conventions.md));
 the "read `docs/plans/README.md` first" reading-order guidance above still applies.
 
 <!-- doc-warden:begin -->
