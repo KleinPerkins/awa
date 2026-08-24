@@ -77,6 +77,7 @@ lands — this directory already follows the reference shape it derived from.
 | [0017](0017-adopt-and-reconcile-doc-warden-conventions.md) | Draft — 2026-08-06 | Adopt doc-warden's canonical conventions for new artifacts and reconcile AWA's five local divergences per-divergence; index-column migration deferred to an operator-gated POC 3d. |
 | [0018](0018-tooling-subtraction-policy.md) | Draft — 2026-08-06 | Subtract no MCP surface now (all 9 tools used/tested; the one resource is retained); establish a durable proof-to-kill rule for any future removal. |
 | [0019](0019-fast-forward-primary-carve-out.md) | Accepted — 2026-08-23 | Allow one exact configured-upstream fetch plus one clean upstream-bound `merge --ff-only --no-overwrite-ignore` as state-aware decision-layer maintenance exceptions; all development and unnecessary Git maintenance remain denied. |
+| [0020](0020-awa-integrity-surveillance-and-lifecycle.md) | Draft — 2026-08-24 | Guard-bug claim refuted; add one engine-side integrity evaluator, a status-last atomic `status.json` of record (live `mode=ro` reads), runnerless fast hooks + `local-jobs` deep sweep, always-attempted native/opt-in-Slack alerts, a self-staling static console, and read-only lifecycle reconciliation — no guard change; AWA owns product, `~/dev` owns host wiring. |
 
 ## Related conventions
 
