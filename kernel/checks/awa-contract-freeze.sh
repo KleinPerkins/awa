@@ -380,6 +380,170 @@ else
   bad "git read-only family classifier drifted from frozen contract expectations"
 fi
 
+# 3c) Protected-primary maintenance UAT: the role-resolved hook permits only the two
+#     canonical operations in safe live state and keeps representative near misses denied.
+maintenance_tmp="$(mktemp -d)"
+maintenance_remote="$maintenance_tmp/remote.git"
+maintenance_seed="$maintenance_tmp/seed"
+maintenance_repo="$maintenance_tmp/proj"
+maintenance_cases=""
+if (
+  export GIT_CONFIG_NOSYSTEM=1
+  export GIT_CONFIG_SYSTEM=/dev/null
+  export GIT_CONFIG_GLOBAL=/dev/null
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES 2>/dev/null || true
+  git init -q --bare "$maintenance_remote" &&
+  git init -q "$maintenance_seed" &&
+  printf 'one\n' > "$maintenance_seed/f" &&
+  git -C "$maintenance_seed" add f &&
+  git -C "$maintenance_seed" \
+    -c user.email="49759187+KleinPerkins@users.noreply.github.com" \
+    -c user.name="KleinPerkins" commit -qm initial &&
+  git -C "$maintenance_seed" branch -M main &&
+  git -C "$maintenance_seed" remote add origin "$maintenance_remote" &&
+  git -C "$maintenance_seed" push -qu origin main &&
+  git -C "$maintenance_remote" symbolic-ref HEAD refs/heads/main &&
+  git clone -q "$maintenance_remote" "$maintenance_repo" &&
+  printf 'two\n' >> "$maintenance_seed/f" &&
+  git -C "$maintenance_seed" add f &&
+  git -C "$maintenance_seed" \
+    -c user.email="49759187+KleinPerkins@users.noreply.github.com" \
+    -c user.name="KleinPerkins" commit -qm advance &&
+  git -C "$maintenance_seed" push -q origin main &&
+  git -C "$maintenance_repo" fetch -q origin
+); then
+  maintenance_cases="$(
+    REPO="$maintenance_repo" GUARD="$GUARD" ROOT="$maintenance_tmp" \
+      DEFAULT_POLICY="$AWA_HOME/kernel/policy/default-worktree-policy.yml" python3 - <<'PY'
+import json
+import os
+import pathlib
+import subprocess
+
+repo = pathlib.Path(os.environ["REPO"])
+guard = os.environ["GUARD"]
+root = os.environ["ROOT"]
+home = pathlib.Path(root) / "home"
+for path in (home, home / ".config", home / ".local" / "state"):
+    path.mkdir(parents=True, exist_ok=True)
+drop = {
+    "AWA_FORCE_CLOUD",
+    "CURSOR_AGENT_IDENTITY_BROKER",
+    "CURSOR_BACKGROUND_AGENT",
+    "CURSOR_CLOUD_AGENT",
+    "DEV_WORKTREE_GUARD_ALLOW_PRIMARY",
+    "IS_BACKGROUND_AGENT",
+    "cloud_agent_identity_broker",
+    "is_background_agent",
+}
+guard_env = {
+    key: value
+    for key, value in os.environ.items()
+    if not key.startswith("GIT_") and key not in drop
+}
+guard_env.update(
+    {
+        "AWA_GOVERNED_ROOT": root,
+        "AWA_POLICY": os.environ["DEFAULT_POLICY"],
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_STATE_HOME": str(home / ".local" / "state"),
+    }
+)
+cases = [
+    ("canonical fetch", "git fetch", "allow", False),
+    (
+        "canonical fast-forward",
+        "git merge --ff-only --no-overwrite-ignore",
+        "allow",
+        False,
+    ),
+    ("dirty state", "git fetch", "deny", True),
+    (
+        "wrong upstream ref",
+        "git merge --ff-only --no-overwrite-ignore origin/wrong",
+        "deny",
+        False,
+    ),
+    ("environment laundering", "env GIT_DIR=.git git fetch", "deny", False),
+    ("Git global option", "git -C . fetch", "deny", False),
+    (
+        "fetch refspec",
+        "git fetch origin refs/heads/main:refs/remotes/origin/main",
+        "deny",
+        False,
+    ),
+    ("pull", "git pull --ff-only", "deny", False),
+    ("push", "git push", "deny", False),
+]
+out = []
+dirty_path = repo / "local-only"
+for label, command, expected, dirty in cases:
+    if dirty:
+        dirty_path.write_text("local\n", encoding="utf-8")
+    payload = json.dumps({"cwd": str(repo), "command": command})
+    proc = subprocess.run(
+        [guard],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env=guard_env,
+    )
+    try:
+        response = json.loads(proc.stdout or "{}")
+    except Exception:
+        response = {}
+    out.append(
+        {
+            "label": label,
+            "command": command,
+            "expected": expected,
+            "permission": response.get("permission"),
+        }
+    )
+    if dirty:
+        dirty_path.unlink()
+print(json.dumps(out))
+PY
+  )"
+fi
+rm -rf "$maintenance_tmp" 2>/dev/null || true
+if MAINTENANCE_CASES="$maintenance_cases" python3 - <<'PY'
+import json
+import os
+import sys
+
+raw = os.environ.get("MAINTENANCE_CASES", "")
+if not raw:
+    print("primary maintenance UAT fixture missing", file=sys.stderr)
+    sys.exit(1)
+try:
+    cases = json.loads(raw)
+except Exception as exc:
+    print(f"primary maintenance UAT output not JSON: {exc}", file=sys.stderr)
+    sys.exit(1)
+errors = []
+for case in cases:
+    if case.get("permission") != case.get("expected"):
+        errors.append(
+            "{0}: {1!r} expected {2!r}, got {3!r}".format(
+                case.get("label"),
+                case.get("command"),
+                case.get("expected"),
+                case.get("permission"),
+            )
+        )
+if errors:
+    print("PRIMARY MAINTENANCE UAT: " + "; ".join(errors), file=sys.stderr)
+    sys.exit(1)
+PY
+then
+  pass "protected-primary maintenance allows canonical fetch/fast-forward and denies representative near misses"
+else
+  bad "protected-primary maintenance role-resolved hook behavior drifted"
+fi
+
 # 4) Lease shape: no component emits a lease yet, so assert the contract DECLARES the frozen shape.
 if CONTRACT="$CONTRACT" python3 - <<'PY'
 import json, os, sys

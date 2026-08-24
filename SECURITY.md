@@ -21,12 +21,13 @@ Cursor platform behavior, documented in the Cursor community forum (threads repo
 `beforeShellExecution: ask` as non-blocking on the agent path) and acknowledged by Cursor staff as a
 known limitation with no committed ETA.
 
-**Consequence for AWA (design decision).** AWA does **not** rely on `ask` for prevention. On the one
-case where prevention must actually happen — a **confirmed mutating command on an INCLUDED PRIMARY
-checkout** (mode ON) — the guard returns an **enforced `deny`**, not `ask`. `ask` is retained only as
-an **honest no-op signal** on the genuine-uncertainty path (an included-looking checkout whose command
-payload the hook could not parse): AWA emits `ask` there knowing Cursor will not block, so it never
-*silently* downgrades an uncertain case to allow, but it also never pretends `ask` prevents anything.
+**Consequence for AWA (design decision).** AWA does **not** rely on `ask` for prevention. A
+**confirmed mutating command on an INCLUDED PRIMARY checkout** (mode ON) returns an enforced `deny`,
+not `ask`, unless the exact command and live state affirmatively prove the narrow upstream-maintenance
+exception below. `ask` is retained only as an **honest no-op signal** on the genuine-uncertainty path
+(an included-looking checkout whose command payload the hook could not parse): AWA emits `ask` there
+knowing Cursor will not block, so it never *silently* downgrades an uncertain case to allow, but it
+also never pretends `ask` prevents anything.
 
 **Fail-safety posture.** The deny path is fail-*safe*, never fail-*brick*:
 
@@ -40,6 +41,39 @@ payload the hook could not parse): AWA emits `ask` there knowing Cursor will not
   `/workspace` clone; the guard detects that (background-agent identity broker / `is_background_agent`
   / a `/workspace` root) and degrades to `allow` **before** the deny branch, so a cloud VM is never
   hard-blocked.
+
+## Protected-primary upstream maintenance
+
+The only direct Git maintenance mutation allowed on an included primary is a closed, state-aware
+lane for `git fetch [<configured-upstream-remote>]` and
+`git merge --ff-only --no-overwrite-ignore [<configured-upstream>]`. The optional merge target must
+be exactly `@{u}`, `@{upstream}`, or the configured `<remote>/<branch>` short name. Both families
+remain classified as mutating; the allow exists only inside the included-primary decision branch.
+
+The recognizer rejects wrappers, assignments, executable paths, Git global options, redirects,
+substitutions, control operators, extra flags, arbitrary URLs/remotes/refs/refspecs, `pull`, `push`,
+explicit prune, remote update, and ordinary merge. Before either allow, bounded local Git probes
+require a clean, attached, idle checkout; one remote-tracking upstream; fetch destinations contained
+beneath that remote's tracking namespace; an exact upstream mapping; and no visible
+repository-retargeting or config-injection `GIT_*` environment. The inspector also rejects every
+`skip-worktree` or `assume-unchanged` index bit because those bits can hide tracked-file edits from
+ordinary status output. Merge additionally requires `HEAD` to equal or precede the live upstream.
+Any timeout, malformed output, missing mapping, or other uncertainty retains the deny and emits
+bounded, plain-language guidance; merge also denies local-only or divergent history.
+
+This is not a sandbox around configured Git. Fetch may write common-repository objects,
+`FETCH_HEAD`, remote-tracking refs, reachable tags, and ordinary bookkeeping, and may invoke
+configured transport/credential helpers, hooks, and automatic maintenance. Merge may advance the
+current branch and update its index, worktree, reflogs, and `ORIG_HEAD`; configured hooks, filters,
+fsmonitor, and submodule behavior remain active. After each allowed command, the caller must check
+`git status --short`. If configured automation leaves residue, the caller stops, preserves it, and
+diagnoses it from a Safe Workspace; routine maintenance never calls for disabling AWA, using the
+session-wide primary override, or resetting the primary.
+
+The engine and kernel implement independent mirrors. Shared stateful corpora drive the engine,
+source hook, and installed role-resolved hook, while contract-freeze UAT covers canonical allows and
+representative denials. A false or uncertain maintenance predicate falls through to deny; only a
+genuine hook-internal failure retains the product-wide fail-open behavior.
 
 **Known platform caveat — the hook runner can fail before AWA starts.** Phase 3 Step 3.2 of the
 2026-07-15 Desktop UAT (Cursor 3.11.19) directly captured this path. In one Local conversation,
@@ -87,13 +121,14 @@ AWA block would contradict the explicit Cloud allow boundary and still could not
 provenance, so no product control was added. The regression
 `test_cloud_push_allow_response_contains_no_instruction_or_authorization` locks this boundary.
 
-**Recovery / override (operator path).** A `deny` on a primary checkout is recovered by the operator,
-not by the agent retrying: relaunch the agent in a Safe Workspace via the Cursor Agents-Window
-Worktree dropdown (AWA adopts the linked worktree and then allows mutation), or set
-`DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1` in Cursor's environment/settings. Note an inline
-`DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 <cmd>` prefix does **not** work — the hook reads its own process
-env, not the command's inline assignment — and `cd <worktree> && <cmd>` is still denied. As a last
-resort an operator who deliberately wants a repo unprotected can set it `off`.
+**Recovery / override (operator path).** A routine maintenance denial is resolved from its specific
+reason: preserve local state, repair tracking or fetch configuration in a Safe Workspace, and retry
+only after the primary is clean. Development work belongs in a Safe Workspace opened through the
+Cursor Agents-Window Worktree dropdown. `DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1` remains an explicit
+operator escape hatch for a separately authorized exceptional action; it is not maintenance
+guidance. An inline `DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1 <cmd>` prefix does **not** work — the hook
+reads its own process environment, not the command's inline assignment — and
+`cd <worktree> && <cmd>` is still denied.
 
 **Residual to close.** Desktop `deny` blocking is now independently re-proven by the 2026-07-15
 fresh-conversation event above. A complete same-build ask-then-deny matrix on Desktop and Cloud
