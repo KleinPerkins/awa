@@ -67,7 +67,7 @@ lands — this directory already follows the reference shape it derived from.
 |---|---|---|
 | [0001](0001-target-path-aware-mutation-scope.md) | Accepted — 2026-08-05 | Mutation-scope decisions must resolve and check actual command target path(s), not just cwd+verb; additive-only, conservative-fallback-preserving. |
 | [0002](0002-awa-dev-overlay.md) | Accepted — 2026-08-06 | Cross-repo authority: `KleinPerkins/awa` is the sole canonical owner of AWA product statements; `~/dev` carries pointers to this repo, not second copies (poc3d profile, six governed topics). |
-| [0010](0010-remote-dry-run-policy.md) | Draft — 2026-08-11 | Treat all fetch/push forms, including dry-run, as potentially mutating on protected primaries; use a Safe Workspace or scratch repository instead. |
+| [0010](0010-remote-dry-run-policy.md) | Accepted — 2026-08-23 | Keep fetch/push mutating and all dry-run forms denied; permit only ADR 0019's exact configured-upstream fetch on a clean protected primary as a decision-layer maintenance exception. |
 | [0011](0011-mcp-capability-registry-single-source.md) | Draft — 2026-08-06 | One in-engine `engine/mcp_catalog.py` is the single source of truth for every MCP capability's metadata; all consumers (tools/list, validation, ordering, instructions, operator-guide, generated docs) derive from it (FG4). |
 | [0012](0012-awa-route-deterministic-in-engine-front-door.md) | Draft — 2026-08-06 | Add a deterministic, in-engine `awa_route` front door with a pinned closed `awa-route/v1` schema (explicit reject branch; `executed`/`authorized` literal false on every branch) and a finish-recognizer parity gate (FG1/FG2). |
 | [0013](0013-routing-strategy-graduation.md) | Draft — 2026-08-06 | Ship deterministic-first routing; graduate an out-of-engine router fallback only if it beats the frozen 96-run scorecard — gated + measured, never a dependency (complements ADR 0012). |
@@ -76,7 +76,7 @@ lands — this directory already follows the reference shape it derived from.
 | [0016](0016-dynamic-resources-module-boundary.md) | Draft — 2026-08-06 | Expose engine-owned live state via a new `engine/mcp_dynamic_resources.py`, preserving `mcp_resources.py` zero-I/O purity; excludes consumer conversational state; persists no user text. |
 | [0017](0017-adopt-and-reconcile-doc-warden-conventions.md) | Draft — 2026-08-06 | Adopt doc-warden's canonical conventions for new artifacts and reconcile AWA's five local divergences per-divergence; index-column migration deferred to an operator-gated POC 3d. |
 | [0018](0018-tooling-subtraction-policy.md) | Draft — 2026-08-06 | Subtract no MCP surface now (all 9 tools used/tested; the one resource is retained); establish a durable proof-to-kill rule for any future removal. |
-| [0019](0019-fast-forward-primary-carve-out.md) | Draft — 2026-08-21 | Allow a single `git merge --ff-only` of the current branch to its tracked upstream on a protected primary as an additive deny→allow carve-out (ADR 0001 lineage), delegating runtime safety to git's `--ff-only` guarantee; every other merge form and all fetch/push/pull stay denied (ADR 0010). |
+| [0019](0019-fast-forward-primary-carve-out.md) | Accepted — 2026-08-23 | Allow one exact configured-upstream fetch plus one clean upstream-bound `merge --ff-only --no-overwrite-ignore` as state-aware decision-layer maintenance exceptions; all development and unnecessary Git maintenance remain denied. |
 
 ## Related conventions
 

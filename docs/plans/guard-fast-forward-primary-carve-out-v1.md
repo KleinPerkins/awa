@@ -1,22 +1,23 @@
 # Guard Fast-Forward Primary Maintenance Carve-Out — refresh and advance a protected primary without turning it into a workspace
 
 - **Version:** v1
-- **Status:** DRAFT — 2026-08-21
+- **Status:** ACCEPTED — 2026-08-23
 - **Date:** 2026-08-21
 - **Owning repository:** `KleinPerkins/awa` (`~/dev/capabilities/awa`)
 - **Plan-type:** agentic-execution
-- **Relates to:** ADR 0001 (additive-only mutation-scope doctrine), draft ADR 0010
-  (remote Git policy), draft ADR 0019 (primary fast-forward policy), and
+- **Relates to:** ADR 0001 (additive-only mutation-scope doctrine), accepted ADR 0010
+  (remote Git policy), accepted ADR 0019 (primary maintenance policy), and
   `docs/plans/git-command-policy-hardening-v1.md`
 - **Review provenance:** Refined against AWA `main` @ `9737d3d` and Skills `main` @
   `3a13f72` using the four-test `plan-refine` method plus a Critical-band review swarm
   (one probe, four territory reviewers, one verifier), then conflict-reconciled against
-  AWA `main` @ `01053f6` (a docs-only ADR renumbering change). No implementation has
-  started.
-- **Governance blocker:** This plan may remain a mutable draft, but it MUST NOT become
-  ACCEPTED and Task 1 MUST NOT start until draft ADRs 0010 and 0019 are revised in
-  lockstep to authorize the maintenance boundary below. This `plan-refine` pass did not
-  have authority to edit either ADR.
+  AWA `main` @ `01053f6` (a docs-only ADR renumbering change), then reconciled in
+  lockstep with ADRs 0010/0019 and revalidated before owner acceptance. No
+  implementation has started.
+- **Approval record:** ADRs 0010 and 0019 were reconciled and accepted with this plan;
+  doc-warden and final design review passed on 2026-08-23; the owner explicitly accepted
+  the plan. Acceptance authorizes no implementation, release, Skills promotion, or live
+  install—each remains behind the named separate gate below.
 
 **Goal:** Let an agent perform the two Git operations actually required to keep a clean
 protected primary checkout current with its configured upstream:
@@ -44,9 +45,9 @@ deny.
 contract-freeze UAT, runnerless PR automation, and the governed `KleinPerkins/skills`
 Flavor-2 release binding.
 
-> **For agentic workers:** Do not implement this draft. A separate explicit operator
-> instruction is required after the governance blocker above is closed and the owner
-> accepts this plan. Execute work items in order and use each checkbox as the work ledger.
+> **For agentic workers:** This plan is accepted and frozen. Do not edit it. A separate
+> explicit operator instruction is required before Task 1. Once authorized, execute work
+> items in order and use each checkbox as the work ledger.
 
 ---
 
@@ -85,8 +86,8 @@ Flavor-2 release binding.
 - Keep the frozen permission schema (`contracts/awa-contract.v1.json`), host modes, host
   policy, and Cursor hook wiring unchanged.
 - Use Python 3.9-compatible syntax in the hook heredoc and Bash 3.2-compatible shell.
-- Keep accepted plans/ADRs byte-identical. Draft ADR reconciliation is a separate,
-  explicitly authorized documentation action before this plan can be accepted.
+- Keep this accepted plan and accepted ADRs 0010/0019 byte-identical after the approval
+  commit. Any material change requires the governed successor artifact.
 
 ## 1. Purpose
 
@@ -359,16 +360,17 @@ Unrelated primary mutations keep the existing generic denial.
 
 Before Task 1:
 
-- [ ] Revise draft ADR 0010 so its remote-command rule distinguishes unnecessary remote
+- [x] Revise draft ADR 0010 so its remote-command rule distinguishes unnecessary remote
   dry-runs/push from the accepted upstream-fetch maintenance operation and removes the
   false linked-worktree-isolation rationale.
-- [ ] Revise draft ADR 0019 from "merge-only" to the exact fetch + fast-forward lane,
+- [x] Revise draft ADR 0019 from "merge-only" to the exact fetch + fast-forward lane,
   including live-state preconditions and accepted configured Git effects.
-- [ ] Re-run doc-warden and design review on the ADR/plan set.
-- [ ] Obtain explicit owner acceptance plus a separate instruction to implement.
+- [x] Re-run doc-warden and design review on the ADR/plan set (passed 2026-08-23).
+- [x] Obtain explicit owner acceptance (received 2026-08-23).
+- [ ] Obtain a separate explicit instruction to implement.
 
-If any box is open, STOP. No source, test, version, release, Skills, or host change is
-authorized.
+While the final box is open, STOP. The plan is accepted, but no source, test, version,
+release, Skills, or host change is authorized.
 
 ### Task 1: Prove the maintenance state envelope offline
 
@@ -599,7 +601,7 @@ clean and current; no orphan branch/worktree state remains.
 
 ## 6. Acceptance criteria
 
-- The governing draft ADRs and this plan describe the same two-operation maintenance
+- The governing accepted ADRs and this plan describe the same two-operation maintenance
   boundary before any implementation begins.
 - On an included primary, only canonical upstream fetch and upstream-bound ff-only merge
   allow, and only in the proven live state.

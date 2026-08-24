@@ -1,221 +1,134 @@
-# ADR 0019: Fast-forward-only update of a protected primary's current branch is an allowed carve-out
-Status: draft — 2026-08-21
+# ADR 0019: Clean protected primaries may refresh and fast-forward their configured upstream
+Status: accepted — 2026-08-23 (owner sign-off; design PR #120)
 
 ## Context
 
 AWA's shell guard denies every mutating command on an INCLUDED PRIMARY checkout (mode ON):
 `engine/guard.py::decide_shell` and its kernel mirror `kernel/hooks/worktree-guard.sh` (`check_probe`)
 classify the command, and a confirmed mutation on a protected primary returns an enforced `deny`
-(`engine/guard.py` line ~966; hook line ~1184). `_GITMUT` (guard.py line ~32) contains `merge`, and
-`_git_is_mutating` has no read-only predicate for it, so **every** `git merge` form — including
-`git merge --ff-only origin/main` — classifies as mutating and is denied on a protected primary.
+after ADR 0001's target-path narrowing. `fetch`, `pull`, and `merge` are all honestly classified as
+mutating, so the guard also blocks the two operations needed to keep a primary current after work
+merges elsewhere.
 
-This produces a recurring, legitimate-work failure. An agent does its work in a linked Safe
-Workspace (worktree) or the change is merged remotely, and then the local **primary** checkout's
-`main` cannot be advanced to the merged commit: the fast-forward `git merge --ff-only origin/main`
-is denied, so the merged work never lands locally. The only escapes today are an operator relaunch
-in a Safe Workspace or the `DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1` environment override (guard.py line
-~925; hook line ~1002). Both require an operator to intervene for what is, by construction, the
-safest possible primary mutation — the sibling plan
-`docs/plans/git-command-policy-hardening-v1.md` even performs exactly this fast-forward, but only
-behind that operator-set override (its Task 5, Step 7). Agents repeatedly retry the denied command
-(the very anti-pattern the deny message warns against), stall, or churn the operator.
+The original draft allowed only a shape-matched `git merge --ff-only` and required fetch in a linked
+Safe Workspace. Fresh review found that boundary both incomplete and illusory: linked worktrees
+share the primary's common Git directory, objects, remote-tracking refs, and fetch bookkeeping. The
+detour does not isolate fetch's effects, while shape-only merge recognition does not prove the
+current branch, upstream, cleanliness, or history relationship.
 
-A fast-forward is uniquely safe among mutations, and AWA already guarantees the precondition that
-makes it safe: because the guard forbids **all other** mutations on a protected primary, a protected
-primary is expected to have no local dirty work to clobber. This ADR records the decision to add a
-narrow, additive carve-out — in the exact spirit of ADR 0001 — that lets an agent fast-forward a
-protected primary's current branch to its already-present tracked upstream without an operator step,
-while every other primary mutation (including every non-fast-forward merge) stays denied.
-
-Governing precedents:
-- **ADR 0001** (target-path-aware mutation scope): a precise check may **only** ever convert an
-  existing `deny` into an `allow` when the command is affirmatively proven safe; it must never turn
-  an `allow` into a `deny` or weaken the fallback, and **any** uncertainty collapses back to the
-  conservative cwd-only deny. One command, one decision. This carve-out is a new instance of that
-  additive-only doctrine.
-- **ADR 0010** (remote dry-runs remain mutating): all `git fetch`/`git push` forms — including
-  `--dry-run` — stay mutating on protected primaries because they enter object transport and can run
-  hooks/helpers and maintenance writes. This ADR does not disturb that: the carve-out is
-  fast-forward-**merge**-only and adds no remote/network allowance.
+AWA's product boundary is protection of unshared work, not a sandbox for trusted repository Git
+configuration. The useful maintenance boundary is therefore a clean, attached, idle primary with
+one configured remote-tracking upstream, exact closed command forms, and conservative local state
+inspection.
 
 ## Decision
 
-1. **A single, additive fast-forward carve-out.** On an INCLUDED PRIMARY checkout, a shell command
-   whose one segment is exactly a fast-forward-only merge of the current branch to its already-present
-   tracked upstream is **allowed** — converting the existing `deny` into an `allow`. Like ADR 0001,
-   this is additive-only: it may only ever turn a `deny` into an `allow`; it never converts an
-   `allow` into a `deny`, never weakens any existing deny, and **any** deviation or uncertainty
-   resolves back to the enforced deny.
+1. **Allow exactly two maintenance operations.** On an INCLUDED PRIMARY checkout, the decision
+   layer may convert the existing deny into allow for:
+   - `git fetch` or `git fetch <configured-upstream-remote>`; and
+   - `git merge --ff-only --no-overwrite-ignore` with no ref, `@{u}`, `@{upstream}`, or the exact
+     computed short name of the same configured upstream.
 
-2. **Implemented at the decision layer, not as a "read-only" merge classification.** A fast-forward
-   genuinely mutates: it advances a branch ref and updates the index and working tree. `merge`
-   therefore stays in `_GITMUT` and `classify_mutating(...)`/`_git_is_mutating(...)` continue to
-   report a fast-forward merge as **mutating** (True). The allowance is a **named, bounded exception
-   at the decision layer** — `engine/guard.py::decide_shell` and the kernel `check_probe` mirror —
-   evaluated inside the existing "mutating on an included primary" branch, parallel to the ADR 0001
-   target-narrowing and **before** the enforced deny. This keeps classification honest and confines
-   the allowance to the one decision site that protects primaries, rather than leaking it into every
-   consumer of `classify_mutating` and every context.
+2. **Keep both operations classified as mutating.** `fetch` and `merge` remain in `_GITMUT` and
+   continue to return true from the mutating classifier. The exception exists only inside
+   `decide_shell` and the kernel `check_probe`, immediately before ADR 0001 target narrowing and the
+   enforced included-primary deny.
 
-3. **Exact closed grammar (deny-by-default).** The carve-out fires **only** for a command matching
-   all of the following; every other form stays denied:
-   - **Exactly one segment.** Any control operator (`;`, `&&`, `||`, `|`, `&`, newline, subshell) or
-     any redirect operator disqualifies the command (ADR 0001 §4: one command, one decision).
-   - **A bare `git` program.** Only leading `VAR=value` assignments may precede `git`; any prefix
-     wrapper (`sudo`, `env`, `nice`, `timeout`, …) disqualifies the command — a wrapper such as
-     `env -C <dir>` could relocate the operation and launder the target.
-   - **No git global option at all (v1).** Any global option disqualifies the command — in
-     particular `-C`, `--git-dir`, `--work-tree`, `--namespace`, `--super-prefix` (target
-     redirection) and `-c`, `-p`/`--paginate`, `--config-env=` (config/pager injection, already
-     treated as read-only-blocking by `_git_global_args_block_readonly`). The command must operate on
-     the shell cwd's own primary.
-   - **Subcommand exactly `merge`, with `--ff-only` present and no other flag.** Any additional flag
-     disqualifies the command — e.g. `--no-ff`, `--ff`, `-X`/`--strategy*`, `--squash`, `-m`,
-     `-S`/`--gpg-sign`, `--no-verify`, `--autostash`, `--stat`, `-e`, `--`.
-   - **At most one positional ref, of an allowlisted upstream shape.** Permitted: zero positional
-     refs (git uses the branch's configured upstream), `@{upstream}`, `@{u}`, or a single
-     remote-tracking-shaped token matching `^[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+$` with no leading `-`
-     and no glob metacharacter (`*`, `?`, `[`). A bare local branch name, a revision expression
-     (`HEAD~1`), two refs, or a globbed ref all disqualify the command.
+3. **Require a proven maintenance context before either allow.** The checkout must be the already
+   classified included primary, clean (including untracked files), attached to a local branch, idle
+   from merge/rebase/cherry-pick/revert/am/sequencer/bisect state, and configured with exactly one
+   remote-tracking upstream. Configured fetch destinations must stay within that upstream remote's
+   tracking namespace and map its source branch to the expected destination.
 
-4. **Runtime fast-forward safety rests on git's own `--ff-only` guarantee; the guard proves only the
-   shape.** The static classifier cannot know from tokens alone whether a given invocation is truly a
-   fast-forward — that depends on the live commit graph. It does not need to. `git merge --ff-only`
-   is git's hard runtime invariant: it **either** fast-forwards the current branch to a descendant,
-   **or** is a no-op (`Already up to date`), **or** aborts with no mutation
-   (`Not possible to fast-forward, aborting`); and it refuses (does not overwrite) when local changes
-   would be clobbered. It never creates a merge commit, resolves a conflict, or rewrites history. The
-   guard therefore allows the proven-safe **shape** and lets git enforce the runtime property; it
-   does **not** re-verify ancestry or working-tree cleanliness in the hot path.
+4. **Bind every operand to that upstream.** An optional fetch remote must byte-equal the configured
+   upstream remote. An optional merge ref must be one of the three exact accepted spellings and
+   resolve to the same full remote-tracking ref. Before merge, `HEAD` must equal or be ancestral to
+   the live upstream. Git's `--ff-only` re-enforces ancestry atomically, while
+   `--no-overwrite-ignore` prevents overwriting ignored untracked files.
 
-5. **fetch, push, and pull stay denied on protected primaries.** Consistent with ADR 0010, all
-   fetch/push forms remain mutating; `git pull --ff-only` remains denied because it embeds a fetch.
-   The carve-out is fast-forward-**merge**-only against a ref **already present** in the local object
-   store. This is sufficient in practice because AWA's linked worktrees share the primary's common
-   `.git` object store and `refs/remotes/*` (a worktree's `git rev-parse --git-common-dir` resolves
-   to the primary `.git`): an agent fetches from the Safe Workspace (already allowed there), which
-   updates the shared `refs/remotes/origin/*` and downloads the objects, and only the final
-   `git merge --ff-only` needs to run in the primary.
+5. **Use a closed command and environment grammar.** Only one shell segment beginning with bare
+   `git` qualifies. Leading assignments, wrappers, executable paths, Git global options, redirects,
+   control operators, substitutions, extra flags/operands, and visible repository-retargeting or
+   config-injection Git environment variables disqualify the command. Any parse, subprocess,
+   timeout, output, or state uncertainty falls through to deny.
 
-6. **The operator override and Safe-Workspace recovery are unchanged.** `DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1`
-   and the "relaunch in a Safe Workspace" recovery path remain exactly as they are. The carve-out
-   removes the need for them **only** for the safe fast-forward case; every other primary mutation
-   still requires them.
+6. **Accept normal configured Git behavior.** Fetch may update common-repository state and invoke
+   configured transport, credential, hook, tag-following, and maintenance behavior. Merge may update
+   the branch, index, worktree, reflog, and `ORIG_HEAD`, and invoke configured hooks, fsmonitor,
+   submodule behavior, and content filters. AWA does not sandbox those trusted components; the
+   caller must verify clean status after each allowed command before continuing.
 
-7. **Engine/kernel parity and kernel-first are preserved.** The carve-out is implemented identically
-   in `engine/guard.py::decide_shell` and the kernel hook's `check_probe` (fed by a `safe_ff` signal
-   computed in the hook's embedded Python, parallel to `mut_targets`), proven equal by the shared
-   corpus, the live-hook parity tests, and the contract-freeze UAT. The kernel hook does not import
-   the engine, hook-internal failure still degrades to allow, and the frozen permission schema
-   (`allow`/`ask`/`deny`) is unchanged.
+7. **Preserve the wider deny boundary.** `git pull`, every push, fetch with any option, arbitrary
+   remote/URL/refspec fetch, explicit prune/tag/submodule/maintenance operations, ordinary merge,
+   branch switching, divergence repair, history rewrite, cleanup, and every development command
+   remain denied on a protected primary.
+
+8. **Preserve kernel-first parity.** Engine, source hook, and installed hook consume one shared
+   command/state corpus but remain independent implementations. The kernel imports no engine code;
+   genuine hook-internal failure behavior, the permission schema, host policy/modes, and the explicit
+   operator override remain unchanged.
 
 ## Why
 
-A fast-forward is the one mutation whose safety AWA can prove from first principles under its own
-invariant:
-
-- **No dirty work to lose.** The guard already denies every other mutation on a protected primary,
-  so the primary is expected clean. Even if it were not, `git merge --ff-only` aborts rather than
-  overwrite local changes.
-- **No history rewrite, no merge commit, no conflict.** `--ff-only` can only advance a pointer to a
-  descendant, no-op, or abort. It is not a merge in the conflict-producing sense.
-- **Reversible.** A fast-forward is recorded in the reflog and leaves `ORIG_HEAD`; it is undoable
-  (`git reset --hard ORIG_HEAD`). This is categorically unlike the irrecoverable destruction AWA's
-  boundary exists to prevent (e.g. `rm -rf .git/objects`, which ADR 0001 §2 explicitly protects).
-
-Residual risks, named and ruled on rather than assumed away:
-
-- **`post-merge` hook execution.** A fast-forward runs the repository's own `post-merge` hook if one
-  exists. This is the operator's **own** in-repo code executing a change the operator's history
-  already authorizes — not a network/remote surface. It is distinct from ADR 0010's `pre-push`
-  concern, where a dry-run reaches transport/credentials/remote helpers. AWA's boundary protects a
-  primary's tracked content from accidental clobbering, not the operator from their own configured
-  hooks. Accepted, not blocked.
-- **Fast-forward to an unintended but genuinely-descendant ref.** Constraining the accepted ref to
-  the tracked-upstream shape (Decision 3) plus the operation's reversibility bound this to a low,
-  recoverable risk. Even a "wrong" fast-forward advances history non-destructively and is undoable.
-- **Reliance on git's `--ff-only` semantics.** The safety argument depends on `--ff-only` behaving as
-  documented; the Live-state verification record and the plan's offline behavior-proof test pin that
-  behavior to the host git version so a future change is caught rather than silently trusted.
+- **Maintenance requires both refresh and advancement.** Allowing only merge leaves the recurring
+  fetch denial intact; moving fetch to a linked worktree changes location but not the shared Git
+  state it updates.
+- **Live state—not branch-name convention—separates maintenance from development.** Cleanliness,
+  one configured remote-tracking upstream, safe refspec destinations, and no local-ahead/divergent
+  history are the safety boundary. Default-branch discovery or branch switching adds no protection.
+- **Git supplies the final atomic branch guarantee.** `--ff-only` yields an upstream-descendant
+  fast-forward, a no-op, or refusal; it cannot create a merge commit or resolve divergence.
+  `--no-overwrite-ignore` closes Git's default ignored-file overwrite behavior.
+- **Classification remains truthful.** A decision-layer exception solves the operator problem
+  without teaching other consumers that fetch or merge is read-only.
+- **Trusted Git configuration is not a second threat model.** Hooks, filters, fsmonitor, transport,
+  credentials, and maintenance already run under repository/operator configuration in linked
+  worktrees. Sandboxing them would create a separate product and would break legitimate repositories.
 
 Alternatives considered:
 
-- **A `_git_merge_is_readonly()` predicate wired into `_git_is_mutating` (like the branch/remote/
-  config predicates) — rejected.** It is simpler and structurally parallel, but it would label a
-  ref-moving, working-tree-updating operation "read-only," which is false; it would allow the
-  fast-forward in **every** context and for **every** consumer of `classify_mutating`, not just at
-  the primary-protection decision; and it would erode the honesty of the classifier that the rest of
-  the guard depends on. The decision-layer carve-out (Decision 2) gets the same operator outcome
-  while keeping `merge` classified as the mutation it is.
-- **A belt-and-suspenders runtime precheck (`git merge-base --is-ancestor HEAD <upstream>` + a
-  clean-tree check) inside `decide_shell` — considered, deferred.** `decide_shell` already shells out
-  to git, so this is feasible, but `--ff-only` already enforces both properties atomically at
-  execution time, a pre-check would add latency to the hot path and a TOCTOU gap of its own, and it
-  duplicates a guarantee git makes airtight. Deferred; a future ADR may add it if a concrete gap
-  emerges.
-- **Allowing `git pull --ff-only` or a narrow fetch on the primary — rejected.** `pull` embeds a
-  fetch, and ADR 0010 keeps all fetch forms denied (object transport, hooks, maintenance writes). The
-  shared-object-store worktree path (Decision 5) removes the need to fetch on the primary at all.
-- **Widening the grammar (a `-C` to another primary, `--autostash`, arbitrary refs) — rejected for
-  v1.** Each expands the proof obligation; deny-by-default with a tight closed grammar is the ADR 0001
-  posture. Any widening is a deliberate, higher-numbered ADR, not drift.
-- **Leaving the status quo (operator override only) — rejected.** It makes the safest primary
-  mutation require the same manual escape as the dangerous ones, which is exactly what traps agents
-  and burns operator attention; it also trains agents to reach for `DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1`,
-  a blunt instrument that disables protection for the whole session.
+- **Merge-only allowance — rejected.** It solves only half of the maintenance loop and rests on the
+  false premise that linked-worktree fetch isolates common Git writes.
+- **`git pull --ff-only` — rejected.** Two atomic operations provide fresh checks and distinct,
+  understandable failure feedback.
+- **Immutable OID handoff or cross-command lock — rejected.** The guard checks the live upstream
+  before merge and `--ff-only` safely handles a moving ref as descendant, no-op, or refusal.
+- **Hook/filter/helper suppression — rejected.** It pursues a sandbox outside AWA's protection
+  charter and can produce an incorrect working tree for repositories that rely on configured Git
+  behavior.
+- **Shape-only matching — rejected.** It cannot prove the active branch, upstream identity,
+  cleanliness, safe fetch destinations, or local history.
+- **Generic maintenance mode — rejected.** The two exact operations are sufficient; broader verbs
+  would expand the mutation surface without a current operator need.
 
 ## Consequences
 
-- An agent can land already-merged/already-present work into the local primary's current branch with
-  a plain `git merge --ff-only`, with no operator relaunch and no session-wide override — removing the
-  recurring stuck state.
-- **No existing deny is weakened.** Every non-fast-forward merge, every extra flag, every chained,
-  redirected, wrapper-prefixed, target-redirected, or config-injecting form, and every bare-branch or
-  revision-expression ref still denies on a protected primary. The shared corpus's near-miss deny
-  cases are the regression mechanism (enumerated in the companion plan).
-- `classify_mutating`/`_git_is_mutating` remain honest: a fast-forward merge is still reported as
-  mutating; only `decide_shell`/`check_probe` grant the additive allowance. Fast-forward-allow cases
-  are therefore verified as **decision-layer** allows (a primary repo where `decide_shell(...)
-  .permission == "allow"` while `classify_mutating(...) is True`), never by moving them into the
-  read-only corpus.
-- ADR 0010 is intact: fetch/push/pull unchanged on protected primaries.
-- `DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1` and Safe-Workspace recovery are unchanged and still required
-  for every non-fast-forward primary mutation.
-- Engine and kernel mirrors, the shared corpus, and the contract-freeze UAT must agree; the frozen
-  contract schema does not change and no new dependency enters the hook path.
-- A future material change (widening the grammar, adding the runtime pre-check, or any remote
-  allowance) requires a higher-numbered ADR that supersedes the relevant decision here; this ADR is
-  byte-immutable once accepted (doc-warden POLICY §9).
+- Agents can keep a clean protected primary current through one upstream refresh followed by one
+  upstream-bound fast-forward, without a session-wide bypass or worktree relocation.
+- Dirty, detached, untracked, in-progress, local-ahead/divergent, unsafe-refspec, wrong-target,
+  wrapped, chained, redirected, environment-retargeted, or malformed cases deny before execution.
+- Configured Git behavior may still leave residue; the caller must check status after each operation,
+  stop on a non-clean result, preserve it, and diagnose from a Safe Workspace.
+- Fetch and merge remain mutating; only the primary-protection decision sites know this exception.
+- The frozen permission contract, policy/modes, override, Cloud behavior, and kernel-first boundary
+  do not change.
+- Engine, source-hook, installed-hook, and offline Git behavior evidence become release gates.
+- A broader command, target, or authority boundary requires a new ADR and successor plan.
 
 ## Live-state verification record
 
-Verified 2026-08-21 against the AWA primary checkout at `9737d3d` (branch `main`), `engine.__version__
-= 1.5.2`, latest release tag `v1.5.2`:
+Verified 2026-08-21 and revalidated 2026-08-23 against AWA `origin/main` at `01053f6`,
+`engine.__version__ = 1.5.2`, release tag `v1.5.2`, and Apple Git `2.50.1`:
 
-- `engine/guard.py`: `_MUT`/`_GITMUT` at lines ~29–35 — `_GITMUT` includes `merge`; `_git_is_mutating`
-  (line ~327) has no `merge` predicate, so a merge falls through to `return True` (mutating).
-  `decide_shell(cwd, command, policy_path, *, allow_primary=False)` (line ~918) issues the enforced
-  `deny` (line ~966) after `classify_mutating` (line ~528) and the ADR 0001 additive narrowing via
-  `_collect_precise_targets` (lines ~667/958). For `git merge --ff-only`, `_collect_precise_targets`
-  resolves the target to the cwd primary itself, so it does not already allow — confirming the
-  carve-out must be a distinct check ahead of the deny.
-- `kernel/hooks/worktree-guard.sh`: `_GITMUT` at lines ~146–147 (includes `merge`); the embedded
-  Python computes and prints `is_mutating`/`has_mut_targets`/`mut_targets` (lines ~600, ~818,
-  ~858–864); the bash `check_probe` applies the additive narrowing (lines ~1172–1181) and the
-  enforced deny (lines ~1184–1187); `DEV_WORKTREE_GUARD_ALLOW_PRIMARY=1` short-circuits to allow at
-  line ~1002. This is the mirror insertion site for the `safe_ff` signal.
-- Shared corpus `engine/tests/git_guard_command_corpus.py` is consumed by the classifier, decision,
-  and live-hook tests; contract-freeze UAT is `kernel/checks/awa-contract-freeze.sh`; parity is
-  enforced by `engine/tests/test_guard_hook_wrappers.py`.
-- Linked-worktree shared store confirmed: a `dev-worktree.sh ensure` Safe Workspace's
-  `git rev-parse --git-common-dir` resolves to the primary `…/awa/.git`, so `objects/` and
-  `refs/remotes/*` are shared with the primary.
-- git `--ff-only` behavior is pinned to Apple Git `2.50.1` (the host baseline recorded in ADR 0010):
-  fast-forward on a descendant, `Already up to date` no-op on an ancestor/equal ref, abort with no
-  mutation on divergence, and refusal to overwrite a dirty working tree. The companion plan's Task 1
-  reproduces these in an offline fixture and records the exact `git --version` so a later divergence
-  is re-evaluated rather than mistaken for a classifier defect.
+- `engine/guard.py` and `kernel/hooks/worktree-guard.sh` independently keep `fetch`, `pull`, and
+  `merge` mutating and deny confirmed included-primary mutations after ADR 0001 target narrowing.
+- The AWA primary and linked Safe Workspace resolve the same common directory and
+  `refs/remotes/origin/main` path.
+- Git documentation confirms ordinary fetch writes, configured helper/hook behavior,
+  `--ff-only` ancestry semantics, and `--no-overwrite-ignore` protection.
+- The companion plan records the closed grammar, exact local inspections, shared parity corpus,
+  offline behavior proof, installed-hook UAT, release sequencing, and caller feedback contract.
 
-Cross-links: ADR 0001 (additive-only mutation-scope doctrine this carve-out extends) and ADR 0010
-(fetch/push remain mutating; the boundary this carve-out is careful not to cross).
+Cross-links: ADR 0001 (additive-only target-aware narrowing), ADR 0010 (remote classification and
+the sole fetch exception), and
+`docs/plans/guard-fast-forward-primary-carve-out-v1.md` (execution and acceptance ledger).
