@@ -26,6 +26,11 @@ from engine import guard as engine_guard
 from engine.tests.git_guard_command_corpus import (
     GIT_MUTATING_FAMILY_COMMANDS,
     GIT_READONLY_FAMILY_COMMANDS,
+    PRIMARY_MAINTENANCE_ALLOW_SHAPES,
+    PRIMARY_MAINTENANCE_NEAR_MISS_DENY,
+    PRIMARY_MAINTENANCE_STATE_ALLOW_CASES,
+    PRIMARY_MAINTENANCE_STATE_CASES,
+    PRIMARY_MAINTENANCE_UNRELATED_ALLOW,
 )
 
 _REPO = Path(__file__).resolve().parent.parent.parent
@@ -67,8 +72,10 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         self._git("-C", str(self.repo), "add", "f")
         self._git("-C", str(self.repo), *_IDENT, "commit", "-qm", "init")
         self._git("-C", str(self.repo), "branch", "-M", "main")
-        self._git("-C", str(self.repo), "remote", "add", "origin",
-                  "git@github.com:KleinPerkins/awa-hook-wrap.git")
+        self.remote = self.root / "origin.git"
+        self._git("init", "-q", "--bare", str(self.remote))
+        self._git("-C", str(self.repo), "remote", "add", "origin", str(self.remote))
+        self._git("-C", str(self.repo), "push", "-q", "-u", "origin", "main")
         self.policy = self.root / "policy.yml"
         self.policy.write_text(_POLICY.format(root=self.root), encoding="utf-8")
 
@@ -76,13 +83,29 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         self._tmp.cleanup()
 
     def _git(self, *args):
-        subprocess.run(["git", *args], check=True, capture_output=True,
-                       text=True, env=self._git_env)
+        return subprocess.run(["git", *args], check=True, capture_output=True,
+                              text=True, env=self._git_env)
 
-    def _guard(self, command: str) -> dict:
-        return self._guard_payload({"cwd": str(self.repo), "command": command})
+    def _guard(
+        self,
+        command: str,
+        *,
+        repo: Path | None = None,
+        guard_path: Path = _GUARD,
+        env_updates: dict | None = None,
+    ) -> dict:
+        return self._guard_payload(
+            {"cwd": str(repo or self.repo), "command": command},
+            env_updates=env_updates,
+            guard_path=guard_path,
+        )
 
-    def _guard_payload(self, payload: dict, env_updates: dict | None = None) -> dict:
+    def _guard_payload(
+        self,
+        payload: dict,
+        env_updates: dict | None = None,
+        guard_path: Path = _GUARD,
+    ) -> dict:
         env = dict(os.environ)
         for name in (
                 "CURSOR_BACKGROUND_AGENT", "CURSOR_CLOUD_AGENT", "IS_BACKGROUND_AGENT",
@@ -93,9 +116,176 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         env["AWA_POLICY"] = str(self.policy)
         if env_updates:
             env.update(env_updates)
-        proc = subprocess.run([str(_GUARD)], input=json.dumps(payload), capture_output=True,
+        proc = subprocess.run([str(guard_path)], input=json.dumps(payload), capture_output=True,
                               text=True, env=env)
         return json.loads(proc.stdout)
+
+    def _make_maintenance_repo(self, name: str):
+        repo = self.root / name
+        remote = self.root / "{0}.git".format(name)
+        repo.mkdir()
+        self._git("init", "-q", str(repo))
+        (repo / "f").write_text("#\n", encoding="utf-8")
+        self._git("-C", str(repo), "add", "f")
+        self._git("-C", str(repo), *_IDENT, "commit", "-qm", "init")
+        self._git("-C", str(repo), "branch", "-M", "main")
+        self._git("init", "-q", "--bare", str(remote))
+        self._git("-C", str(repo), "remote", "add", "origin", str(remote))
+        self._git("-C", str(repo), "push", "-q", "-u", "origin", "main")
+        return repo, remote
+
+    def _advance_remote(self, remote: Path, name: str) -> None:
+        source = self.root / "{0}-source".format(name)
+        self._git("clone", "-q", str(remote), str(source))
+        (source / "remote.txt").write_text("remote\n", encoding="utf-8")
+        self._git("-C", str(source), "add", "-A")
+        self._git("-C", str(source), *_IDENT, "commit", "-qm", "remote")
+        self._git("-C", str(source), "push", "-q", "origin", "main")
+
+    def _apply_primary_maintenance_state(
+        self,
+        repo: Path,
+        remote: Path,
+        case: str,
+    ) -> None:
+        git_dir = repo / ".git"
+        if case == "dirty_tracked":
+            (repo / "f").write_text("dirty\n", encoding="utf-8")
+        elif case == "dirty_untracked":
+            (repo / "untracked.txt").write_text("dirty\n", encoding="utf-8")
+        elif case == "dirty_skip_worktree":
+            self._git("-C", str(repo), "update-index", "--skip-worktree", "f")
+            (repo / "f").write_text("hidden dirty\n", encoding="utf-8")
+            self.assertEqual(
+                self._git("-C", str(repo), "status", "--porcelain").stdout,
+                "",
+            )
+        elif case == "dirty_assume_unchanged":
+            self._git("-C", str(repo), "update-index", "--assume-unchanged", "f")
+            (repo / "f").write_text("hidden dirty\n", encoding="utf-8")
+            self.assertEqual(
+                self._git("-C", str(repo), "status", "--porcelain").stdout,
+                "",
+            )
+        elif case == "detached":
+            self._git("-C", str(repo), "checkout", "-q", "--detach")
+        elif case == "missing_upstream":
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "--unset-all", "branch.main.remote"],
+                capture_output=True,
+                env=self._git_env,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "--unset-all", "branch.main.merge"],
+                capture_output=True,
+                env=self._git_env,
+            )
+        elif case == "local_upstream":
+            self._git("-C", str(repo), "config", "branch.main.remote", ".")
+            self._git(
+                "-C",
+                str(repo),
+                "config",
+                "branch.main.merge",
+                "refs/heads/main",
+            )
+        elif case == "unsafe_fetch_destination":
+            self._git(
+                "-C",
+                str(repo),
+                "config",
+                "--unset-all",
+                "remote.origin.fetch",
+            )
+            self._git(
+                "-C",
+                str(repo),
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/heads/*",
+            )
+        elif case == "stale_fetch_mapping":
+            self._git(
+                "-C",
+                str(repo),
+                "config",
+                "--unset-all",
+                "remote.origin.fetch",
+            )
+            self._git(
+                "-C",
+                str(repo),
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/heads/release/*:refs/remotes/origin/release/*",
+            )
+        elif case == "local_ahead":
+            (repo / "local.txt").write_text("local\n", encoding="utf-8")
+            self._git("-C", str(repo), "add", "-A")
+            self._git("-C", str(repo), *_IDENT, "commit", "-qm", "local ahead")
+        elif case == "diverged":
+            (repo / "local.txt").write_text("local\n", encoding="utf-8")
+            self._git("-C", str(repo), "add", "-A")
+            self._git("-C", str(repo), *_IDENT, "commit", "-qm", "local side")
+            self._advance_remote(remote, "diverged-{0}".format(repo.name))
+            self._git("-C", str(repo), "fetch", "-q", "origin")
+        elif case == "merge_in_progress":
+            (git_dir / "MERGE_HEAD").write_text(
+                self._git("-C", str(repo), "rev-parse", "HEAD").stdout,
+                encoding="utf-8",
+            )
+        elif case == "rebase_in_progress":
+            (git_dir / "rebase-merge").mkdir()
+        elif case == "cherry_pick_in_progress":
+            (git_dir / "CHERRY_PICK_HEAD").write_text(
+                self._git("-C", str(repo), "rev-parse", "HEAD").stdout,
+                encoding="utf-8",
+            )
+        elif case == "revert_in_progress":
+            (git_dir / "REVERT_HEAD").write_text(
+                self._git("-C", str(repo), "rev-parse", "HEAD").stdout,
+                encoding="utf-8",
+            )
+        elif case == "am_in_progress":
+            (git_dir / "rebase-apply").mkdir()
+        elif case == "sequencer_in_progress":
+            (git_dir / "sequencer").mkdir()
+        elif case == "bisect_in_progress":
+            (git_dir / "BISECT_LOG").write_text("bisect\n", encoding="utf-8")
+        elif case in {"wrong_remote", "wrong_ref", "risky_environment"}:
+            pass
+        else:
+            self.fail("unknown primary-maintenance state case: {0}".format(case))
+
+    def _install_guard(self) -> Path:
+        home = self.root / "installed-home"
+        data = home / ".local" / "share"
+        config = home / ".config"
+        state = home / ".local" / "state"
+        for path in (home, data, config, state):
+            path.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ)
+        env.update(
+            {
+                "HOME": str(home),
+                "XDG_DATA_HOME": str(data),
+                "XDG_CONFIG_HOME": str(config),
+                "XDG_STATE_HOME": str(state),
+            }
+        )
+        subprocess.run(
+            [str(_REPO / "install.sh")],
+            cwd=str(_REPO),
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        installed = data / "awa" / "current" / "kernel" / "hooks" / "worktree-guard.sh"
+        self.assertTrue(installed.is_file())
+        return installed
 
     def test_wrapper_mutating_forms_deny(self):
         for cmd in ("nice -n 10 git commit -am x", "env -C /r git commit",
@@ -133,6 +323,134 @@ class TestBashGuardWrapperParity(unittest.TestCase):
             self.assertEqual(resp.get("permission"), "deny", cmd)
             self.assertIn("user_message", resp)
             self.assertIn("agent_message", resp)
+
+    def test_primary_maintenance_command_corpus_engine_source_installed_parity(self):
+        installed = self._install_guard()
+        for expected, commands in (
+            ("allow", PRIMARY_MAINTENANCE_ALLOW_SHAPES),
+            ("allow", PRIMARY_MAINTENANCE_UNRELATED_ALLOW),
+            ("deny", PRIMARY_MAINTENANCE_NEAR_MISS_DENY),
+        ):
+            for cmd in commands:
+                with self.subTest(expected=expected, cmd=cmd):
+                    engine = engine_guard.decide_shell(
+                        str(self.repo),
+                        cmd,
+                        str(self.policy),
+                    )
+                    source = self._guard(cmd)
+                    role_resolved = self._guard(cmd, guard_path=installed)
+                    self.assertEqual(engine.permission, expected, (cmd, engine.reason))
+                    self.assertEqual(source.get("permission"), expected, (cmd, source))
+                    self.assertEqual(
+                        role_resolved.get("permission"),
+                        expected,
+                        (cmd, role_resolved),
+                    )
+                    if expected == "deny":
+                        self.assertIn(
+                            engine.reason,
+                            {
+                                engine_guard._PRIMARY_MAINTENANCE_MESSAGES[
+                                    "unsupported_form"
+                                ],
+                                engine_guard._PRIMARY_MAINTENANCE_MESSAGES[
+                                    "wrong_upstream"
+                                ],
+                            },
+                            cmd,
+                        )
+                        for response in (source, role_resolved):
+                            self.assertEqual(
+                                response.get("user_message"),
+                                engine.reason,
+                                cmd,
+                            )
+                            self.assertEqual(
+                                response.get("agent_message"),
+                                engine.reason,
+                                cmd,
+                            )
+
+    def test_primary_maintenance_state_corpus_engine_source_installed_parity(self):
+        installed = self._install_guard()
+        for index, (case, cmd, reason_code) in enumerate(
+            PRIMARY_MAINTENANCE_STATE_CASES
+        ):
+            with self.subTest(case=case, cmd=cmd):
+                repo, remote = self._make_maintenance_repo(
+                    "maintenance-state-{0}".format(index)
+                )
+                self._apply_primary_maintenance_state(repo, remote, case)
+                env_updates = {"GIT_CONFIG_COUNT": "0"} if case == "risky_environment" else {}
+                with mock.patch.dict(os.environ, env_updates):
+                    engine = engine_guard.decide_shell(
+                        str(repo),
+                        cmd,
+                        str(self.policy),
+                    )
+                source = self._guard(
+                    cmd,
+                    repo=repo,
+                    env_updates=env_updates,
+                )
+                role_resolved = self._guard(
+                    cmd,
+                    repo=repo,
+                    guard_path=installed,
+                    env_updates=env_updates,
+                )
+                message = engine_guard._PRIMARY_MAINTENANCE_MESSAGES[reason_code]
+                self.assertEqual(engine.permission, "deny", (case, engine.reason))
+                self.assertEqual(engine.reason, message, case)
+                for response in (source, role_resolved):
+                    self.assertEqual(response.get("permission"), "deny", (case, response))
+                    self.assertEqual(response.get("user_message"), message, case)
+                    self.assertEqual(response.get("agent_message"), message, case)
+
+    def test_primary_fetch_state_allow_corpus_engine_source_installed_parity(self):
+        installed = self._install_guard()
+        for index, (case, cmd) in enumerate(PRIMARY_MAINTENANCE_STATE_ALLOW_CASES):
+            with self.subTest(case=case, cmd=cmd):
+                repo, remote = self._make_maintenance_repo(
+                    "maintenance-fetch-state-{0}".format(index)
+                )
+                self._apply_primary_maintenance_state(repo, remote, case)
+                engine = engine_guard.decide_shell(
+                    str(repo),
+                    cmd,
+                    str(self.policy),
+                )
+                source = self._guard(cmd, repo=repo)
+                role_resolved = self._guard(
+                    cmd,
+                    repo=repo,
+                    guard_path=installed,
+                )
+                self.assertEqual(engine.permission, "allow", (case, engine.reason))
+                self.assertEqual(source, {"permission": "allow"}, case)
+                self.assertEqual(role_resolved, {"permission": "allow"}, case)
+
+    def test_hook_internal_parser_failure_still_fails_open(self):
+        shim_dir = self.root / "python-failure-shim"
+        shim_dir.mkdir()
+        shim = shim_dir / "python3"
+        shim.write_text(
+            "#!/bin/sh\n"
+            "if [ -n \"${HOOK_INPUT:-}\" ]; then exit 70; fi\n"
+            + "exec \"{0}\" \"$@\"\n".format(
+                subprocess.list2cmdline([os.sys.executable])
+            ),
+            encoding="utf-8",
+        )
+        shim.chmod(0o755)
+        response = self._guard(
+            "git fetch",
+            env_updates={
+                "PATH": "{0}:{1}".format(shim_dir, os.environ.get("PATH", "")),
+            },
+        )
+        self.assertEqual(response, {"permission": "allow"})
 
     def test_hook_git_family_target_ambiguity_denies(self):
         for cmd in (

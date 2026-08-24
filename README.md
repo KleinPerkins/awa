@@ -121,6 +121,38 @@ Each governed repo has an explicit AWA **mode** you can set and inspect:
   afterFileEdit is observation-only.
 - **OFF** — AWA leaves the repo alone (no block, no Safe Workspace).
 
+### Protected-primary maintenance exception
+
+Two operations remain classified as mutating but may run on an included primary when their exact
+command and current repository state prove routine upstream maintenance:
+
+```bash
+git fetch
+git fetch <configured-upstream-remote>
+git merge --ff-only --no-overwrite-ignore
+git merge --ff-only --no-overwrite-ignore @{u}
+git merge --ff-only --no-overwrite-ignore @{upstream}
+git merge --ff-only --no-overwrite-ignore <configured-upstream-remote>/<upstream-branch>
+```
+
+AWA requires a bare `git` command with no wrapper, assignment, global option, redirect, or second
+shell segment; a clean, attached, idle checkout with no `skip-worktree` or `assume-unchanged` index
+bits; exactly one configured remote-tracking upstream; and fetch rules whose destinations stay in
+that remote's tracking namespace. Merge additionally requires `HEAD` to equal or precede the live
+upstream, so local-only and divergent history remain blocked. `pull`, `push`, explicit prune,
+arbitrary remotes/URLs/refs/refspecs, ordinary merge, and every development mutation remain denied
+on an included primary.
+
+These commands run normal configured Git behavior. Fetch may update objects, `FETCH_HEAD`,
+remote-tracking refs, reachable tags, and ordinary bookkeeping in the common repository shared by
+all linked worktrees; it may invoke configured transport/credential helpers, hooks, and automatic
+maintenance. Merge may advance only the current branch and update its index, worktree, reflogs, and
+`ORIG_HEAD`; configured hooks, filters, fsmonitor, and submodule behavior still run.
+
+After each allowed command, the caller must run `git status --short` before continuing. If it is not
+empty, maintenance ran but the primary is no longer clean: stop, preserve the state, and diagnose it
+from a Safe Workspace.
+
 One **fail-safe rule** governs both the classifier and the modes writer: only an exact `off`
 disables protection; **any other value** — a typo, a removed legacy value — resolves to ON.
 

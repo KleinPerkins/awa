@@ -204,7 +204,7 @@ stop; the Cursor chat remains open because no chat-close API exists.
 | `recovery` | Patch round-trip + bundle (secret-skip S1, symlink-escape drop S2) + whole-worktree archive + restore + list; emits the ONE unified `awa_recovery_artifact/v1` manifest and runs prune-on-creation |
 | `retention` | The canonical recovery-retention evaluator + crash-resumable, tombstoned deletion transaction (7-day TTL, 1-GiB/24h pressure, source-deleted age clock) under the shared state-root lock; the ONE implementation every trigger calls |
 | `daemon` | Single-instance (flock'd pidfile) bounded maintenance loop + quarantine-ref cleanup/retention + throttled opportunistic recovery-retention pass |
-| `guard` | Adversary-aware mutating-shell classifier + engine-OFF decision + cleanup-refusal (`can_clean`); reads ONLY policy + `.awa/lease.json` |
+| `guard` | Adversary-aware mutating-shell classifier + state-aware primary-maintenance decision + engine-OFF decision + cleanup-refusal (`can_clean`) |
 | `mcp_server` | stdio newline-delimited JSON-RPC MCP server exposing three read-only diagnostic tools plus six path-scoped mode tools; inline instructions are the primary agent-routing surface |
 | `mcp_resources` | Pure fixed-resource registry/renderer for the secondary `awa://assistant/operator-guide/v1`; consumes in-memory advertised tool descriptions and reads no environment, filesystem, policy, contract, database, or live state |
 | `remote` | Apply-back execute adapter: read/write token split (S3), SHA-drift refusal, preview→confirm gating (live push is an operator step) |
@@ -217,11 +217,49 @@ A repo's AWA behavior is a first-class, explicitly-settable **mode** with two st
 inside the same generic zero-link classifier the shell kernel and the engine share:
 
 - **ON** → `include`: a confirmed mutating command on the primary checkout returns an enforced hook
-  **`deny`** — unless every path the command actually resolves to is confidently outside any
-  protected primary checkout, in which case it allows instead (target-path-aware narrowing, see
-  [ADR 0001](docs/adr/0001-target-path-aware-mutation-scope.md)) — `ensure` creates a Safe
-  Workspace, and the repo is eligible for repo-committed worktree-setup execution.
+  **`deny`** unless it affirmatively satisfies the exact upstream-maintenance exception below, or
+  every path the command resolves to is confidently outside every protected primary checkout
+  (target-path-aware narrowing, see
+  [ADR 0001](docs/adr/0001-target-path-aware-mutation-scope.md)). `ensure` creates a Safe Workspace,
+  and the repo is eligible for repo-committed worktree-setup execution.
 - **OFF** → `exclude`: AWA leaves the repo alone — the guard allows, `ensure` is a no-op.
+
+### State-aware primary-maintenance decision
+
+Fetch and merge remain mutating in both classifiers. Inside the included-primary mutating branch,
+before ADR 0001 target narrowing, one closed recognizer may convert the existing deny to allow:
+
+- `git fetch`, optionally followed by the current branch's configured upstream remote;
+- `git merge --ff-only --no-overwrite-ignore`, optionally followed by `@{u}`, `@{upstream}`, or
+  the exact configured `<remote>/<branch>` upstream short name.
+
+The recognizer accepts only a single bare-`git` shell segment. It rejects assignments, wrappers,
+path-qualified executables, Git global options, redirects, substitutions, control operators, extra
+flags, and arbitrary remotes, URLs, refs, or refspecs. Its bounded local inspector requires an
+attached branch, exactly one remote-tracking upstream, safe configured fetch destinations, no
+repository-retargeting or config-injection `GIT_*` environment, no in-progress Git operation, and a
+clean index/worktree including untracked files. It independently rejects `skip-worktree` and
+`assume-unchanged` index bits because either can hide tracked-file edits from status. Merge also
+proves that `HEAD` is equal to or an ancestor of the live upstream. Any missing, malformed, non-zero,
+timed-out, or ambiguous evidence falls through to the existing deny; merge also denies local-ahead
+or divergent history.
+
+The kernel hook carries an independent Python 3.9-compatible mirror and does not import the engine
+or daemon. A shared command/state corpus exercises the engine, source hook, and installed
+role-resolved hook; the contract-freeze UAT holds canonical fetch and fast-forward allows plus
+representative denials. Predicate uncertainty denies, while a genuine hook-internal crash retains
+the product-wide fail-open behavior.
+
+Allowed commands retain configured Git semantics. Fetch may update common-repository objects,
+`FETCH_HEAD`, configured remote-tracking refs, reachable tags, shallow/partial-clone metadata, and
+ordinary bookkeeping, and may invoke configured helpers, hooks, and automatic maintenance. Merge
+may advance only the current branch and update `HEAD`, index, worktree, reflogs, and `ORIG_HEAD`;
+configured hooks, filters, fsmonitor, and submodule behavior remain active. The caller must check
+`git status --short` after each command. A non-clean result is preserved and diagnosed from a Safe
+Workspace; it does not authorize reset or further primary mutation.
+
+`pull`, `push`, explicit prune, remote update, ordinary merge, branch mutation, cleanup,
+commit/rewrite, and every other development operation retain the primary deny.
 
 **Why `deny`, not `ask` (L4).** Cursor's agent enforces a `beforeShellExecution` hook that returns
 `deny` (the command is blocked) but treats `ask` as **non-blocking** on the agent path, and
@@ -232,10 +270,10 @@ path (an included-looking checkout whose command payload the hook could not pars
 there knowing Cursor won't block, so it never *silently* downgrades an uncertain case to allow.
 See [SECURITY.md](SECURITY.md) for the platform-limitation writeup.
 
-For a mutating command on a primary checkout the guard **denies** under ON — unless every target
-the command actually resolves to is confidently outside any protected primary, in which case it
-allows instead (ADR 0001) — and allows under OFF; read-only commands, linked worktrees, and adopted
-leases always allow in every mode. A Cursor Cloud
+For a mutating command on a primary checkout the guard **denies** under ON unless the exact
+state-aware maintenance lane allows it or every target resolves confidently outside any protected
+primary (ADR 0001), and allows under OFF; read-only commands, linked worktrees, and adopted leases
+always allow in every mode. A Cursor Cloud
 / background agent runs in an already-isolated, own-branch `/workspace` clone; the guard detects that
 and **degrades to allow before the deny branch**, so a cloud VM is never hard-blocked. Hook-infra
 failure (crash / timeout / missing interpreter) also degrades to allow (anti-brick). `afterFileEdit`

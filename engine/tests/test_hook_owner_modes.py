@@ -1,4 +1,4 @@
-"""E-04 hook-file ownership contract, lifecycle, and v1.5.1 parity.
+"""E-04 hook-file ownership contract, lifecycle, and release behavior parity.
 
 Every lifecycle test uses an isolated HOME/XDG tree. The selected hook destination is
 always a generic fixture path; no operator hook file or installed runtime is touched.
@@ -37,9 +37,7 @@ ROLE_IDS = (
     "finish.prompt-recall",
 )
 
-V151_BEHAVIOR_SHA256 = {
-    "kernel/hooks/worktree-guard.sh":
-        "6ebbe9ee6c3ec3799f9f0e1be1ae762a44eb2ec5b81ee0fd875a144691d8f474",
+V151_UNCHANGED_BEHAVIOR_SHA256 = {
     "kernel/hooks/worktree-session.sh":
         "1ea89ba2ad486510be7976d55771e09f7e9201119c4eed38a354ade6eed77938",
     "kernel/hooks/awa-recovery-maintenance.sh":
@@ -48,8 +46,12 @@ V151_BEHAVIOR_SHA256 = {
         "d594519c8962a8cdb8d5adc8262a09a61c00ec074317b3d07be144823220da5a",
     "consumer/finish_current.py":
         "0e8b097a7f118ad71b8889de3cad4d04009fc3db2413bd122f4f4803cea4e26f",
+}
+V160_PRIMARY_MAINTENANCE_SHA256 = {
+    "kernel/hooks/worktree-guard.sh":
+        "4a1c81064fccf8ca8fb5bd82a4787fc6e6e17111d5fcc8c99e578cee11606974",
     "engine/tests/git_guard_command_corpus.py":
-        "bc648f5ab3885c891b6bc168db478315b1e538a2afb9c0207aa564f9f211c4bf",
+        "0ba21e1c7d2e8702a4b963ed8d08b8c90e993645200e7eaff23c867e7a2e36b5",
 }
 
 _UNSET = object()
@@ -678,8 +680,13 @@ class TestHookOwnerParity(unittest.TestCase):
         self.assertNotIn(
             "failClosed", roles["worktree.file-observer"]["entry"])
 
-    def test_v151_behavior_files_are_byte_identical(self):
-        for relative, expected in V151_BEHAVIOR_SHA256.items():
+    def test_v151_unrelated_behavior_files_remain_byte_identical(self):
+        for relative, expected in V151_UNCHANGED_BEHAVIOR_SHA256.items():
+            with self.subTest(path=relative):
+                self.assertEqual(_sha256(REPO / relative), expected)
+
+    def test_v160_primary_maintenance_behavior_files_are_byte_identical(self):
+        for relative, expected in V160_PRIMARY_MAINTENANCE_SHA256.items():
             with self.subTest(path=relative):
                 self.assertEqual(_sha256(REPO / relative), expected)
 

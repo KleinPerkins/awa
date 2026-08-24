@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "awa"
-version = "1.5.2"
+version = "1.6.0"
 description = "Agent Worktree Automation — kernel-first engine (durable state, recovery, single-instance daemon, MCP server, preview-first apply-back)."
 readme = "README.md"
 requires-python = ">=3.9"

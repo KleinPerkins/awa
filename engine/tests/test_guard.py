@@ -9,16 +9,23 @@ a linked worktree/lease -> allow, a Cloud/background agent -> allow, unsafe clea
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from engine import guard, lifecycle
 from engine.tests.git_guard_command_corpus import (
     GIT_MUTATING_FAMILY_COMMANDS,
     GIT_READONLY_FAMILY_COMMANDS,
+    PRIMARY_MAINTENANCE_ALLOW_SHAPES,
+    PRIMARY_MAINTENANCE_NEAR_MISS_DENY,
+    PRIMARY_MAINTENANCE_STATE_ALLOW_CASES,
+    PRIMARY_MAINTENANCE_STATE_CASES,
+    PRIMARY_MAINTENANCE_UNRELATED_ALLOW,
 )
-from engine.tests.helpers import EngineTestCase, commit_all
+from engine.tests.helpers import EngineTestCase, commit_all, git
 
 _POLICY_YAML = """\
 version: 1
@@ -161,6 +168,14 @@ class TestMutatingClassifier(unittest.TestCase):
         for cmd in GIT_MUTATING_FAMILY_COMMANDS:
             self.assertTrue(guard.classify_mutating(cmd), cmd)
 
+    def test_primary_maintenance_corpus_stays_classified_mutating(self):
+        for cmd in (
+            *PRIMARY_MAINTENANCE_ALLOW_SHAPES,
+            *PRIMARY_MAINTENANCE_NEAR_MISS_DENY,
+            *PRIMARY_MAINTENANCE_UNRELATED_ALLOW,
+        ):
+            self.assertTrue(guard.classify_mutating(cmd), cmd)
+
     def test_git_family_unknown_or_malformed_forms_fail_safe(self):
         for cmd in (
             "git -C",
@@ -207,6 +222,98 @@ class TestDecideShellDegraded(EngineTestCase):
         p.close()
         return p.name
 
+    def _maintenance_repo(self, name: str = "maintenance-repo"):
+        repo = self.make_repo(name)
+        remote = self.add_bare_remote(repo, "{0}-origin.git".format(name))
+        git(repo, "push", "-q", "-u", "origin", "main")
+        return repo, remote, self._policy_for(self._tmp.name)
+
+    def _advance_remote(self, remote: str, name: str) -> None:
+        source = str(Path(self._tmp.name) / "{0}-source".format(name))
+        git(self._tmp.name, "clone", "-q", remote, source)
+        Path(source, "remote-{0}.txt".format(name)).write_text(
+            "remote\n",
+            encoding="utf-8",
+        )
+        commit_all(source, "remote {0}".format(name))
+        git(source, "push", "-q", "origin", "main")
+
+    def _apply_primary_maintenance_state(self, repo: str, remote: str, case: str):
+        git_dir = Path(repo, ".git")
+        if case == "dirty_tracked":
+            Path(repo, "README.md").write_text("dirty\n", encoding="utf-8")
+        elif case == "dirty_untracked":
+            Path(repo, "untracked.txt").write_text("dirty\n", encoding="utf-8")
+        elif case == "dirty_skip_worktree":
+            git(repo, "update-index", "--skip-worktree", "README.md")
+            Path(repo, "README.md").write_text("hidden dirty\n", encoding="utf-8")
+            self.assertEqual(git(repo, "status", "--porcelain").stdout, "")
+        elif case == "dirty_assume_unchanged":
+            git(repo, "update-index", "--assume-unchanged", "README.md")
+            Path(repo, "README.md").write_text("hidden dirty\n", encoding="utf-8")
+            self.assertEqual(git(repo, "status", "--porcelain").stdout, "")
+        elif case == "detached":
+            git(repo, "checkout", "-q", "--detach")
+        elif case == "missing_upstream":
+            git(repo, "config", "--unset-all", "branch.main.remote", check=False)
+            git(repo, "config", "--unset-all", "branch.main.merge", check=False)
+        elif case == "local_upstream":
+            git(repo, "config", "branch.main.remote", ".")
+            git(repo, "config", "branch.main.merge", "refs/heads/main")
+        elif case == "unsafe_fetch_destination":
+            git(repo, "config", "--unset-all", "remote.origin.fetch")
+            git(
+                repo,
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/heads/*",
+            )
+        elif case == "stale_fetch_mapping":
+            git(repo, "config", "--unset-all", "remote.origin.fetch")
+            git(
+                repo,
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/heads/release/*:refs/remotes/origin/release/*",
+            )
+        elif case == "local_ahead":
+            Path(repo, "local.txt").write_text("local\n", encoding="utf-8")
+            commit_all(repo, "local ahead")
+        elif case == "diverged":
+            Path(repo, "local.txt").write_text("local\n", encoding="utf-8")
+            commit_all(repo, "local side")
+            self._advance_remote(remote, "diverged")
+            git(repo, "fetch", "-q", "origin")
+        elif case == "merge_in_progress":
+            (git_dir / "MERGE_HEAD").write_text(
+                git(repo, "rev-parse", "HEAD").stdout,
+                encoding="utf-8",
+            )
+        elif case == "rebase_in_progress":
+            (git_dir / "rebase-merge").mkdir()
+        elif case == "cherry_pick_in_progress":
+            (git_dir / "CHERRY_PICK_HEAD").write_text(
+                git(repo, "rev-parse", "HEAD").stdout,
+                encoding="utf-8",
+            )
+        elif case == "revert_in_progress":
+            (git_dir / "REVERT_HEAD").write_text(
+                git(repo, "rev-parse", "HEAD").stdout,
+                encoding="utf-8",
+            )
+        elif case == "am_in_progress":
+            (git_dir / "rebase-apply").mkdir()
+        elif case == "sequencer_in_progress":
+            (git_dir / "sequencer").mkdir()
+        elif case == "bisect_in_progress":
+            (git_dir / "BISECT_LOG").write_text("bisect\n", encoding="utf-8")
+        elif case in {"wrong_remote", "wrong_ref", "risky_environment"}:
+            pass
+        else:
+            self.fail("unknown primary-maintenance state case: {0}".format(case))
+
     def test_primary_mutation_denies(self):
         repo = self.make_repo()
         pol = self._policy_for(self._tmp.name)
@@ -235,6 +342,189 @@ class TestDecideShellDegraded(EngineTestCase):
             d = guard.decide_shell(repo, cmd, pol)
             self.assertEqual(d.permission, "deny", cmd)
             self.assertEqual(d.classification, "include", cmd)
+
+    def test_primary_maintenance_allow_shapes_require_safe_live_state(self):
+        repo, _remote, pol = self._maintenance_repo()
+        for cmd in PRIMARY_MAINTENANCE_ALLOW_SHAPES:
+            with self.subTest(cmd=cmd):
+                d = guard.decide_shell(repo, cmd, pol)
+                self.assertEqual(d.permission, "allow", (cmd, d.reason))
+                self.assertEqual(d.classification, "include", cmd)
+
+    def test_primary_maintenance_near_misses_keep_existing_deny(self):
+        repo, _remote, pol = self._maintenance_repo()
+        for cmd in PRIMARY_MAINTENANCE_NEAR_MISS_DENY:
+            with self.subTest(cmd=cmd):
+                d = guard.decide_shell(repo, cmd, pol)
+                self.assertEqual(d.permission, "deny", (cmd, d.reason))
+                self.assertEqual(d.classification, "include", cmd)
+                self.assertIn(
+                    d.reason,
+                    {
+                        guard._PRIMARY_MAINTENANCE_MESSAGES["unsupported_form"],
+                        guard._PRIMARY_MAINTENANCE_MESSAGES["wrong_upstream"],
+                    },
+                    cmd,
+                )
+
+    def test_primary_maintenance_state_corpus_denies_with_closed_reasons(self):
+        for index, (case, cmd, reason_code) in enumerate(
+            PRIMARY_MAINTENANCE_STATE_CASES
+        ):
+            with self.subTest(case=case, cmd=cmd):
+                repo, remote, pol = self._maintenance_repo(
+                    "maintenance-state-{0}".format(index)
+                )
+                self._apply_primary_maintenance_state(repo, remote, case)
+                env = (
+                    mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "0"})
+                    if case == "risky_environment"
+                    else mock.patch.dict(os.environ, {})
+                )
+                with env:
+                    d = guard.decide_shell(repo, cmd, pol)
+                self.assertEqual(d.permission, "deny", (case, d.reason))
+                self.assertEqual(
+                    d.reason,
+                    guard._PRIMARY_MAINTENANCE_MESSAGES[reason_code],
+                    case,
+                )
+
+    def test_primary_maintenance_refusal_copy_is_exact(self):
+        self.assertEqual(
+            guard._PRIMARY_MAINTENANCE_MESSAGES,
+            {
+                "unsupported_form": (
+                    "AWA did not run this command. On a protected primary, maintenance "
+                    "supports only git fetch, git fetch <configured upstream remote>, and "
+                    "git merge --ff-only --no-overwrite-ignore with no target, @{u}, "
+                    "@{upstream}, or the exact configured upstream branch. Extra flags and "
+                    "targets stay blocked."
+                ),
+                "dirty": (
+                    "AWA did not run maintenance because this primary has local files. "
+                    "Preserve or move that work in a Safe Workspace, then retry when git "
+                    "status --short is empty."
+                ),
+                "missing_upstream": (
+                    "AWA did not run maintenance because it could not identify one tracked "
+                    "remote branch for the current branch. Repair branch tracking in a Safe "
+                    "Workspace, then retry."
+                ),
+                "wrong_upstream": (
+                    "AWA did not run maintenance because the command target does not exactly "
+                    "match the configured upstream for the current branch. Use the "
+                    "configured upstream remote or branch exactly."
+                ),
+                "unsafe_fetch_config": (
+                    "AWA did not run maintenance because the configured fetch rules can "
+                    "write outside the remote-tracking area or no longer map the tracked "
+                    "branch. Repair the remote fetch configuration in a Safe Workspace, "
+                    "then retry."
+                ),
+                "diverged": (
+                    "AWA did not run maintenance because this primary contains local-only or "
+                    "conflicting history. Reconcile that history in a Safe Workspace; AWA "
+                    "will not rewrite or reset the primary."
+                ),
+                "busy": (
+                    "AWA did not run maintenance because another Git operation is in "
+                    "progress. Finish or diagnose that operation in a Safe Workspace, then "
+                    "retry."
+                ),
+                "inspection_failed": (
+                    "AWA did not run maintenance because it could not prove that this primary "
+                    "is safe to maintain. Stop and diagnose the repository from a Safe "
+                    "Workspace before retrying."
+                ),
+            },
+        )
+
+    def test_primary_maintenance_accepts_safe_additional_and_negative_refspecs(self):
+        repo, _remote, pol = self._maintenance_repo()
+        git(
+            repo,
+            "config",
+            "--add",
+            "remote.origin.fetch",
+            "+refs/pull/*:refs/remotes/origin/pull/*",
+        )
+        git(
+            repo,
+            "config",
+            "--add",
+            "remote.origin.fetch",
+            "^refs/heads/wip/*",
+        )
+        for cmd in ("git fetch", "git fetch origin"):
+            d = guard.decide_shell(repo, cmd, pol)
+            self.assertEqual(d.permission, "allow", (cmd, d.reason))
+
+    def test_primary_fetch_allows_clean_local_only_or_diverged_history(self):
+        for index, (case, cmd) in enumerate(PRIMARY_MAINTENANCE_STATE_ALLOW_CASES):
+            repo, remote, pol = self._maintenance_repo(
+                "maintenance-fetch-state-{0}".format(index)
+            )
+            self._apply_primary_maintenance_state(repo, remote, case)
+            d = guard.decide_shell(repo, cmd, pol)
+            self.assertEqual(d.permission, "allow", (case, cmd, d.reason))
+
+    def test_primary_maintenance_inspection_timeout_and_malformed_output_deny(self):
+        repo, _remote, pol = self._maintenance_repo()
+        with mock.patch.object(
+            guard,
+            "_run_primary_maintenance_git",
+            return_value=None,
+        ):
+            timed_out = guard.decide_shell(repo, "git fetch", pol)
+        self.assertEqual(timed_out.permission, "deny")
+        self.assertEqual(
+            timed_out.reason,
+            guard._PRIMARY_MAINTENANCE_MESSAGES["inspection_failed"],
+        )
+
+        with mock.patch.object(
+            guard,
+            "_run_primary_maintenance_git",
+            return_value=(0, "refs/heads/main\nextra\n", ""),
+        ):
+            malformed = guard.decide_shell(repo, "git fetch", pol)
+        self.assertEqual(malformed.permission, "deny")
+        self.assertEqual(
+            malformed.reason,
+            guard._PRIMARY_MAINTENANCE_MESSAGES["inspection_failed"],
+        )
+
+        with mock.patch.object(
+            guard,
+            "_primary_maintenance_has_hidden_index_bits",
+            return_value=None,
+        ):
+            hidden_bit_inspection_failed = guard.decide_shell(repo, "git fetch", pol)
+        self.assertEqual(hidden_bit_inspection_failed.permission, "deny")
+        self.assertEqual(
+            hidden_bit_inspection_failed.reason,
+            guard._PRIMARY_MAINTENANCE_MESSAGES["inspection_failed"],
+        )
+
+    def test_primary_maintenance_outer_context_behavior_is_unchanged(self):
+        repo, _remote, pol = self._maintenance_repo()
+        wt = self.add_worktree(repo, "feat/maintenance-outer")
+        self.assertEqual(
+            guard.decide_shell(wt, "git fetch --prune", pol).permission,
+            "allow",
+        )
+        off = self._mode_policy_for(self._tmp.name, "default_mode: off")
+        self.assertEqual(
+            guard.decide_shell(repo, "git fetch --prune", off).permission,
+            "allow",
+        )
+        for command in PRIMARY_MAINTENANCE_UNRELATED_ALLOW:
+            self.assertEqual(
+                guard.decide_shell(repo, command, pol).permission,
+                "allow",
+                command,
+            )
 
     def test_standalone_repo_with_origin_allows_not_denies(self):
         """Regression: a standalone clone (e.g. under /tmp) with an origin remote, OUTSIDE

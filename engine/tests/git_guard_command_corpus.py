@@ -145,3 +145,147 @@ GIT_MUTATING_FAMILY_COMMANDS += (
     "git sparse-checkout check-rules -z --skip-checks",
     "git sparse-checkout unknown-action",
 )
+
+
+PRIMARY_MAINTENANCE_ALLOW_SHAPES = (
+    "git fetch",
+    "git fetch origin",
+    "git merge --ff-only --no-overwrite-ignore",
+    "git merge --ff-only --no-overwrite-ignore @{u}",
+    "git merge --ff-only --no-overwrite-ignore @{upstream}",
+    "git merge --ff-only --no-overwrite-ignore origin/main",
+)
+
+
+# Mutating shell commands whose ordinary arguments happen to contain maintenance-family words
+# are unrelated to the Git lane. Existing ADR 0001 target narrowing must still apply.
+PRIMARY_MAINTENANCE_UNRELATED_ALLOW = (
+    "echo fetch > /tmp/awa-maintenance-unrelated.txt",
+    "echo merge > /tmp/awa-maintenance-unrelated.txt",
+)
+
+
+PRIMARY_MAINTENANCE_NEAR_MISS_DENY = (
+    # Fetch options, arbitrary sources, refspecs, and extra operands.
+    "git fetch --dry-run",
+    "git fetch -n",
+    "git fetch --all",
+    "git fetch --prune",
+    "git fetch --recurse-submodules",
+    "git fetch --force",
+    "git fetch --tags",
+    "git fetch --stdin",
+    "git fetch -- origin",
+    "git fetch https://example.invalid/repo.git",
+    "git fetch origin main",
+    "git fetch origin refs/heads/main:refs/remotes/origin/main",
+    "git fetch origin another",
+    # Missing, reordered, or expanded fast-forward safety grammar.
+    "git merge --ff-only",
+    "git merge --no-overwrite-ignore",
+    "git merge --no-overwrite-ignore --ff-only",
+    "git merge --ff-only --no-overwrite-ignore --no-edit",
+    "git merge --ff-only --no-overwrite-ignore -- origin/main",
+    "git merge --ff-only --no-overwrite-ignore upstream/main",
+    "git merge --ff-only --no-overwrite-ignore deadbeef",
+    "git merge --ff-only --no-overwrite-ignore origin/main^",
+    "git merge --ff-only --no-overwrite-ignore origin/main another",
+    "git merge --ff-only --no-overwrite-ignore $UPSTREAM",
+    "git merge --ff-only --no-overwrite-ignore $(git rev-parse origin/main)",
+    # Git global options and environment/config injection.
+    "git -c color.ui=false fetch",
+    "git -c color.ui=false merge --ff-only --no-overwrite-ignore",
+    "git --no-pager fetch",
+    "PATH=/tmp git fetch",
+    "GIT_DIR=.git git fetch",
+    "GIT_WORK_TREE=. git fetch",
+    "GIT_CONFIG_COUNT=0 git fetch",
+    # Wrappers, executable substitution, extra shell segments, and redirection.
+    "env git fetch",
+    "command git fetch",
+    "sudo git fetch",
+    "nice -n 10 git fetch",
+    'bash -c "git fetch"',
+    'script -c "git merge --ff-only --no-overwrite-ignore" /dev/null',
+    "/tmp/git fetch",
+    "cd /tmp && git fetch",
+    "git status && git fetch",
+    "git fetch && git status",
+    "git fetch > fetch.log",
+    "git fetch $(printf origin)",
+    # Unrelated maintenance/development families remain denied.
+    "git pull --ff-only",
+    "git push",
+    "git remote update",
+    "git remote prune origin",
+    "git gc",
+    "git maintenance run",
+)
+
+
+# Shared stateful parity cases. Test fixtures map each closed case name to repository
+# state, then drive the same command and expected maintenance reason through the engine,
+# source hook, and installed/role-resolved hook.
+PRIMARY_MAINTENANCE_STATE_CASES = (
+    ("dirty_tracked", "git fetch", "dirty"),
+    ("dirty_untracked", "git fetch", "dirty"),
+    ("dirty_skip_worktree", "git fetch", "dirty"),
+    ("dirty_assume_unchanged", "git fetch", "dirty"),
+    (
+        "dirty_tracked",
+        "git merge --ff-only --no-overwrite-ignore",
+        "dirty",
+    ),
+    (
+        "dirty_untracked",
+        "git merge --ff-only --no-overwrite-ignore",
+        "dirty",
+    ),
+    (
+        "dirty_skip_worktree",
+        "git merge --ff-only --no-overwrite-ignore",
+        "dirty",
+    ),
+    (
+        "dirty_assume_unchanged",
+        "git merge --ff-only --no-overwrite-ignore",
+        "dirty",
+    ),
+    ("detached", "git fetch", "missing_upstream"),
+    ("missing_upstream", "git fetch", "missing_upstream"),
+    ("local_upstream", "git fetch", "missing_upstream"),
+    ("wrong_remote", "git fetch upstream", "wrong_upstream"),
+    (
+        "wrong_ref",
+        "git merge --ff-only --no-overwrite-ignore upstream/main",
+        "wrong_upstream",
+    ),
+    ("unsafe_fetch_destination", "git fetch", "unsafe_fetch_config"),
+    ("stale_fetch_mapping", "git fetch", "unsafe_fetch_config"),
+    (
+        "local_ahead",
+        "git merge --ff-only --no-overwrite-ignore",
+        "diverged",
+    ),
+    (
+        "diverged",
+        "git merge --ff-only --no-overwrite-ignore",
+        "diverged",
+    ),
+    ("merge_in_progress", "git fetch", "busy"),
+    ("rebase_in_progress", "git fetch", "busy"),
+    ("cherry_pick_in_progress", "git fetch", "busy"),
+    ("revert_in_progress", "git fetch", "busy"),
+    ("am_in_progress", "git fetch", "busy"),
+    ("sequencer_in_progress", "git fetch", "busy"),
+    ("bisect_in_progress", "git fetch", "busy"),
+    ("risky_environment", "git fetch", "inspection_failed"),
+)
+
+
+# Fetch refreshes remote-tracking state but never advances the checked-out branch, so clean
+# local-only or divergent history remains eligible for fetch while merge still refuses it.
+PRIMARY_MAINTENANCE_STATE_ALLOW_CASES = (
+    ("local_ahead", "git fetch"),
+    ("diverged", "git fetch"),
+)

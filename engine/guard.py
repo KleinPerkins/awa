@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import os
 import re
+import selectors
 import shlex
+import subprocess
+import time
 from dataclasses import dataclass
 
 from . import gitutil, lease as lease_mod, policy as policy_mod
@@ -32,7 +35,8 @@ _PKG = {"npm", "pnpm", "yarn", "pip", "pip3", "bundle", "poetry", "cargo", "go",
 _GITMUT = {"commit", "add", "reset", "rebase", "checkout", "switch", "clean",
            "merge", "cherry-pick", "apply", "restore", "stash", "rm", "mv",
            "pull", "am", "revert", "worktree", "push", "fetch",
-           "branch", "remote", "config", "submodule", "sparse-checkout"}
+           "branch", "remote", "config", "submodule", "sparse-checkout",
+           "gc", "maintenance"}
 _INPLACE = {"sed", "perl", "gawk", "awk"}
 _GIT_TAKES_ARG = ("-C", "-c", "--git-dir", "--work-tree", "--namespace",
                   "--exec-path", "--super-prefix")
@@ -544,6 +548,704 @@ def classify_mutating(command: str) -> bool:
     return any(_segment_is_mutating(toks) for toks in segs)
 
 
+# ---- ADR 0019: exact protected-primary maintenance lane ---------------------------
+_PRIMARY_MAINTENANCE_TIMEOUT = 5
+_PRIMARY_MAINTENANCE_MAX_OUTPUT = 65536
+_PRIMARY_MAINTENANCE_RELATED_GIT = {
+    "fetch",
+    "merge",
+    "pull",
+    "push",
+    "remote",
+    "gc",
+    "maintenance",
+}
+_PRIMARY_MAINTENANCE_RISKY_GIT_ENV = {
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_EXEC_PATH",
+    "GIT_NAMESPACE",
+    "GIT_SHALLOW_FILE",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+}
+_PRIMARY_MAINTENANCE_IN_PROGRESS = {
+    "MERGE_HEAD",
+    "rebase-merge",
+    "rebase-apply",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "sequencer",
+    "BISECT_LOG",
+    "BISECT_START",
+    "BISECT_NAMES",
+    "BISECT_TERMS",
+}
+_PRIMARY_MAINTENANCE_MESSAGES = {
+    "unsupported_form": (
+        "AWA did not run this command. On a protected primary, maintenance supports only "
+        "git fetch, git fetch <configured upstream remote>, and "
+        "git merge --ff-only --no-overwrite-ignore with no target, @{u}, "
+        "@{upstream}, or the exact configured upstream branch. Extra flags and targets "
+        "stay blocked."
+    ),
+    "dirty": (
+        "AWA did not run maintenance because this primary has local files. Preserve or "
+        "move that work in a Safe Workspace, then retry when git status --short is empty."
+    ),
+    "missing_upstream": (
+        "AWA did not run maintenance because it could not identify one tracked remote "
+        "branch for the current branch. Repair branch tracking in a Safe Workspace, then retry."
+    ),
+    "wrong_upstream": (
+        "AWA did not run maintenance because the command target does not exactly match "
+        "the configured upstream for the current branch. Use the configured upstream "
+        "remote or branch exactly."
+    ),
+    "unsafe_fetch_config": (
+        "AWA did not run maintenance because the configured fetch rules can write outside "
+        "the remote-tracking area or no longer map the tracked branch. Repair the remote "
+        "fetch configuration in a Safe Workspace, then retry."
+    ),
+    "diverged": (
+        "AWA did not run maintenance because this primary contains local-only or "
+        "conflicting history. Reconcile that history in a Safe Workspace; AWA will not "
+        "rewrite or reset the primary."
+    ),
+    "busy": (
+        "AWA did not run maintenance because another Git operation is in progress. "
+        "Finish or diagnose that operation in a Safe Workspace, then retry."
+    ),
+    "inspection_failed": (
+        "AWA did not run maintenance because it could not prove that this primary is safe "
+        "to maintain. Stop and diagnose the repository from a Safe Workspace before retrying."
+    ),
+}
+_PRIMARY_MAINTENANCE_ALLOW_REASONS = {
+    "fetch": "clean protected primary: exact configured-upstream fetch maintenance",
+    "fast_forward": (
+        "clean protected primary: exact configured-upstream fast-forward maintenance"
+    ),
+}
+
+
+@dataclass(frozen=True)
+class PrimaryMaintenanceDecision:
+    allowed: bool
+    kind: str
+    reason_code: str
+    matched: bool
+
+
+@dataclass(frozen=True)
+class _PrimaryMaintenanceShape:
+    valid: bool
+    kind: str
+    operand: str
+    matched: bool
+
+
+def _primary_maintenance_related(command: str, depth: int = 0) -> bool:
+    try:
+        segments = _segments(command)
+    except ValueError:
+        return False
+    for tokens in segments:
+        program_index = _skip_wrappers(tokens)
+        if program_index >= len(tokens):
+            continue
+        program = os.path.basename(tokens[program_index])
+        rest = tokens[program_index + 1:]
+        if (
+            program == "git"
+            and any(token in _PRIMARY_MAINTENANCE_RELATED_GIT for token in rest)
+        ):
+            return True
+        if program in _SCRIPT_BODY_PROGS and depth < 3:
+            body = _interpreter_script_body(rest)
+            if body is not None and _primary_maintenance_related(body, depth + 1):
+                return True
+    return False
+
+
+def _primary_maintenance_shape(command: str) -> _PrimaryMaintenanceShape:
+    related = _primary_maintenance_related(command)
+    if not command or "\n" in command or "\r" in command:
+        return _PrimaryMaintenanceShape(False, "none", "", related)
+    bare_git = re.match(r"^\s*git(?:\s|$)", command) is not None
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        lex.commenters = ""
+        tokens = list(lex)
+    except ValueError:
+        return _PrimaryMaintenanceShape(False, "none", "", False)
+    if (
+        not bare_git
+        or not tokens
+        or tokens[0] != "git"
+        or any(
+            token in _CONTROL_OPS
+            or token in _REDIRECT_OPS
+            or token in {"(", ")", "{", "}"}
+            or "$" in token
+            or "`" in token
+            for token in tokens
+        )
+    ):
+        return _PrimaryMaintenanceShape(False, "none", "", related)
+    if len(tokens) >= 2 and tokens[1] == "fetch":
+        if len(tokens) == 2:
+            return _PrimaryMaintenanceShape(True, "fetch", "", True)
+        if len(tokens) == 3 and tokens[2] and not tokens[2].startswith("-"):
+            return _PrimaryMaintenanceShape(True, "fetch", tokens[2], True)
+        return _PrimaryMaintenanceShape(False, "fetch", "", True)
+    if len(tokens) >= 2 and tokens[1] == "merge":
+        prefix = ["git", "merge", "--ff-only", "--no-overwrite-ignore"]
+        if tokens[:4] != prefix:
+            return _PrimaryMaintenanceShape(False, "fast_forward", "", True)
+        if len(tokens) == 4:
+            return _PrimaryMaintenanceShape(True, "fast_forward", "", True)
+        if len(tokens) == 5 and tokens[4] and not tokens[4].startswith("-"):
+            return _PrimaryMaintenanceShape(
+                True,
+                "fast_forward",
+                tokens[4],
+                True,
+            )
+        return _PrimaryMaintenanceShape(False, "fast_forward", "", True)
+    return _PrimaryMaintenanceShape(False, "none", "", related)
+
+
+def _run_primary_maintenance_git(
+        cwd: str,
+        *args: str,
+) -> tuple[int, str, str] | None:
+    env = dict(os.environ)
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", cwd, *args],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=_PRIMARY_MAINTENANCE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return None
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    if (
+        len(stdout.encode("utf-8", "replace"))
+        + len(stderr.encode("utf-8", "replace"))
+        > _PRIMARY_MAINTENANCE_MAX_OUTPUT
+    ):
+        return None
+    return proc.returncode, stdout, stderr
+
+
+def _primary_maintenance_has_hidden_index_bits(cwd: str) -> bool | None:
+    """Return whether skip-worktree/assume-unchanged can hide tracked edits."""
+    env = dict(os.environ)
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        proc = subprocess.Popen(
+            ["git", "-C", cwd, "ls-files", "-v", "-z"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+    except OSError:
+        return None
+    if proc.stdout is None or proc.stderr is None:
+        proc.kill()
+        proc.wait()
+        return None
+
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
+    except (OSError, ValueError):
+        selector.close()
+        proc.kill()
+        proc.wait()
+        proc.stdout.close()
+        proc.stderr.close()
+        return None
+    deadline = time.monotonic() + _PRIMARY_MAINTENANCE_TIMEOUT
+    tail = b""
+    stderr_seen = False
+    hidden = False
+    failed = False
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failed = True
+                break
+            try:
+                events = selector.select(remaining)
+            except OSError:
+                failed = True
+                break
+            if not events:
+                failed = True
+                break
+            for key, _mask in events:
+                try:
+                    chunk = os.read(key.fd, 65536)
+                except OSError:
+                    failed = True
+                    break
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                if key.data == "stderr":
+                    stderr_seen = True
+                    continue
+                tail += chunk
+                records = tail.split(b"\x00")
+                tail = records.pop()
+                if len(tail) > _PRIMARY_MAINTENANCE_MAX_OUTPUT:
+                    failed = True
+                    break
+                for record in records:
+                    if len(record) < 3 or record[1:2] != b" ":
+                        failed = True
+                        break
+                    tag = record[0]
+                    if tag == ord("S") or ord("a") <= tag <= ord("z"):
+                        hidden = True
+                if failed:
+                    break
+            if failed:
+                break
+        if not failed:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failed = True
+            else:
+                try:
+                    proc.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    failed = True
+    finally:
+        selector.close()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        proc.stdout.close()
+        proc.stderr.close()
+    if failed or proc.returncode != 0 or stderr_seen or tail:
+        return None
+    return hidden
+
+
+def _primary_maintenance_lines(
+        result: tuple[int, str, str] | None,
+) -> list[str] | None:
+    if result is None:
+        return None
+    returncode, stdout, stderr = result
+    if (
+        returncode != 0
+        or stderr
+        or not stdout
+        or not stdout.endswith("\n")
+        or "\x00" in stdout
+        or "\r" in stdout
+    ):
+        return None
+    lines = stdout[:-1].split("\n")
+    if not lines or any(not line for line in lines):
+        return None
+    return lines
+
+
+def _primary_maintenance_config_values(
+        cwd: str,
+        key: str,
+) -> tuple[str, list[str]]:
+    result = _run_primary_maintenance_git(cwd, "config", "--get-all", key)
+    if result is None:
+        return "error", []
+    returncode, stdout, stderr = result
+    if returncode == 1 and not stdout and not stderr:
+        return "missing", []
+    lines = _primary_maintenance_lines(result)
+    if lines is None:
+        return "error", []
+    return "ok", lines
+
+
+def _valid_refspec_ref(ref: str, *, allow_wildcard: bool) -> bool:
+    if not ref.startswith("refs/") or ref.endswith("/"):
+        return False
+    if ref.count("*") > (1 if allow_wildcard else 0):
+        return False
+    if any(
+        ord(char) < 32 or ord(char) == 127 or char in " ~^:?[\\" for char in ref
+    ):
+        return False
+    if ".." in ref or "@{" in ref or "//" in ref:
+        return False
+    for component in ref.split("/"):
+        if (
+            not component
+            or component in {".", ".."}
+            or component.startswith(".")
+            or component.endswith(".")
+            or component.endswith(".lock")
+        ):
+            return False
+    return True
+
+
+def _refspec_pattern_matches(pattern: str, ref: str) -> bool:
+    if "*" not in pattern:
+        return pattern == ref
+    prefix, suffix = pattern.split("*", 1)
+    return (
+        ref.startswith(prefix)
+        and ref.endswith(suffix)
+        and len(ref) >= len(prefix) + len(suffix)
+    )
+
+
+def _map_fetch_refspec(source: str, destination: str, ref: str) -> str | None:
+    if "*" not in source:
+        return destination if source == ref else None
+    prefix, suffix = source.split("*", 1)
+    if (
+        not ref.startswith(prefix)
+        or not ref.endswith(suffix)
+        or len(ref) < len(prefix) + len(suffix)
+    ):
+        return None
+    capture_end = len(ref) - len(suffix) if suffix else len(ref)
+    capture = ref[len(prefix):capture_end]
+    return destination.replace("*", capture)
+
+
+def _safe_fetch_destination(
+        remote: str,
+        source_ref: str,
+        refspecs: list[str],
+) -> str | None:
+    namespace = "refs/remotes/{0}/".format(remote)
+    mapped: list[str] = []
+    excluded = False
+    for raw in refspecs:
+        if not raw or any(ord(char) < 32 or ord(char) == 127 for char in raw):
+            return None
+        if raw.startswith("^"):
+            source = raw[1:]
+            if (
+                not source
+                or ":" in source
+                or not _valid_refspec_ref(source, allow_wildcard=True)
+            ):
+                return None
+            excluded = excluded or _refspec_pattern_matches(source, source_ref)
+            continue
+        spec = raw[1:] if raw.startswith("+") else raw
+        if spec.count(":") != 1:
+            return None
+        source, destination = spec.split(":", 1)
+        if (
+            not _valid_refspec_ref(source, allow_wildcard=True)
+            or not _valid_refspec_ref(destination, allow_wildcard=True)
+            or not destination.startswith(namespace)
+            or source.count("*") != destination.count("*")
+        ):
+            return None
+        candidate = _map_fetch_refspec(source, destination, source_ref)
+        if candidate is not None:
+            mapped.append(candidate)
+    if excluded or len(mapped) != 1:
+        return None
+    destination = mapped[0]
+    if (
+        not destination.startswith(namespace)
+        or not _valid_refspec_ref(destination, allow_wildcard=False)
+    ):
+        return None
+    return destination
+
+
+def _primary_maintenance_git_dirs(cwd: str) -> tuple[str, str] | None:
+    directories: list[str] = []
+    for option in ("--git-dir", "--git-common-dir"):
+        lines = _primary_maintenance_lines(
+            _run_primary_maintenance_git(
+                cwd,
+                "rev-parse",
+                "--path-format=absolute",
+                option,
+            )
+        )
+        if (
+            lines is None
+            or len(lines) != 1
+            or not os.path.isabs(lines[0])
+            or not os.path.isdir(lines[0])
+        ):
+            return None
+        directories.append(os.path.realpath(lines[0]))
+    return directories[0], directories[1]
+
+
+def _primary_maintenance_is_idle(
+        git_dir: str,
+        common_dir: str,
+        branch: str,
+) -> bool | None:
+    paths = {
+        os.path.join(directory, marker)
+        for directory in {git_dir, common_dir}
+        for marker in _PRIMARY_MAINTENANCE_IN_PROGRESS
+    }
+    paths.update(
+        {
+            os.path.join(git_dir, "index.lock"),
+            os.path.join(git_dir, "HEAD.lock"),
+            os.path.join(common_dir, "packed-refs.lock"),
+            os.path.join(common_dir, "config.lock"),
+            os.path.join(common_dir, "shallow.lock"),
+            os.path.join(common_dir, "refs", "heads", branch + ".lock"),
+        }
+    )
+    try:
+        return not any(os.path.lexists(path) for path in paths)
+    except OSError:
+        return None
+
+
+def _maintenance_result(
+        allowed: bool,
+        kind: str,
+        reason_code: str,
+        matched: bool = True,
+) -> PrimaryMaintenanceDecision:
+    return PrimaryMaintenanceDecision(allowed, kind, reason_code, matched)
+
+
+def classify_primary_maintenance(
+        command: str,
+        cwd: str,
+) -> PrimaryMaintenanceDecision:
+    """Prove the exact command and local state needed for ADR 0019 maintenance."""
+    shape = _primary_maintenance_shape(command)
+    if not shape.valid:
+        return _maintenance_result(
+            False,
+            shape.kind,
+            "unsupported_form",
+            shape.matched,
+        )
+    if any(
+        key in _PRIMARY_MAINTENANCE_RISKY_GIT_ENV
+        or key.startswith("GIT_CONFIG_")
+        for key in os.environ
+    ):
+        return _maintenance_result(False, shape.kind, "inspection_failed")
+
+    branch_result = _run_primary_maintenance_git(
+        cwd,
+        "symbolic-ref",
+        "--quiet",
+        "HEAD",
+    )
+    if branch_result is None:
+        return _maintenance_result(False, shape.kind, "inspection_failed")
+    if branch_result[0] == 1 and not branch_result[1] and not branch_result[2]:
+        return _maintenance_result(False, shape.kind, "missing_upstream")
+    branch_lines = _primary_maintenance_lines(branch_result)
+    if (
+        branch_lines is None
+        or len(branch_lines) != 1
+        or not branch_lines[0].startswith("refs/heads/")
+        or len(branch_lines[0]) <= len("refs/heads/")
+    ):
+        return _maintenance_result(False, shape.kind, "inspection_failed")
+    branch = branch_lines[0][len("refs/heads/"):]
+
+    remote_status, remotes = _primary_maintenance_config_values(
+        cwd,
+        "branch.{0}.remote".format(branch),
+    )
+    merge_status, merge_refs = _primary_maintenance_config_values(
+        cwd,
+        "branch.{0}.merge".format(branch),
+    )
+    if remote_status == "error" or merge_status == "error":
+        return _maintenance_result(False, shape.kind, "inspection_failed")
+    if (
+        remote_status != "ok"
+        or merge_status != "ok"
+        or len(remotes) != 1
+        or len(merge_refs) != 1
+        or not remotes[0]
+        or remotes[0] == "."
+        or not _valid_refspec_ref(merge_refs[0], allow_wildcard=False)
+        or not merge_refs[0].startswith("refs/heads/")
+    ):
+        return _maintenance_result(False, shape.kind, "missing_upstream")
+    remote = remotes[0]
+    if (
+        any(ord(char) < 32 or ord(char) == 127 for char in remote)
+        or any(token in remote for token in ("..", "@{", "\\", ":", "*", "?", "["))
+        or remote.startswith(".")
+        or remote.endswith("/")
+    ):
+        return _maintenance_result(False, shape.kind, "missing_upstream")
+
+    fetch_status, refspecs = _primary_maintenance_config_values(
+        cwd,
+        "remote.{0}.fetch".format(remote),
+    )
+    if fetch_status == "error":
+        return _maintenance_result(False, shape.kind, "inspection_failed")
+    if fetch_status != "ok":
+        return _maintenance_result(False, shape.kind, "unsafe_fetch_config")
+    upstream_ref = _safe_fetch_destination(remote, merge_refs[0], refspecs)
+    if upstream_ref is None:
+        return _maintenance_result(False, shape.kind, "unsafe_fetch_config")
+
+    upstream_lines = _primary_maintenance_lines(
+        _run_primary_maintenance_git(
+            cwd,
+            "rev-parse",
+            "--symbolic-full-name",
+            "--verify",
+            "@{upstream}",
+        )
+    )
+    if (
+        upstream_lines is None
+        or len(upstream_lines) != 1
+        or upstream_lines[0] != upstream_ref
+    ):
+        return _maintenance_result(False, shape.kind, "unsafe_fetch_config")
+    upstream_oid = _primary_maintenance_lines(
+        _run_primary_maintenance_git(
+            cwd,
+            "rev-parse",
+            "--verify",
+            "{0}^{{commit}}".format(upstream_ref),
+        )
+    )
+    if (
+        upstream_oid is None
+        or len(upstream_oid) != 1
+        or len(upstream_oid[0]) not in (40, 64)
+        or re.fullmatch(r"[0-9a-f]+", upstream_oid[0]) is None
+    ):
+        return _maintenance_result(False, shape.kind, "unsafe_fetch_config")
+    head_oid = _primary_maintenance_lines(
+        _run_primary_maintenance_git(
+            cwd,
+            "rev-parse",
+            "--verify",
+            "HEAD^{commit}",
+        )
+    )
+    if (
+        head_oid is None
+        or len(head_oid) != 1
+        or len(head_oid[0]) not in (40, 64)
+        or re.fullmatch(r"[0-9a-f]+", head_oid[0]) is None
+    ):
+        return _maintenance_result(False, shape.kind, "inspection_failed")
+
+    short_upstream = upstream_ref[len("refs/remotes/"):]
+    if shape.kind == "fetch":
+        if shape.operand and shape.operand != remote:
+            return _maintenance_result(False, shape.kind, "wrong_upstream")
+    else:
+        accepted_operands = {"", "@{u}", "@{upstream}", short_upstream}
+        if shape.operand not in accepted_operands:
+            return _maintenance_result(False, shape.kind, "wrong_upstream")
+        if shape.operand:
+            explicit_lines = _primary_maintenance_lines(
+                _run_primary_maintenance_git(
+                    cwd,
+                    "rev-parse",
+                    "--symbolic-full-name",
+                    "--verify",
+                    shape.operand,
+                )
+            )
+            if (
+                explicit_lines is None
+                or len(explicit_lines) != 1
+                or explicit_lines[0] != upstream_ref
+            ):
+                return _maintenance_result(False, shape.kind, "wrong_upstream")
+
+    git_dirs = _primary_maintenance_git_dirs(cwd)
+    if git_dirs is None:
+        return _maintenance_result(False, shape.kind, "inspection_failed")
+    idle = _primary_maintenance_is_idle(git_dirs[0], git_dirs[1], branch)
+    if idle is None:
+        return _maintenance_result(False, shape.kind, "inspection_failed")
+    if not idle:
+        return _maintenance_result(False, shape.kind, "busy")
+
+    hidden_index_bits = _primary_maintenance_has_hidden_index_bits(cwd)
+    if hidden_index_bits is None:
+        return _maintenance_result(False, shape.kind, "inspection_failed")
+    if hidden_index_bits:
+        return _maintenance_result(False, shape.kind, "dirty")
+
+    status_result = _run_primary_maintenance_git(
+        cwd,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    )
+    if status_result is None:
+        return _maintenance_result(False, shape.kind, "inspection_failed")
+    if status_result[0] != 0 or status_result[2]:
+        return _maintenance_result(False, shape.kind, "inspection_failed")
+    if status_result[1]:
+        return _maintenance_result(False, shape.kind, "dirty")
+
+    if shape.kind == "fast_forward":
+        ancestry = _run_primary_maintenance_git(
+            cwd,
+            "merge-base",
+            "--is-ancestor",
+            "HEAD",
+            upstream_ref,
+        )
+        if ancestry is None:
+            return _maintenance_result(False, shape.kind, "inspection_failed")
+        if ancestry[1] or ancestry[2]:
+            return _maintenance_result(False, shape.kind, "inspection_failed")
+        if ancestry[0] == 1:
+            return _maintenance_result(False, shape.kind, "diverged")
+        if ancestry[0] != 0:
+            return _maintenance_result(False, shape.kind, "inspection_failed")
+    return _maintenance_result(True, shape.kind, "allowed")
+
+
 # ---- ADR 0001: target-path-aware mutation scope -----------------------------------
 # A precise target-path check may only ever convert an existing `deny` into `allow`
 # when every resolved target is affirmatively proven safe; any uncertainty (an
@@ -951,6 +1653,21 @@ def decide_shell(cwd: str, command: str, policy_path: str,
     if cls.classification != policy_mod.INCLUDE:
         return _allow(f"{cls.classification}: {cls.reason}", cls.classification)
     if classify_mutating(command):
+        # ADRs 0010/0019: fetch and merge remain mutating. Only the exact,
+        # state-proven maintenance intersection converts this included-primary deny
+        # to allow; every false/unknown result denies before ADR 0001 narrowing.
+        maintenance = classify_primary_maintenance(command, cwd)
+        if maintenance.allowed:
+            return _allow(
+                _PRIMARY_MAINTENANCE_ALLOW_REASONS[maintenance.kind],
+                cls.classification,
+            )
+        if maintenance.matched:
+            return Decision(
+                "deny",
+                _PRIMARY_MAINTENANCE_MESSAGES[maintenance.reason_code],
+                cls.classification,
+            )
         # ADR 0001: additive narrowing. Only when EVERY resolved target is confidently
         # outside any protected primary does this convert the deny below into an allow;
         # any uncertainty (targets is None) or any protected target falls through
