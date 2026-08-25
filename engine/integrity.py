@@ -24,7 +24,7 @@ import sys
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import quote
 
@@ -547,12 +547,15 @@ def _check_freshness(facts: Facts) -> tuple[str, str]:
     return "green", "required deep sweep is fresh"
 
 
-def _check_alert(facts: Facts) -> tuple[str, str]:
+def _check_alert(facts: Facts, *, non_green: bool = True) -> tuple[str, str]:
+    if not non_green:
+        return "green", "no non-green status requires alert delivery"
     delivered = facts.delivered
     if not isinstance(delivered, dict):
         return "unknown", "alert delivery result unavailable"
     native = delivered.get("native")
     slack = delivered.get("slack")
+    # The status schema requires explicit ``opted_out``; absence is malformed.
     configured = [native]
     if slack != "opted_out":
         configured.append(slack)
@@ -815,10 +818,7 @@ def _kernel_parity(source: Path, probes: list[tuple[Path, str]]) -> bool | None:
                 if proc.returncode != 0:
                     return False
                 mirrored = json.loads(proc.stdout)
-                if (
-                    mirrored.get("permission") != direct.permission
-                    or mirrored.get("classification") != direct.classification
-                ):
+                if mirrored.get("permission") != direct.permission:
                     return False
         return True
     except (
@@ -838,6 +838,8 @@ def _mcp_parity(source: Path, probes: list[tuple[Path, str]]) -> bool | None:
     policy = _policy_path(source)
     if not policy.is_file():
         return None
+    previous_policy = os.environ.get("AWA_POLICY")
+    os.environ["AWA_POLICY"] = str(policy)
     try:
         for cwd, command in probes:
             direct = guard.decide_shell(str(cwd), command, str(policy))
@@ -852,6 +854,11 @@ def _mcp_parity(source: Path, probes: list[tuple[Path, str]]) -> bool | None:
         return True
     except Exception:  # noqa: BLE001 — an unavailable adapter is UNKNOWN.
         return None
+    finally:
+        if previous_policy is None:
+            os.environ.pop("AWA_POLICY", None)
+        else:
+            os.environ["AWA_POLICY"] = previous_policy
 
 
 def _hook_facts(source: Path) -> tuple[bool | None, bool | None]:
@@ -969,27 +976,33 @@ def _recovery_facts() -> tuple[str | None, int | None]:
     return last_status, needs_repair
 
 
-_ROOTS_MODULE = None
+_ROOTS_MODULES: dict[Path, object] = {}
 
 
-def _roots_module():
-    global _ROOTS_MODULE
-    if _ROOTS_MODULE is not None:
-        return _ROOTS_MODULE
-    module_path = _repo_root() / "kernel" / "lib" / "awa_roots.py"
+def _roots_module(source: Path):
+    resolved = source.resolve()
+    cached = _ROOTS_MODULES.get(resolved)
+    if cached is not None:
+        return cached
+    module_path = resolved / "kernel" / "lib" / "awa_roots.py"
+    module_name = (
+        "awa_roots_for_integrity_"
+        + hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:12]
+    )
     spec = importlib.util.spec_from_file_location(
-        "awa_roots_for_integrity", module_path
+        module_name,
+        module_path,
     )
     if spec is None or spec.loader is None:
         raise RuntimeError("canonical disposition module unavailable")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    _ROOTS_MODULE = module
+    _ROOTS_MODULES[resolved] = module
     return module
 
 
-def _lifecycle_facts() -> tuple[
+def _lifecycle_facts(source: Path) -> tuple[
     int | None,
     int | None,
     int | None,
@@ -1003,7 +1016,7 @@ def _lifecycle_facts() -> tuple[
             ).fetchall()
         finally:
             conn.close()
-        roots = _roots_module()
+        roots = _roots_module(source)
     except (sqlite3.Error, OSError, RuntimeError):
         return None, None, None, None
 
@@ -1106,7 +1119,7 @@ def _collect_facts(previous: dict | None, *, now: float) -> Facts:
         sessions_dangling,
         husks,
         disposition_map,
-    ) = _lifecycle_facts()
+    ) = _lifecycle_facts(source)
     return Facts(
         guard_primary_deny=primary_deny,
         guard_cd_bypass_deny=cd_deny,
@@ -1174,12 +1187,16 @@ def evaluate(
         raise ValueError(f"invalid integrity profile: {profile}")
     if trigger not in _TRIGGERS:
         raise ValueError(f"invalid integrity trigger: {trigger}")
+    if trigger == "launchd" and profile != "deep":
+        raise ValueError("launchd trigger requires deep profile")
 
     now = time.time()
     generated_at = _iso_at(now)
     previous = read_status()
     if facts is None:
         facts = _test_facts_from_env() or _collect_facts(previous, now=now)
+    if trigger == "launchd":
+        facts = replace(facts, launchd_last_success_age_s=0.0)
 
     previous_invariants = {}
     if isinstance(previous, dict) and isinstance(previous.get("invariants"), list):
@@ -1191,6 +1208,8 @@ def evaluate(
 
     invariants = []
     for invariant_id, (check, _required, _safety, profiles) in REGISTRY.items():
+        if invariant_id == "alert_delivery":
+            continue
         if profile in profiles:
             severity, evidence = check(facts)
             item = {
@@ -1224,6 +1243,29 @@ def evaluate(
         facts,
         trigger=trigger,
         now=now,
+    )
+    non_alert_overall = reduce(
+        [
+            *invariants,
+            {
+                "id": "alert_delivery",
+                "severity": "green",
+            },
+        ],
+        triggers,
+    )
+    alert_severity, alert_evidence = _check_alert(
+        facts,
+        non_green=non_alert_overall != "green",
+    )
+    invariants.append(
+        {
+            "id": "alert_delivery",
+            "severity": alert_severity,
+            "evidence": alert_evidence,
+            "checked_at": generated_at,
+            "profile": profile,
+        }
     )
     overall = reduce(invariants, triggers)
     launchd_success = _parse_iso(triggers["launchd"].get("last_success"))

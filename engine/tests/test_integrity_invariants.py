@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import copy
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
-from engine import integrity
+from engine import guard, integrity, mcp_server
 
 
 _SAFE_FACTS = {
@@ -82,10 +86,29 @@ class TestIntegrityInvariants(unittest.TestCase):
 
     def test_alert_delivery_prior_all_failed_while_nongreen_is_red(self):
         status = self.evaluate(
-            delivered={"native": "failed", "slack": "opted_out"}
+            release_matches=False,
+            delivered={"native": "failed", "slack": "opted_out"},
         )
         self.assertEqual(invariant(status, "alert_delivery")["severity"], "red")
         self.assertEqual(status["overall"], "red")
+
+    def test_alert_delivery_prior_failure_does_not_stick_recovered_green(self):
+        status = self.evaluate(
+            delivered={"native": "failed", "slack": "opted_out"}
+        )
+        self.assertEqual(invariant(status, "alert_delivery")["severity"], "green")
+        self.assertEqual(status["overall"], "green")
+
+    def test_alert_delivery_requires_explicit_slack_opt_out(self):
+        status = self.evaluate(
+            release_matches=False,
+            delivered={"native": "accepted"},
+        )
+        self.assertEqual(
+            invariant(status, "alert_delivery")["severity"],
+            "unknown",
+        )
+        self.assertEqual(status["overall"], "degraded")
 
     def test_leases_unreconciled_make_lifecycle_degraded(self):
         status = self.evaluate(
@@ -109,6 +132,18 @@ class TestIntegrityInvariants(unittest.TestCase):
             "red",
         )
         self.assertEqual(status["overall"], "red")
+
+    def test_launchd_deep_pass_refreshes_own_freshness(self):
+        status = integrity.evaluate(
+            "deep",
+            trigger="launchd",
+            facts=facts(launchd_last_success_age_s=None),
+        )
+        self.assertEqual(
+            invariant(status, "surveillance_freshness")["severity"],
+            "green",
+        )
+        self.assertEqual(status["overall"], "green")
 
     def test_release_mismatch_degraded(self):
         status = self.evaluate(release_matches=False)
@@ -158,6 +193,116 @@ class TestIntegrityInvariants(unittest.TestCase):
             integrity.reduce(healthy["invariants"], stale_triggers),
             "red",
         )
+
+    def test_lifecycle_loads_disposition_from_source_root(self):
+        class FakeConnection:
+            def execute(self, _query):
+                return self
+
+            def fetchall(self):
+                return [("/redacted/missing-worktree",)]
+
+            def close(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp)
+            module_path = source / "kernel" / "lib" / "awa_roots.py"
+            module_path.parent.mkdir(parents=True)
+            module_path.write_text(
+                "def disposition(_path):\n"
+                "    return {'disposition': 'dead', 'record': {}}\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                integrity,
+                "_ro_conn",
+                return_value=FakeConnection(),
+            ):
+                observed = integrity._lifecycle_facts(source)
+
+        self.assertEqual(observed[:3], (1, 0, 0))
+        self.assertEqual(list(observed[3].values()), ["dead"])
+
+    def test_mcp_parity_evaluates_adapter_with_source_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp)
+            policy = (
+                source
+                / "kernel"
+                / "policy"
+                / "default-worktree-policy.yml"
+            )
+            policy.parent.mkdir(parents=True)
+            policy.write_text("version: 1\n", encoding="utf-8")
+            seen_policies = []
+
+            def direct(_cwd, _command, policy_path):
+                seen_policies.append(str(policy_path))
+                return SimpleNamespace(
+                    permission="allow",
+                    classification="read_only",
+                )
+
+            def adapted(_args):
+                seen_policies.append(mcp_server._policy_path())
+                return {
+                    "permission": "allow",
+                    "classification": "read_only",
+                }
+
+            with mock.patch.object(guard, "decide_shell", side_effect=direct), \
+                    mock.patch.object(
+                        mcp_server,
+                        "_tool_guard_shell",
+                        side_effect=adapted,
+                    ):
+                self.assertTrue(
+                    integrity._mcp_parity(
+                        source,
+                        [(source, "git status")],
+                    )
+                )
+
+        self.assertEqual(seen_policies, [str(policy), str(policy)])
+
+    def test_kernel_parity_accepts_public_permission_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp)
+            hook = source / "kernel" / "hooks" / "worktree-guard.sh"
+            policy = (
+                source
+                / "kernel"
+                / "policy"
+                / "default-worktree-policy.yml"
+            )
+            hook.parent.mkdir(parents=True)
+            policy.parent.mkdir(parents=True)
+            hook.write_text("#!/bin/sh\n", encoding="utf-8")
+            policy.write_text("version: 1\n", encoding="utf-8")
+            direct = SimpleNamespace(
+                permission="allow",
+                classification="read_only",
+            )
+            mirrored = SimpleNamespace(
+                returncode=0,
+                stdout='{"permission":"allow"}',
+            )
+            with mock.patch.object(
+                guard,
+                "decide_shell",
+                return_value=direct,
+            ), mock.patch.object(
+                integrity.subprocess,
+                "run",
+                return_value=mirrored,
+            ):
+                self.assertTrue(
+                    integrity._kernel_parity(
+                        source,
+                        [(source, "git status")],
+                    )
+                )
 
 
 if __name__ == "__main__":

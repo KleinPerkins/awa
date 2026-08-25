@@ -194,6 +194,15 @@ def cmd_integrity(args: argparse.Namespace) -> int:
         return _emit(status, code=_integrity_exit_code(status))
 
     if args.what == "verify":
+        if args.trigger == "launchd" and args.profile != "deep":
+            return _emit(
+                {
+                    "schema": integrity_mod.SCHEMA,
+                    "overall": "red",
+                    "error": "launchd trigger requires deep profile",
+                },
+                code=2,
+            )
         evaluated = integrity_mod.evaluate(
             args.profile,
             trigger=args.trigger,

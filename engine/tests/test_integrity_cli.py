@@ -176,6 +176,23 @@ class TestIntegrityCli(EngineTestCase):
         self.assertEqual(invalid.returncode, 2)
         self.assertIn("invalid choice", invalid.stderr)
 
+    def test_launchd_trigger_requires_deep_profile(self):
+        invalid = self._run(
+            "integrity",
+            "verify",
+            "--profile",
+            "fast",
+            "--trigger",
+            "launchd",
+            facts=self._facts(),
+        )
+        self.assertEqual(invalid.returncode, 2)
+        self.assertEqual(
+            json.loads(invalid.stdout)["error"],
+            "launchd trigger requires deep profile",
+        )
+        self.assertIsNone(integrity.read_status())
+
     def test_no_repair_or_export_verb_registered(self):
         for verb in ("repair", "export"):
             with self.subTest(verb=verb):
