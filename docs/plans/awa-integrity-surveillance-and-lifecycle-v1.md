@@ -1,7 +1,7 @@
 # AWA Integrity Surveillance and Lifecycle — one honest evaluator, runnerless surveillance, loud alerts, thin static console
 
 - **Version:** v1
-- **Status:** DRAFT — 2026-08-24
+- **Status:** ACCEPTED — 2026-08-24
 - **Date:** 2026-08-24
 - **Owning repository:** `KleinPerkins/awa` (`~/dev/capabilities/awa`)
 - **Plan-type:** agentic-execution

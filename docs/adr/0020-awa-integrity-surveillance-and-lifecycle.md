@@ -1,5 +1,5 @@
 # ADR 0020: AWA integrity surveillance and lifecycle — fix entry/lifecycle/observability, never the guard
-Status: draft — 2026-08-24
+Status: accepted — 2026-08-24
 
 *Plain-language summary: the 2026-08-24 incident proved the shell guard is doing its job — a
 mutating command on a protected primary was correctly denied, even the `cd <worktree> && …`
