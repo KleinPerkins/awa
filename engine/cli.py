@@ -20,6 +20,7 @@ from . import (
     daemon as daemon_mod,
     gitutil,
     guard as guard_mod,
+    integrity as integrity_mod,
     lease as lease_mod,
     lifecycle,
     modes as modes_mod,
@@ -167,6 +168,67 @@ def cmd_recover(args: argparse.Namespace) -> int:
         with state_mod.State(assert_local=False) as st:
             return _emit({"action": "status", **retention.status(st)})
     return _emit({"ok": False, "error": f"unknown recover subcommand: {args.what}"}, code=2)
+
+
+def _integrity_exit_code(status: dict) -> int:
+    if not integrity_mod._launchd_is_fresh(status.get("triggers")):
+        return 2
+    return {"green": 0, "degraded": 1, "red": 2}.get(
+        status.get("overall"),
+        2,
+    )
+
+
+def cmd_integrity(args: argparse.Namespace) -> int:
+    if args.what == "view":
+        status = integrity_mod.read_status()
+        if status is None:
+            return _emit(
+                {
+                    "schema": integrity_mod.SCHEMA,
+                    "overall": "red",
+                    "error": "integrity status missing or malformed",
+                },
+                code=2,
+            )
+        return _emit(status, code=_integrity_exit_code(status))
+
+    if args.what == "verify":
+        evaluated = integrity_mod.evaluate(
+            args.profile,
+            trigger=args.trigger,
+        )
+        integrity_mod._commit(
+            evaluated,
+            profile=args.profile,
+            trigger=args.trigger,
+        )
+        committed = integrity_mod.read_status()
+        if committed is None:
+            return _emit(
+                {
+                    "schema": integrity_mod.SCHEMA,
+                    "overall": "red",
+                    "error": "integrity commit unavailable",
+                },
+                code=2,
+            )
+        return _emit(committed, code=_integrity_exit_code(committed))
+
+    if args.what in {"console", "sweep"}:
+        return _emit(
+            {
+                "schema": integrity_mod.SCHEMA,
+                "overall": "red",
+                "error": f"integrity {args.what} is unavailable in this build",
+            },
+            code=3,
+        )
+
+    return _emit(
+        {"schema": integrity_mod.SCHEMA, "overall": "red", "error": "unknown integrity verb"},
+        code=2,
+    )
 
 
 def cmd_guard(args: argparse.Namespace) -> int:
@@ -351,6 +413,39 @@ def build_parser() -> argparse.ArgumentParser:
                     help="prune --maintenance: opportunistic trigger (sessionStart hook / daemon) — "
                          "throttled to <=1/24h and non-blocking (a concurrent pass simply skips)")
     rc.set_defaults(fn=cmd_recover)
+
+    integrity = sub.add_parser(
+        "integrity",
+        help="read or verify the private integrity status",
+    )
+    integrity_sub = integrity.add_subparsers(dest="what", required=True)
+    integrity_sub.add_parser(
+        "view",
+        help="read the last committed integrity status",
+    ).set_defaults(fn=cmd_integrity)
+    integrity_verify = integrity_sub.add_parser(
+        "verify",
+        help="evaluate once and commit status",
+    )
+    integrity_verify.add_argument(
+        "--profile",
+        choices=["fast", "deep"],
+        default="deep",
+    )
+    integrity_verify.add_argument(
+        "--trigger",
+        choices=["cli", "beforeShell", "stop", "launchd"],
+        required=True,
+    )
+    integrity_verify.set_defaults(fn=cmd_integrity)
+    integrity_sub.add_parser(
+        "console",
+        help="reserved for the M1 private static console",
+    ).set_defaults(fn=cmd_integrity)
+    integrity_sub.add_parser(
+        "sweep",
+        help="reserved for the M1 session-independent deep sweep",
+    ).set_defaults(fn=cmd_integrity)
 
     g = sub.add_parser("guard", help="engine-off kernel guard (shell/can-clean)")
     g.add_argument("what", choices=["shell", "can-clean"])
