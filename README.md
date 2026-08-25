@@ -379,12 +379,14 @@ severity/crash codes unchanged. AWA ships its executable and
 `contracts/awa-integrity-schedule.v1.json`, but no plist and no host activation; the host's
 `local-jobs` layer owns scheduling.
 
-A worsening transition attempts a bounded native macOS notification, then records
-`accepted|failed` through a generation-CAS receipt commit under the same transition id. The
-generation-tagged public projection and static console are closed/redacted and private (`0600`);
-`awa-engine integrity console` prints the referenced file and `--open` opens it. The page is
-self-contained and changes its presentation to `STALE / RED` after `fresh_until` using one
-CSP-hashed clock-only script.
+A worsening transition creates an immutable pending outbox. A private dispatch lock revalidates and
+drains only the current transition, including same-severity retries after a crash or failed native
+macOS notification, then records `accepted|failed` through a generation-CAS receipt commit. Receipt
+advancement is exactly once; external notification is at least once if the process dies after macOS
+accepts it but before the receipt commits. The generation-tagged public projection and static console
+are closed/redacted and private (`0600`); `awa-engine integrity console` prints the referenced file
+and `--open` opens it. The page is self-contained, relies on ordinary browser refresh, and changes
+its presentation to `STALE / RED` after `fresh_until` using one CSP-hashed clock-only script.
 
 This is M1-B only. M1-C owns hook observers, M1-D owns opt-in Slack, and M2 owns lifecycle repair,
 quarantine, and the entry handshake.

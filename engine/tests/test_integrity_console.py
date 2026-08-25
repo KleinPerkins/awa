@@ -148,7 +148,9 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertNotIn("https://", lowered)
         self.assertNotIn("<script src", lowered)
         self.assertNotIn("<link ", lowered)
-        self.assertIn('<button class="reload" type="submit">', page)
+        self.assertNotIn("<form", lowered)
+        self.assertNotIn("<button", lowered)
+        self.assertNotIn("reload file", lowered)
         script, csp = self._script_and_csp(page)
         digest = base64.b64encode(
             hashlib.sha256(script.encode("utf-8")).digest()
@@ -156,6 +158,7 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertIn(f"'sha256-{digest}'", csp)
         self.assertIn("default-src 'none'", csp)
         self.assertIn("connect-src 'none'", csp)
+        self.assertIn("form-action 'none'", csp)
         self.assertNotIn("'unsafe-inline'", csp)
 
     def test_script_injection_escaped(self):

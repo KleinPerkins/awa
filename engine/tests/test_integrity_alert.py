@@ -100,6 +100,14 @@ class TestIntegrityAlert(EngineTestCase):
         directory = paths.integrity_dir() / "receipt"
         return sorted(directory.glob("*")) if directory.is_dir() else []
 
+    def _outbox(self, status: dict) -> dict:
+        return json.loads(
+            (
+                paths.integrity_dir()
+                / status["artifacts"]["outbox"]["path"]
+            ).read_text(encoding="utf-8")
+        )
+
     def test_projection_has_no_paths_or_secrets(self):
         projection = integrity.public_projection(
             self._status(
@@ -491,6 +499,272 @@ class TestIntegrityAlert(EngineTestCase):
         self.assertEqual(
             current["alert"]["delivered"],
             {"native": "accepted", "slack": "opted_out"},
+        )
+
+    def test_crash_before_dispatch_then_same_severity_evaluation_drains(self):
+        integrity._commit(
+            self._status("green"),
+            profile="deep",
+            trigger="launchd",
+        )
+        with mock.patch.object(
+            integrity_alert,
+            "dispatch",
+            side_effect=KeyboardInterrupt,
+        ), self.assertRaises(KeyboardInterrupt):
+            integrity._commit(
+                self._status("degraded"),
+                profile="deep",
+                trigger="launchd",
+            )
+        stranded = integrity.read_status()
+        transition_id = stranded["transition_id"]
+        self.assertTrue(self._outbox(stranded)["pending"])
+        self.assertIsNone(integrity._delivered(stranded))
+        self.assertEqual(
+            stat.S_IMODE(
+                (paths.integrity_dir() / ".alert-dispatch.lock").stat().st_mode
+            ),
+            0o600,
+        )
+
+        native = mock.Mock(return_value=True)
+        with mock.patch.object(integrity_alert, "_native", native):
+            integrity._commit(
+                self._status("degraded"),
+                profile="deep",
+                trigger="launchd",
+            )
+        native.assert_called_once()
+        current = integrity.read_status()
+        self.assertEqual(current["transition_id"], transition_id)
+        self.assertEqual(current["alert"]["delivered"]["native"], "accepted")
+        self.assertTrue(self._outbox(current)["pending"])
+
+    def test_concurrent_evaluators_notify_once_and_persist_one_receipt(self):
+        integrity._commit(
+            self._status("green"),
+            profile="deep",
+            trigger="launchd",
+        )
+        calls = Path(self._tmp.name) / "native-calls"
+        code = """
+import fcntl
+import json
+import os
+import time
+from pathlib import Path
+from engine import integrity, integrity_alert
+
+def native(_title, _body):
+    with Path(os.environ["AWA_ALERT_CALLS"]).open("a", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        fh.write("call\\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    time.sleep(0.05)
+    return True
+
+integrity_alert._native = native
+integrity._commit(
+    json.loads(os.environ["AWA_ALERT_STATUS"]),
+    profile="deep",
+    trigger="launchd",
+)
+"""
+        env = os.environ.copy()
+        env["XDG_STATE_HOME"] = str(self.state_home)
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
+        env["AWA_ALERT_CALLS"] = str(calls)
+        env["AWA_ALERT_STATUS"] = json.dumps(self._status("degraded"))
+        workers = [
+            subprocess.Popen(
+                [sys.executable, "-c", code],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _ in range(2)
+        ]
+        results = [worker.communicate(timeout=15) for worker in workers]
+        self.assertTrue(
+            all(worker.returncode == 0 for worker in workers),
+            results,
+        )
+        self.assertEqual(calls.read_text(encoding="utf-8").splitlines(), ["call"])
+        current = integrity.read_status()
+        self.assertEqual(current["generation"], 4)
+        self.assertEqual(current["alert"]["delivered"]["native"], "accepted")
+        self.assertEqual(current["artifacts"]["receipt"]["gen"], 3)
+        self.assertEqual(
+            list((paths.integrity_dir() / "receipt").glob("[0-9]*.json")),
+            [paths.integrity_dir() / "receipt" / "3.json"],
+        )
+
+    def test_current_carried_receipt_survives_pruning(self):
+        integrity._commit(
+            self._status("green"),
+            profile="deep",
+            trigger="launchd",
+        )
+        integrity._commit(
+            self._status("degraded"),
+            profile="deep",
+            trigger="launchd",
+        )
+        with mock.patch.object(integrity, "HISTORY_MAX", 1):
+            integrity._commit(
+                self._status("degraded"),
+                profile="deep",
+                trigger="launchd",
+            )
+        current = integrity.read_status()
+        self.assertIsNotNone(current)
+        self.assertEqual(current["artifacts"]["receipt"]["gen"], 3)
+        self.assertTrue(
+            (paths.integrity_dir() / "receipt" / "3.json").is_file()
+        )
+
+    def test_stale_pending_transition_is_ignored_and_audited(self):
+        integrity._commit(
+            self._status("green"),
+            profile="deep",
+            trigger="launchd",
+        )
+        with mock.patch.object(
+            integrity_alert,
+            "dispatch",
+            side_effect=KeyboardInterrupt,
+        ), self.assertRaises(KeyboardInterrupt):
+            integrity._commit(
+                self._status("degraded"),
+                profile="deep",
+                trigger="launchd",
+            )
+        stale = integrity.read_status()
+        stale_generation = stale["generation"]
+        stale_transition = stale["transition_id"]
+        superseding = self._status("green")
+        superseding.pop("schema")
+        integrity._commit(
+            superseding,
+            profile="deep",
+            trigger="launchd",
+        )
+
+        native = mock.Mock(return_value=True)
+        self.assertIsNone(
+            integrity.drain_pending_alert(
+                stale_generation,
+                stale_transition,
+                native=native,
+            )
+        )
+        native.assert_not_called()
+        audits = list(
+            (paths.integrity_dir() / "receipt").glob(
+                "stale-dispatch-*.json"
+            )
+        )
+        self.assertEqual(len(audits), 1)
+        self.assertEqual(
+            json.loads(audits[0].read_text(encoding="utf-8"))["result"],
+            "stale",
+        )
+        self.assertNotIn(stale_transition, audits[0].read_text(encoding="utf-8"))
+
+    def test_failed_notification_stays_pending_and_retries(self):
+        integrity._commit(
+            self._status("green"),
+            profile="deep",
+            trigger="launchd",
+        )
+        with mock.patch.object(
+            integrity_alert,
+            "_native",
+            return_value=False,
+        ):
+            integrity._commit(
+                self._status("degraded"),
+                profile="deep",
+                trigger="launchd",
+            )
+        failed = integrity.read_status()
+        self.assertEqual(failed["alert"]["delivered"]["native"], "failed")
+        self.assertEqual(integrity._delivered(failed)["native"], "failed")
+        self.assertTrue(self._outbox(failed)["pending"])
+        delivery = next(
+            item
+            for item in failed["invariants"]
+            if item["id"] == "alert_delivery"
+        )
+        self.assertEqual(delivery["severity"], "red")
+
+        retry = mock.Mock(return_value=True)
+        with mock.patch.object(integrity_alert, "_native", retry):
+            integrity._commit(
+                self._status("red"),
+                profile="deep",
+                trigger="launchd",
+            )
+        retry.assert_called_once()
+        accepted = integrity.read_status()
+        self.assertEqual(accepted["alert"]["delivered"]["native"], "accepted")
+        self.assertEqual(accepted["overall"], "degraded")
+        self.assertEqual(
+            next(
+                item
+                for item in accepted["invariants"]
+                if item["id"] == "alert_delivery"
+            )["severity"],
+            "green",
+        )
+
+    def test_notification_before_receipt_crash_is_at_least_once(self):
+        integrity._commit(
+            self._status("green"),
+            profile="deep",
+            trigger="launchd",
+        )
+        native = mock.Mock(return_value=True)
+        with mock.patch.object(
+            integrity_alert,
+            "_native",
+            native,
+        ), mock.patch.object(
+            integrity,
+            "commit_alert_receipt",
+            side_effect=OSError("crash after external notification"),
+        ), self.assertRaises(OSError):
+            integrity._commit(
+                self._status("degraded"),
+                profile="deep",
+                trigger="launchd",
+            )
+        self.assertEqual(native.call_count, 1)
+        self.assertTrue(self._outbox(integrity.read_status())["pending"])
+
+        with mock.patch.object(integrity_alert, "_native", native):
+            integrity._commit(
+                self._status("degraded"),
+                profile="deep",
+                trigger="launchd",
+            )
+        self.assertEqual(native.call_count, 2)
+        self.assertEqual(
+            integrity.read_status()["alert"]["delivered"]["native"],
+            "accepted",
+        )
+        self.assertEqual(
+            len(
+                list(
+                    (paths.integrity_dir() / "receipt").glob(
+                        "[0-9]*.json"
+                    )
+                )
+            ),
+            1,
         )
 
     def _assert_dispatch_process_control_propagates(

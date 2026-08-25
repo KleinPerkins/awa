@@ -162,6 +162,27 @@ def _integrity_lock():
             os.close(fd)
 
 
+@contextlib.contextmanager
+def _alert_dispatch_lock():
+    """Serialize current-outbox validation, native dispatch, and receipt CAS."""
+    root = paths.ensure_dir(paths.integrity_dir())
+    lock_path = root / ".alert-dispatch.lock"
+    fd = os.open(
+        str(lock_path),
+        os.O_RDWR | os.O_CREAT,
+        paths.FILE_MODE,
+    )
+    try:
+        os.fchmod(fd, paths.FILE_MODE)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def _default_trigger() -> dict:
     return {
         "last_attempt": None,
@@ -431,6 +452,100 @@ def _worsened(previous: dict | None, current: dict) -> bool:
     return current_rank > previous_rank
 
 
+def _referenced_outbox(status: object) -> dict | None:
+    if not isinstance(status, dict):
+        return None
+    artifacts = status.get("artifacts")
+    ref = artifacts.get("outbox") if isinstance(artifacts, dict) else None
+    root = paths.integrity_dir()
+    if not _valid_artifact_ref(root, "outbox", ref):
+        return None
+    try:
+        outbox = json.loads((root / ref["path"]).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(outbox, dict)
+        or outbox.get("schema") != OUTBOX_SCHEMA
+        or outbox.get("generation") != ref.get("gen")
+        or type(outbox.get("pending")) is not bool
+        or not isinstance(outbox.get("transition_id"), str)
+        or outbox.get("transition_id") != status.get("transition_id")
+        or outbox.get("previous_overall")
+        not in {*_SEVERITIES, "unknown"}
+        or outbox.get("current_overall") not in _SEVERITIES
+    ):
+        return None
+    return outbox
+
+
+def _referenced_receipt(status: object) -> dict | None:
+    if not isinstance(status, dict):
+        return None
+    artifacts = status.get("artifacts")
+    ref = artifacts.get("receipt") if isinstance(artifacts, dict) else None
+    root = paths.integrity_dir()
+    if not _valid_artifact_ref(root, "receipt", ref):
+        return None
+    try:
+        receipt = json.loads((root / ref["path"]).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    outcomes = receipt.get("outcomes") if isinstance(receipt, dict) else None
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("schema") != RECEIPT_SCHEMA
+        or receipt.get("generation") != ref.get("gen")
+        or receipt.get("transition_id") != status.get("transition_id")
+        or not isinstance(outcomes, dict)
+        or outcomes.get("native") not in {"accepted", "failed"}
+        or outcomes.get("slack") not in {
+            "accepted",
+            "failed",
+            "opted_out",
+        }
+    ):
+        return None
+    return receipt
+
+
+def _transition_delivery(status: object, transition_id: str) -> dict | None:
+    if not isinstance(status, dict):
+        return None
+    alert = status.get("alert")
+    delivered = alert.get("delivered") if isinstance(alert, dict) else None
+    receipt = _referenced_receipt(status)
+    if (
+        not isinstance(alert, dict)
+        or alert.get("last_transition") != transition_id
+        or not isinstance(delivered, dict)
+        or not isinstance(receipt, dict)
+        or receipt.get("transition_id") != transition_id
+        or receipt.get("outcomes") != delivered
+        or delivered.get("native") not in {"accepted", "failed"}
+        or delivered.get("slack") not in {
+            "accepted",
+            "failed",
+            "opted_out",
+        }
+    ):
+        return None
+    return {
+        "native": delivered["native"],
+        "slack": delivered["slack"],
+    }
+
+
+def _pending_outbox(status: object) -> dict | None:
+    outbox = _referenced_outbox(status)
+    if not isinstance(outbox, dict) or outbox.get("pending") is not True:
+        return None
+    delivered = _transition_delivery(status, outbox["transition_id"])
+    if isinstance(delivered, dict) and delivered.get("native") == "accepted":
+        return None
+    return outbox
+
+
 def _artifact_payloads(
     status: dict,
     *,
@@ -438,11 +553,33 @@ def _artifact_payloads(
 ) -> dict[str, bytes]:
     generation = status["generation"]
     public = _projection_with_history(status, previous)
+    prior_pending = _pending_outbox(previous)
+    carry_pending = bool(
+        isinstance(prior_pending, dict)
+        and prior_pending.get("transition_id") == status.get("transition_id")
+    )
+    pending = _worsened(previous, status) or carry_pending
+    previous_overall = (
+        prior_pending.get("previous_overall")
+        if carry_pending
+        else (
+            previous.get("overall")
+            if isinstance(previous, dict)
+            else "unknown"
+        )
+    )
+    current_overall = (
+        prior_pending.get("current_overall")
+        if carry_pending
+        else status.get("overall")
+    )
     outbox = {
         "schema": OUTBOX_SCHEMA,
         "generation": generation,
         "transition_id": status.get("transition_id"),
-        "pending": _worsened(previous, status),
+        "previous_overall": previous_overall,
+        "current_overall": current_overall,
+        "pending": pending,
     }
     return {
         "history": _json_bytes(status),
@@ -452,15 +589,31 @@ def _artifact_payloads(
     }
 
 
-def _prune_superseded(root: Path, generation: int) -> None:
+def _prune_superseded(
+    root: Path,
+    generation: int,
+    artifacts: dict | None = None,
+) -> None:
     if HISTORY_MAX < 1:
         return
     cutoff = generation - HISTORY_MAX
     if cutoff < 1:
         return
+    referenced_paths = (
+        {
+            ref.get("path")
+            for ref in artifacts.values()
+            if isinstance(ref, dict)
+            and isinstance(ref.get("path"), str)
+        }
+        if isinstance(artifacts, dict)
+        else set()
+    )
     for name, extension in _ALL_ARTIFACTS:
         child = root / name
         for candidate in child.glob(f"*.{extension}"):
+            if f"{name}/{candidate.name}" in referenced_paths:
+                continue
             try:
                 candidate_generation = int(candidate.stem)
             except ValueError:
@@ -481,69 +634,113 @@ def _commit(status: dict, *, profile: str, trigger: str) -> int:
 
     dispatch_enabled = status.get("schema") == SCHEMA
     root = paths.ensure_dir(paths.integrity_dir())
-    with _integrity_lock():
-        previous = read_status()
-        previous_generation = (
-            previous.get("generation", 0) if isinstance(previous, dict) else 0
-        )
-        if type(previous_generation) is not int or previous_generation < 0:
-            previous_generation = 0
-
-        requested_generation = status.get("generation")
-        if (
-            type(requested_generation) is int
-            and requested_generation <= previous_generation
-        ):
-            raise StaleGenerationError(
-                f"generation {requested_generation} is not newer than "
-                f"{previous_generation}"
+    dispatch_context = (
+        _alert_dispatch_lock()
+        if dispatch_enabled
+        else contextlib.nullcontext()
+    )
+    with dispatch_context:
+        with _integrity_lock():
+            previous = read_status()
+            previous_pending = _pending_outbox(previous)
+            previous_generation = (
+                previous.get("generation", 0)
+                if isinstance(previous, dict)
+                else 0
             )
+            if type(previous_generation) is not int or previous_generation < 0:
+                previous_generation = 0
 
-        generation = previous_generation + 1
-        current = _prepare_status(
-            status,
-            previous,
-            generation,
-            profile=profile,
-            trigger=trigger,
-        )
+            requested_generation = status.get("generation")
+            if (
+                type(requested_generation) is int
+                and requested_generation <= previous_generation
+            ):
+                raise StaleGenerationError(
+                    f"generation {requested_generation} is not newer than "
+                    f"{previous_generation}"
+                )
 
-        children = {
-            name: _ensure_artifact_dir(root, name) for name, _ in _ARTIFACTS
-        }
-        payloads = _artifact_payloads(current, previous=previous)
-        references: dict[str, dict] = {}
-        for name, extension in _ARTIFACTS:
-            data = payloads[name]
-            target = children[name] / f"{generation}.{extension}"
-            _atomic_replace_bytes(target, data)
-            references[name] = {
-                "gen": generation,
-                "path": f"{name}/{generation}.{extension}",
-                "sha256": hashlib.sha256(data).hexdigest(),
-            }
-
-        current["artifacts"] = references
-        _atomic_replace_bytes(paths.integrity_status_path(), _json_bytes(current))
-        _prune_superseded(root, generation)
-
-    if dispatch_enabled and _worsened(previous, current):
-        from . import integrity_alert
-
-        try:
-            outcomes = integrity_alert.dispatch(
+            generation = previous_generation + 1
+            current = _prepare_status(
+                status,
                 previous,
-                current,
-                native=integrity_alert._native,
-                slack=None,
+                generation,
+                profile=profile,
+                trigger=trigger,
             )
-        except Exception:  # Alert faults are recorded, never recursively alerted.
-            outcomes = {"native": "failed", "slack": "opted_out"}
-        if outcomes is not None:
-            commit_alert_receipt(
+            prior_delivery = _transition_delivery(
+                previous,
+                current.get("transition_id"),
+            )
+            if isinstance(prior_delivery, dict):
+                current_alert = current.get("alert")
+                if not isinstance(current_alert, dict):
+                    current_alert = {}
+                    current["alert"] = current_alert
+                previous_alert = previous.get("alert")
+                current_alert["last_transition"] = current["transition_id"]
+                current_alert["delivered"] = prior_delivery
+                current_alert["attempted"] = copy.deepcopy(
+                    previous_alert.get("attempted", [])
+                    if isinstance(previous_alert, dict)
+                    else []
+                )
+
+            children = {
+                name: _ensure_artifact_dir(root, name)
+                for name, _ in _ARTIFACTS
+            }
+            payloads = _artifact_payloads(current, previous=previous)
+            references: dict[str, dict] = {}
+            for name, extension in _ARTIFACTS:
+                data = payloads[name]
+                target = children[name] / f"{generation}.{extension}"
+                _atomic_replace_bytes(target, data)
+                references[name] = {
+                    "gen": generation,
+                    "path": f"{name}/{generation}.{extension}",
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+            if isinstance(prior_delivery, dict):
+                previous_artifacts = previous.get("artifacts")
+                previous_receipt = (
+                    previous_artifacts.get("receipt")
+                    if isinstance(previous_artifacts, dict)
+                    else None
+                )
+                if _valid_artifact_ref(
+                    root,
+                    "receipt",
+                    previous_receipt,
+                ):
+                    references["receipt"] = copy.deepcopy(previous_receipt)
+
+            current["artifacts"] = references
+            _atomic_replace_bytes(
+                paths.integrity_status_path(),
+                _json_bytes(current),
+            )
+            _prune_superseded(root, generation, current["artifacts"])
+
+        if dispatch_enabled:
+            if (
+                isinstance(previous_pending, dict)
+                and previous_pending.get("transition_id")
+                != current.get("transition_id")
+            ):
+                _audit_stale_dispatch(
+                    root,
+                    previous_generation,
+                    previous_pending["transition_id"],
+                    current,
+                )
+            from . import integrity_alert
+
+            _drain_pending_alert_locked(
                 generation,
                 current.get("transition_id"),
-                outcomes,
+                native=integrity_alert._native,
             )
     return generation
 
@@ -636,19 +833,7 @@ def _receipt_already_committed(
     generation = current.get("generation")
     if type(generation) is not int or generation <= expected_generation:
         return False
-    alert = current.get("alert")
-    artifacts = current.get("artifacts")
-    receipt = artifacts.get("receipt") if isinstance(artifacts, dict) else None
-    return bool(
-        isinstance(alert, dict)
-        and alert.get("last_transition") == transition_id
-        and alert.get("delivered") == outcomes
-        and _valid_artifact_ref(
-            paths.integrity_dir(),
-            "receipt",
-            receipt,
-        )
-    )
+    return _transition_delivery(current, transition_id) == outcomes
 
 
 def _audit_stale_receipt(
@@ -688,6 +873,126 @@ def _audit_stale_receipt(
             pass
         raise RuntimeError("stale receipt audit collision")
     _atomic_replace_bytes(target, payload)
+
+
+def _audit_stale_dispatch(
+    root: Path,
+    expected_generation: int,
+    transition_id: str,
+    current: dict | None,
+) -> None:
+    receipt_dir = _ensure_artifact_dir(root, "receipt")
+    transition_hash = hashlib.sha256(
+        transition_id.encode("utf-8")
+    ).hexdigest()
+    current_generation = (
+        current.get("generation")
+        if isinstance(current, dict)
+        and type(current.get("generation")) is int
+        else 0
+    )
+    target = (
+        receipt_dir
+        / (
+            f"stale-dispatch-{expected_generation}-{current_generation}-"
+            f"{transition_hash[:16]}.json"
+        )
+    )
+    payload = _json_bytes(
+        {
+            "schema": "awa-integrity-alert-dispatch-audit/v1",
+            "result": "stale",
+            "expected_generation": expected_generation,
+            "current_generation": current_generation or None,
+            "transition_sha256": transition_hash,
+        }
+    )
+    if target.exists():
+        try:
+            if target.read_bytes() == payload:
+                return
+        except OSError:
+            pass
+        raise RuntimeError("stale dispatch audit collision")
+    _atomic_replace_bytes(target, payload)
+
+
+def _drain_pending_alert_locked(
+    expected_generation: int,
+    transition_id: str | None,
+    *,
+    native,
+) -> int | None:
+    """Drain only the authoritative current transition while dispatch-locked."""
+    root = paths.ensure_dir(paths.integrity_dir())
+    current = read_status()
+    if (
+        not isinstance(current, dict)
+        or current.get("generation") != expected_generation
+        or current.get("transition_id") != transition_id
+    ):
+        if isinstance(transition_id, str) and transition_id:
+            _audit_stale_dispatch(
+                root,
+                expected_generation,
+                transition_id,
+                current,
+            )
+        return None
+
+    outbox = _pending_outbox(current)
+    if (
+        not isinstance(outbox, dict)
+        or outbox.get("transition_id") != transition_id
+    ):
+        return None
+
+    from . import integrity_alert
+
+    previous = {"overall": outbox.get("previous_overall") or "unknown"}
+    dispatch_status = copy.deepcopy(current)
+    if outbox.get("current_overall") in _SEVERITIES:
+        dispatch_status["overall"] = outbox["current_overall"]
+    try:
+        outcomes = integrity_alert.dispatch(
+            previous,
+            dispatch_status,
+            native=native,
+            slack=None,
+            pending=True,
+        )
+    except Exception:  # Ordinary notifier faults remain retryable and visible.
+        outcomes = {"native": "failed", "slack": "opted_out"}
+    if outcomes is None:
+        return None
+    return commit_alert_receipt(
+        expected_generation,
+        transition_id,
+        outcomes,
+    )
+
+
+def drain_pending_alert(
+    expected_generation: int,
+    transition_id: str,
+    *,
+    native=None,
+) -> int | None:
+    """Serialize and retry one current pending transition, never a stale one."""
+    if type(expected_generation) is not int or expected_generation < 1:
+        raise ValueError("expected generation must be a positive integer")
+    if not isinstance(transition_id, str) or not transition_id:
+        raise ValueError("transition id is required")
+    if native is None:
+        from . import integrity_alert
+
+        native = integrity_alert._native
+    with _alert_dispatch_lock():
+        return _drain_pending_alert_locked(
+            expected_generation,
+            transition_id,
+            native=native,
+        )
 
 
 def _remove_unreferenced_generation_target(
@@ -741,32 +1046,43 @@ def _receipt_attempt(
         )
 
 
-def _apply_alert_failure_severity(
+def _apply_alert_delivery_severity(
     status: dict,
     outcomes: dict[str, str],
 ) -> None:
     configured = [outcomes["native"]]
     if outcomes["slack"] != "opted_out":
         configured.append(outcomes["slack"])
-    if status.get("overall") == "green" or not all(
-        result == "failed" for result in configured
-    ):
-        return
-    status["overall"] = "red"
+    failed = all(result == "failed" for result in configured)
+    severity = "red" if failed else "green"
+    evidence = (
+        "all configured alert paths failed"
+        if failed
+        else "at least one configured alert path accepted"
+    )
+    if failed and status.get("overall") != "green":
+        status["overall"] = "red"
+    elif not failed:
+        outbox = _referenced_outbox(status)
+        if (
+            isinstance(outbox, dict)
+            and outbox.get("current_overall") in _SEVERITIES
+        ):
+            status["overall"] = outbox["current_overall"]
     invariants = status.get("invariants")
     if not isinstance(invariants, list):
         invariants = []
         status["invariants"] = invariants
     for item in invariants:
         if isinstance(item, dict) and item.get("id") == "alert_delivery":
-            item["severity"] = "red"
-            item["evidence"] = "all configured alert paths failed"
+            item["severity"] = severity
+            item["evidence"] = evidence
             return
     invariants.append(
         {
             "id": "alert_delivery",
-            "severity": "red",
-            "evidence": "all configured alert paths failed",
+            "severity": severity,
+            "evidence": evidence,
             "checked_at": status.get("generated_at"),
             "profile": status.get("profile"),
         }
@@ -821,7 +1137,7 @@ def commit_alert_receipt(
         _receipt_attempt(alert, transition_id, normalized)
         alert["last_transition"] = transition_id
         alert["delivered"] = normalized
-        _apply_alert_failure_severity(updated, normalized)
+        _apply_alert_delivery_severity(updated, normalized)
 
         for name in ("receipt", "public", "console"):
             _remove_unreferenced_generation_target(
@@ -863,7 +1179,7 @@ def commit_alert_receipt(
             paths.integrity_status_path(),
             _json_bytes(updated),
         )
-        _prune_superseded(root, generation)
+        _prune_superseded(root, generation, updated["artifacts"])
         return generation
 
 
@@ -1545,6 +1861,15 @@ def _launchd_age(previous: dict | None, now: float) -> float | None:
 def _delivered(previous: dict | None) -> dict[str, str] | None:
     if not isinstance(previous, dict):
         return None
+    pending = _pending_outbox(previous)
+    if isinstance(pending, dict):
+        delivered = _transition_delivery(
+            previous,
+            pending["transition_id"],
+        )
+        if delivered is None:
+            return None
+        return delivered
     alert = previous.get("alert")
     value = alert.get("delivered") if isinstance(alert, dict) else None
     if not isinstance(value, dict):

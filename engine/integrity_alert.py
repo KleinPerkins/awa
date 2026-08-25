@@ -50,6 +50,17 @@ def _attempted(alert: object, transition_id: str) -> bool:
     )
 
 
+def _accepted(alert: object, transition_id: str) -> bool:
+    if not isinstance(alert, dict):
+        return False
+    delivered = alert.get("delivered")
+    return bool(
+        alert.get("last_transition") == transition_id
+        and isinstance(delivered, dict)
+        and delivered.get("native") == "accepted"
+    )
+
+
 def _record_attempt(current: dict, transition_id: str) -> None:
     alert = current.setdefault("alert", {})
     if not isinstance(alert, dict):
@@ -153,14 +164,20 @@ def dispatch(
     *,
     native: Callable[[str, str], bool],
     slack=None,
+    pending: bool = False,
 ) -> dict[str, str] | None:
-    """Attempt one worsening transition once and return honest channel outcomes."""
-    if not isinstance(current, dict) or not _worsened(previous, current):
+    """Attempt a new worsening or retry its current immutable pending outbox."""
+    if not isinstance(current, dict):
+        return None
+    if not pending and not _worsened(previous, current):
         return None
     transition_id = current.get("transition_id")
     if not isinstance(transition_id, str) or not transition_id:
         return None
-    if _attempted(current.get("alert"), transition_id):
+    alert = current.get("alert")
+    if _accepted(alert, transition_id):
+        return None
+    if not pending and _attempted(alert, transition_id):
         return None
 
     _record_attempt(current, transition_id)

@@ -22,7 +22,6 @@ header{display:flex;align-items:flex-start;justify-content:space-between;gap:20p
 h1{font-size:26px;line-height:1.2;margin:0 0 6px}
 h2{font-size:16px;margin:0 0 12px}
 p{margin:0;color:#b8c1bd}
-.reload{display:inline-block;border:1px solid #56605c;border-radius:8px;padding:8px 12px;color:#f5f7f6;background:transparent;font:inherit;cursor:pointer}
 .verdict{border:1px solid #38413d;border-left:6px solid #b98500;border-radius:12px;padding:20px;margin-bottom:18px;background:#171b19}
 [data-effective-overall="green"] .verdict{border-left-color:#3da66f}
 [data-effective-overall="red"] .verdict{border-left-color:#e25858}
@@ -121,7 +120,7 @@ def render(projection: dict) -> str:
         f"style-src 'sha256-{style_hash}'; "
         "img-src 'none'; connect-src 'none'; font-src 'none'; "
         "object-src 'none'; media-src 'none'; frame-src 'none'; "
-        "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     )
 
     overall = model["overall"]
@@ -160,8 +159,7 @@ def render(projection: dict) -> str:
         f"data-generated-at=\"{html.escape(generated_at, quote=True)}\" "
         f"data-fresh-until=\"{html.escape(fresh_until, quote=True)}\">"
         "<header><div><h1>AWA integrity</h1>"
-        f"<p>Private snapshot · generation {model['generation']}</p></div>"
-        "<form method=\"get\" action=\"\"><button class=\"reload\" type=\"submit\">Reload file</button></form></header>"
+        f"<p>Private snapshot · generation {model['generation']}</p></div></header>"
         "<section class=\"verdict\" aria-labelledby=\"overall-status\">"
         f"<div class=\"status\" id=\"overall-status\">{html.escape(overall.upper())}</div>"
         "<p>Last checked <span id=\"checked-age\">0s ago</span>"
