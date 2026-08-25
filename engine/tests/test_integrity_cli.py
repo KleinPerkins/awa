@@ -65,12 +65,16 @@ class TestIntegrityCli(EngineTestCase):
 
     def test_verify_exit_codes_exact(self):
         fixtures = (
-            (self._facts(), 0, "green"),
-            (self._facts(release_matches=False), 1, "degraded"),
-            (self._facts(mcp_matches=False), 2, "red"),
+            (self._facts(), 0, "green", 1),
+            (self._facts(release_matches=False), 1, "degraded", 3),
+            (self._facts(mcp_matches=False), 2, "red", 5),
         )
-        previous_generation = 0
-        for observed, expected_code, expected_overall in fixtures:
+        for (
+            observed,
+            expected_code,
+            expected_overall,
+            expected_generation,
+        ) in fixtures:
             with self.subTest(overall=expected_overall):
                 proc = self._run(
                     "integrity",
@@ -85,8 +89,15 @@ class TestIntegrityCli(EngineTestCase):
                 self.assertIn(integrity.SCHEMA, proc.stdout)
                 payload = json.loads(proc.stdout)
                 self.assertEqual(payload["overall"], expected_overall)
-                self.assertEqual(payload["generation"], previous_generation + 1)
-                previous_generation = payload["generation"]
+                self.assertEqual(
+                    payload["generation"],
+                    expected_generation,
+                )
+                if expected_overall != "green":
+                    self.assertEqual(
+                        payload["artifacts"]["receipt"]["gen"],
+                        expected_generation,
+                    )
 
     def test_view_exit_codes_exact(self):
         for observed, expected_code in (
