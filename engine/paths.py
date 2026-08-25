@@ -63,6 +63,14 @@ def recovery_dir() -> Path:
     return awa_state_dir() / "recovery"
 
 
+def integrity_dir() -> Path:
+    return awa_state_dir() / "integrity"
+
+
+def integrity_status_path() -> Path:
+    return integrity_dir() / "status.json"
+
+
 def detections_dir() -> Path:
     return awa_state_dir() / "detections"
 
