@@ -156,7 +156,12 @@ configure_dashboard_refresh() {
 validate_integrity_product_assets() {
   local root="$1"
   [ -x "$root/kernel/bin/awa-integrity-sweep.sh" ] || return 1
+  [ -x "$root/kernel/hooks/worktree-guard-with-integrity.sh" ] || return 1
+  [ -x "$root/kernel/hooks/awa-integrity-observer.sh" ] || return 1
+  [ -x "$root/kernel/hooks/awa-session-handoff.sh" ] || return 1
+  [ -x "$root/engine/integrity_detach.py" ] || return 1
   [ -f "$root/contracts/awa-integrity-schedule.v1.json" ] || return 1
+  [ -f "$root/contracts/awa-hook-owner.v2.json" ] || return 1
   [ -f "$root/engine/integrity_console.py" ] || return 1
   [ -f "$root/engine/integrity_alert.py" ] || return 1
   python3 - "$root" <<'PY'
@@ -167,6 +172,11 @@ from pathlib import Path
 root = Path(sys.argv[1])
 contract = json.loads(
     (root / "contracts" / "awa-integrity-schedule.v1.json").read_text(
+        encoding="utf-8"
+    )
+)
+owner = json.loads(
+    (root / "contracts" / "awa-hook-owner.v2.json").read_text(
         encoding="utf-8"
     )
 )
@@ -186,6 +196,43 @@ valid = (
     and contract.get("exit_codes_verbatim") is True
     and contract.get("executable") == "kernel/bin/awa-integrity-sweep.sh"
     and not any(root.rglob("*.plist"))
+    and owner.get("schema") == "awa-hook-owner/v2"
+    and owner.get("version") == 2
+    and owner.get("successor_of") == "awa-hook-owner/v1"
+    and owner.get("v1_contract")
+    == "contracts/awa-contract.v1.json#hook_ownership"
+    and owner.get("modes") == ["direct", "external"]
+    and owner.get("default_mode") == "direct"
+    and owner.get("selection_schema") == "awa-hook-owner-selection/v1"
+    and owner.get("external_real_hook_file_writes") is False
+    and owner.get("supersedes_roles") == ["worktree.shell-guard"]
+    and [
+        (
+            role.get("id"),
+            role.get("event"),
+            role.get("direct_command_role"),
+        )
+        for role in owner.get("roles", [])
+    ]
+    == [
+        (
+            "worktree.shell-guard-composite",
+            "beforeShellExecution",
+            "kernel/hooks/worktree-guard-with-integrity.sh",
+        ),
+        (
+            "worktree.stop-observer",
+            "stop",
+            "kernel/hooks/awa-integrity-observer.sh",
+        ),
+        (
+            "worktree.session-handoff",
+            "sessionStart",
+            "kernel/hooks/awa-session-handoff.sh",
+        ),
+    ]
+    and owner.get("roles", [{}])[-1].get("dormant_until_milestone")
+    == "M2.4"
 )
 raise SystemExit(0 if valid else 1)
 PY
@@ -226,7 +273,7 @@ do_install() {
   chmod +x "$RUNTIME"/install.sh "$RUNTIME"/bootstrap.sh 2>/dev/null || true
   chmod +x "$RUNTIME"/kernel/bin/*.sh "$RUNTIME"/kernel/hooks/*.sh "$RUNTIME"/kernel/checks/*.sh 2>/dev/null || true
   chmod +x "$RUNTIME"/kernel/lib/*.py "$RUNTIME"/bin/*.sh "$RUNTIME"/dashboard/*.py \
-    "$RUNTIME"/dashboard/*.sh \
+    "$RUNTIME"/dashboard/*.sh "$RUNTIME"/engine/integrity_detach.py \
     "$RUNTIME"/consumer/finish_current.py 2>/dev/null || true
   # Product boundary: ship and validate the executable/contract/renderer only.
   # Host scheduling/activation stays exclusively with local-jobs.
@@ -472,7 +519,9 @@ hooks = data["hooks"]
 owned = {
     (pathlib.Path(os.environ["RUNTIME"]) / "kernel" / "hooks" / name).resolve()
     for name in ("worktree-guard.sh", "worktree-session.sh", "before-submit-prompt.sh",
-                 "awa-recovery-maintenance.sh")
+                 "awa-recovery-maintenance.sh",
+                 "worktree-guard-with-integrity.sh",
+                 "awa-integrity-observer.sh", "awa-session-handoff.sh")
 }
 def is_owned(entry):
     command = str(entry.get("command", ""))
@@ -515,9 +564,9 @@ do_doctor() {
   else echo "  FAIL  frozen contract missing/invalid"; rc=1; fi
   if [ -f "$RUNTIME/kernel/policy/default-worktree-policy.yml" ]; then echo "  PASS  default policy present"; else echo "  FAIL  default policy missing"; rc=1; fi
   if validate_integrity_product_assets "$RUNTIME"; then
-    echo "  PASS  integrity sweep/schedule/console assets valid (host activation external)"
+    echo "  PASS  integrity sweep/console + awa-hook-owner/v2 assets valid (host activation external)"
   else
-    echo "  FAIL  integrity sweep/schedule/console assets missing or invalid"
+    echo "  FAIL  integrity sweep/console or awa-hook-owner/v2 assets missing or invalid"
     rc=1
   fi
   if [ -x "$RUNTIME/kernel/bin/dev-worktree.sh" ] && "$RUNTIME/kernel/bin/dev-worktree.sh" policy-check >/dev/null 2>&1; then
@@ -604,6 +653,8 @@ try:
     required_scripts = (
         "worktree-session.sh", "worktree-guard.sh",
         "awa-recovery-maintenance.sh", "before-submit-prompt.sh",
+        "worktree-guard-with-integrity.sh", "awa-integrity-observer.sh",
+        "awa-session-handoff.sh",
     )
     for name in required_scripts:
         script = runtime / "kernel" / "hooks" / name
@@ -686,7 +737,7 @@ PY
     echo "  PASS  finish operator entrypoint sources present"
   else echo "  FAIL  finish operator entrypoint sources missing"; rc=1; fi
   if validate_integrity_product_assets "$SRC_ROOT"; then
-    echo "  PASS  integrity product assets valid (no plist; host activation external)"
+    echo "  PASS  integrity product + awa-hook-owner/v2 assets valid (no plist; host activation external)"
   else echo "  FAIL  integrity product assets invalid"; rc=1; fi
   if [ -f "$SRC_ROOT/dashboard/seed.canvas.tsx" ] && \
      [ -f "$SRC_ROOT/dashboard/render.py" ] && \

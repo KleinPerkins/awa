@@ -1319,8 +1319,55 @@ clean_worktree() {
   fi
 }
 
+hook_owner_role_matrix() {
+  python3 - "$AWA_HOME/contracts/awa-contract.v1.json" \
+    "$AWA_HOME/contracts/awa-hook-owner.v2.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+v1_path = Path(sys.argv[1])
+v2_path = Path(sys.argv[2])
+v1 = json.loads(v1_path.read_text(encoding="utf-8"))["hook_ownership"]
+roles = list(v1["roles"])
+preferred = v1["schema"]
+if v2_path.is_file():
+    v2 = json.loads(v2_path.read_text(encoding="utf-8"))
+    if (
+        v2.get("schema") != "awa-hook-owner/v2"
+        or v2.get("successor_of") != "awa-hook-owner/v1"
+        or v2.get("supersedes_roles") != ["worktree.shell-guard"]
+        or len(v2.get("roles", [])) != 3
+    ):
+        raise SystemExit("hook-owner v2 contract invalid")
+    superseded = set(v2["supersedes_roles"])
+    roles = [role for role in roles if role["id"] not in superseded]
+    roles.extend(v2["roles"])
+    preferred = v2["schema"]
+
+print("== hook-owner role matrix ==")
+print(f"preferred: {preferred}")
+print("compatibility: awa-hook-owner/v1")
+for role in roles:
+    entry = role["entry"]
+    fail_closed = entry.get("failClosed")
+    fail_text = "unset" if fail_closed is None else str(fail_closed).lower()
+    dormant = (
+        f" dormant-until={role['dormant_until_milestone']}"
+        if role.get("dormant_until_milestone")
+        else ""
+    )
+    print(
+        f"role: {role['id']} event={role['event']} "
+        f"timeout={entry['timeout']} failClosed={fail_text}{dormant}"
+    )
+PY
+}
+
 doctor() {
   policy_check
+  printf '\n'
+  hook_owner_role_matrix
   printf '\n== current repo ==\n'
   current_state
   if top_level >/dev/null 2>&1; then
