@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -179,6 +180,21 @@ def _integrity_exit_code(status: dict) -> int:
     )
 
 
+def _open_console(path: Path) -> bool:
+    try:
+        result = subprocess.run(
+            ["open", str(path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
 def cmd_integrity(args: argparse.Namespace) -> int:
     if args.what == "view":
         status = integrity_mod.read_status()
@@ -224,14 +240,39 @@ def cmd_integrity(args: argparse.Namespace) -> int:
             )
         return _emit(committed, code=_integrity_exit_code(committed))
 
-    if args.what in {"console", "sweep"}:
+    if args.what == "console":
+        status = integrity_mod.read_status()
+        if status is None:
+            return _emit(
+                {
+                    "schema": "awa-integrity-console/v1",
+                    "overall": "red",
+                    "error": "integrity status missing or malformed",
+                },
+                code=2,
+            )
+        console_ref = status["artifacts"]["console"]
+        console_path = paths.integrity_dir() / console_ref["path"]
+        if getattr(args, "open", False) and not _open_console(console_path):
+            return _emit(
+                {
+                    "schema": "awa-integrity-console/v1",
+                    "overall": status["overall"],
+                    "generation": status["generation"],
+                    "error": "private console could not be opened",
+                },
+                code=3,
+            )
         return _emit(
             {
-                "schema": integrity_mod.SCHEMA,
-                "overall": "red",
-                "error": f"integrity {args.what} is unavailable in this build",
+                "schema": "awa-integrity-console/v1",
+                "generation": status["generation"],
+                "overall": status["overall"],
+                "path": str(console_path),
+                "sha256": console_ref["sha256"],
+                "opened": bool(getattr(args, "open", False)),
             },
-            code=3,
+            code=_integrity_exit_code(status),
         )
 
     return _emit(
@@ -447,15 +488,16 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     integrity_verify.set_defaults(fn=cmd_integrity)
-    integrity_sub.add_parser(
+    integrity_console = integrity_sub.add_parser(
         "console",
-        help="reserved for the M1 private static console",
-    ).set_defaults(fn=cmd_integrity)
-    integrity_sub.add_parser(
-        "sweep",
-        help="reserved for the M1 session-independent deep sweep",
-    ).set_defaults(fn=cmd_integrity)
-
+        help="locate or open the referenced private static console",
+    )
+    integrity_console.add_argument(
+        "--open",
+        action="store_true",
+        help="open the referenced private HTML file with the host default",
+    )
+    integrity_console.set_defaults(fn=cmd_integrity)
     g = sub.add_parser("guard", help="engine-off kernel guard (shell/can-clean)")
     g.add_argument("what", choices=["shell", "can-clean"])
     g.add_argument("--cwd", default=".")

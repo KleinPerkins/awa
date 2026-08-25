@@ -153,6 +153,44 @@ configure_dashboard_refresh() {
   return 0
 }
 
+validate_integrity_product_assets() {
+  local root="$1"
+  [ -x "$root/kernel/bin/awa-integrity-sweep.sh" ] || return 1
+  [ -f "$root/contracts/awa-integrity-schedule.v1.json" ] || return 1
+  [ -f "$root/engine/integrity_console.py" ] || return 1
+  [ -f "$root/engine/integrity_alert.py" ] || return 1
+  python3 - "$root" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+contract = json.loads(
+    (root / "contracts" / "awa-integrity-schedule.v1.json").read_text(
+        encoding="utf-8"
+    )
+)
+minimum = contract.get("minimum_interval_seconds")
+interval = contract.get("interval_seconds")
+maximum = contract.get("maximum_interval_seconds")
+valid = (
+    contract.get("schema") == "awa-integrity-schedule/v1"
+    and contract.get("label") == "com.kleinperkins.awa-integrity"
+    and type(minimum) is int
+    and type(interval) is int
+    and type(maximum) is int
+    and 0 < minimum <= interval <= maximum <= 86400
+    and contract.get("profile") == "deep"
+    and contract.get("trigger") == "launchd"
+    and contract.get("ships_plist") is False
+    and contract.get("exit_codes_verbatim") is True
+    and contract.get("executable") == "kernel/bin/awa-integrity-sweep.sh"
+    and not any(root.rglob("*.plist"))
+)
+raise SystemExit(0 if valid else 1)
+PY
+}
+
 persist_hook_owner() {
   local mode="$1"
   {
@@ -190,6 +228,10 @@ do_install() {
   chmod +x "$RUNTIME"/kernel/lib/*.py "$RUNTIME"/bin/*.sh "$RUNTIME"/dashboard/*.py \
     "$RUNTIME"/dashboard/*.sh \
     "$RUNTIME"/consumer/finish_current.py 2>/dev/null || true
+  # Product boundary: ship and validate the executable/contract/renderer only.
+  # Host scheduling/activation stays exclusively with local-jobs.
+  validate_integrity_product_assets "$RUNTIME" || \
+    awa_die "installed integrity product assets are missing or invalid"
 
   local default_policy="$RUNTIME/kernel/policy/default-worktree-policy.yml"
   mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR" 2>/dev/null || true
@@ -472,6 +514,12 @@ do_doctor() {
     echo "  PASS  frozen contract present + valid"
   else echo "  FAIL  frozen contract missing/invalid"; rc=1; fi
   if [ -f "$RUNTIME/kernel/policy/default-worktree-policy.yml" ]; then echo "  PASS  default policy present"; else echo "  FAIL  default policy missing"; rc=1; fi
+  if validate_integrity_product_assets "$RUNTIME"; then
+    echo "  PASS  integrity sweep/schedule/console assets valid (host activation external)"
+  else
+    echo "  FAIL  integrity sweep/schedule/console assets missing or invalid"
+    rc=1
+  fi
   if [ -x "$RUNTIME/kernel/bin/dev-worktree.sh" ] && "$RUNTIME/kernel/bin/dev-worktree.sh" policy-check >/dev/null 2>&1; then
     echo "  PASS  kernel CLI runnable (policy-check OK)"
   else echo "  FAIL  kernel CLI not runnable"; rc=1; fi
@@ -637,6 +685,9 @@ PY
   if [ -f "$SRC_ROOT/consumer/operator-skill.md" ] && [ -f "$SRC_ROOT/consumer/finish_current.py" ]; then
     echo "  PASS  finish operator entrypoint sources present"
   else echo "  FAIL  finish operator entrypoint sources missing"; rc=1; fi
+  if validate_integrity_product_assets "$SRC_ROOT"; then
+    echo "  PASS  integrity product assets valid (no plist; host activation external)"
+  else echo "  FAIL  integrity product assets invalid"; rc=1; fi
   if [ -f "$SRC_ROOT/dashboard/seed.canvas.tsx" ] && \
      [ -f "$SRC_ROOT/dashboard/render.py" ] && \
      [ -f "$SRC_ROOT/dashboard/install_actions.sh" ] && \

@@ -65,12 +65,16 @@ class TestIntegrityCli(EngineTestCase):
 
     def test_verify_exit_codes_exact(self):
         fixtures = (
-            (self._facts(), 0, "green"),
-            (self._facts(release_matches=False), 1, "degraded"),
-            (self._facts(mcp_matches=False), 2, "red"),
+            (self._facts(), 0, "green", 1),
+            (self._facts(release_matches=False), 1, "degraded", 3),
+            (self._facts(mcp_matches=False), 2, "red", 5),
         )
-        previous_generation = 0
-        for observed, expected_code, expected_overall in fixtures:
+        for (
+            observed,
+            expected_code,
+            expected_overall,
+            expected_generation,
+        ) in fixtures:
             with self.subTest(overall=expected_overall):
                 proc = self._run(
                     "integrity",
@@ -85,8 +89,15 @@ class TestIntegrityCli(EngineTestCase):
                 self.assertIn(integrity.SCHEMA, proc.stdout)
                 payload = json.loads(proc.stdout)
                 self.assertEqual(payload["overall"], expected_overall)
-                self.assertEqual(payload["generation"], previous_generation + 1)
-                previous_generation = payload["generation"]
+                self.assertEqual(
+                    payload["generation"],
+                    expected_generation,
+                )
+                if expected_overall != "green":
+                    self.assertEqual(
+                        payload["artifacts"]["receipt"]["gen"],
+                        expected_generation,
+                    )
 
     def test_view_exit_codes_exact(self):
         for observed, expected_code in (
@@ -194,7 +205,7 @@ class TestIntegrityCli(EngineTestCase):
         self.assertIsNone(integrity.read_status())
 
     def test_no_repair_or_export_verb_registered(self):
-        for verb in ("repair", "export"):
+        for verb in ("repair", "export", "sweep"):
             with self.subTest(verb=verb):
                 proc = self._run("integrity", verb)
                 self.assertEqual(proc.returncode, 2)
@@ -202,12 +213,10 @@ class TestIntegrityCli(EngineTestCase):
                 self.assertIn("invalid choice", proc.stderr)
                 self.assertNotIn(integrity.SCHEMA, proc.stderr)
 
-        for next_m1_verb in ("console", "sweep"):
-            with self.subTest(next_m1_verb=next_m1_verb):
-                proc = self._run("integrity", next_m1_verb)
-                self.assertEqual(proc.returncode, 3)
-                self.assertIn(integrity.SCHEMA, proc.stdout)
-                self.assertNotIn("invalid choice", proc.stderr)
+        console = self._run("integrity", "console")
+        self.assertEqual(console.returncode, 2)
+        self.assertIn("awa-integrity-console/v1", console.stdout)
+        self.assertNotIn("invalid choice", console.stderr)
 
 
 if __name__ == "__main__":
