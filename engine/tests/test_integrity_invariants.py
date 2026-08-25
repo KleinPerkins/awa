@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +16,8 @@ from unittest import mock
 from engine import guard, integrity, mcp_server
 
 
+_ROOT = Path(__file__).resolve().parents[2]
+_INSTALL_HOOKS = _ROOT / "kernel" / "hooks" / "install-hooks.sh"
 _SAFE_FACTS = {
     "guard_primary_deny": True,
     "guard_cd_bypass_deny": True,
@@ -372,6 +377,160 @@ class TestIntegrityInvariants(unittest.TestCase):
             collector.assert_not_called()
         for invariant_id, prior in prior_deep.items():
             self.assertEqual(invariant(status, invariant_id), prior)
+
+
+class TestLiveHookFacts(unittest.TestCase):
+    """The live collector follows the same preferred contract as installation."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="awa-hook-facts.")
+        self.root = Path(self._tmp.name)
+        self.hooks_path = self.root / "hooks.json"
+        env = os.environ.copy()
+        env.update(
+            {
+                "AWA_HOOK_OWNER": "direct",
+                "AWA_HOOKS_JSON": str(self.hooks_path),
+                "HOME": str(self.root / "home"),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+        )
+        installed = subprocess.run(
+            [str(_INSTALL_HOOKS)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        self.assertEqual(
+            installed.returncode,
+            0,
+            installed.stdout + installed.stderr,
+        )
+        self.projected = json.loads(self.hooks_path.read_text(encoding="utf-8"))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _collect(self, source: Path = _ROOT) -> tuple[tuple, dict]:
+        with mock.patch.dict(
+            os.environ,
+            {"AWA_HOOKS_JSON": str(self.hooks_path)},
+            clear=False,
+        ):
+            observed = integrity._hook_facts(source)
+        status = integrity.evaluate(
+            "fast",
+            trigger="beforeShell",
+            facts=facts(
+                hook_rows_present=observed[0],
+                hook_fail_open=observed[1],
+            ),
+        )
+        return observed, invariant(status, "hooks")
+
+    def _write_projection(self, document: dict) -> None:
+        self.hooks_path.write_text(
+            json.dumps(document, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def test_v2_direct_projection_collects_green_hooks(self):
+        observed, hook_invariant = self._collect()
+        self.assertEqual(observed, (True, True))
+        self.assertEqual(hook_invariant["severity"], "green")
+
+    def test_v2_composite_drift_degrades(self):
+        composite_name = "worktree-guard-with-integrity.sh"
+        original = copy.deepcopy(self.projected)
+
+        def composite_row(document):
+            return next(
+                row
+                for row in document["hooks"]["beforeShellExecution"]
+                if Path(row["command"]).name == composite_name
+            )
+
+        mutations = {}
+
+        missing = copy.deepcopy(original)
+        missing["hooks"]["beforeShellExecution"].remove(composite_row(missing))
+        mutations["missing"] = missing
+
+        wrong_command = copy.deepcopy(original)
+        composite_row(wrong_command)["command"] += ".lookalike"
+        mutations["wrong-command"] = wrong_command
+
+        wrong_event = copy.deepcopy(original)
+        moved = composite_row(wrong_event)
+        wrong_event["hooks"]["beforeShellExecution"].remove(moved)
+        wrong_event["hooks"].setdefault("afterFileEdit", []).append(moved)
+        mutations["wrong-event"] = wrong_event
+
+        fail_closed = copy.deepcopy(original)
+        composite_row(fail_closed)["failClosed"] = True
+        mutations["fail-closed"] = fail_closed
+
+        for name, document in mutations.items():
+            with self.subTest(name=name):
+                self._write_projection(document)
+                observed, hook_invariant = self._collect()
+                self.assertEqual(hook_invariant["severity"], "degraded")
+                if name == "fail-closed":
+                    self.assertEqual(observed, (True, False))
+                else:
+                    self.assertEqual(observed, (False, True))
+
+    def test_v1_contract_projection_remains_green(self):
+        source = self.root / "v1-source"
+        contract_path = source / "contracts" / "awa-contract.v1.json"
+        contract_path.parent.mkdir(parents=True)
+        contract_path.write_bytes(
+            (_ROOT / "contracts" / "awa-contract.v1.json").read_bytes()
+        )
+        owner = json.loads(contract_path.read_text(encoding="utf-8"))[
+            "hook_ownership"
+        ]
+        hooks: dict[str, list[dict]] = {}
+        for role in owner["roles"]:
+            row = dict(role["entry"])
+            row["command"] = str(
+                (source / role["direct_command_role"]).resolve()
+            )
+            hooks.setdefault(role["event"], []).append(row)
+        self._write_projection({"version": 1, "hooks": hooks})
+
+        observed, hook_invariant = self._collect(source)
+        self.assertEqual(observed, (True, True))
+        self.assertEqual(hook_invariant["severity"], "green")
+
+    def test_invalid_shipped_v2_does_not_fallback_to_v1(self):
+        source = self.root / "invalid-v2-source"
+        contracts = source / "contracts"
+        contracts.mkdir(parents=True)
+        v1_path = contracts / "awa-contract.v1.json"
+        v1_path.write_bytes(
+            (_ROOT / "contracts" / "awa-contract.v1.json").read_bytes()
+        )
+        (contracts / "awa-hook-owner.v2.json").write_text(
+            '{"schema":"awa-hook-owner/v2","roles":[]}\n',
+            encoding="utf-8",
+        )
+        owner = json.loads(v1_path.read_text(encoding="utf-8"))[
+            "hook_ownership"
+        ]
+        hooks: dict[str, list[dict]] = {}
+        for role in owner["roles"]:
+            row = dict(role["entry"])
+            row["command"] = str(
+                (source / role["direct_command_role"]).resolve()
+            )
+            hooks.setdefault(role["event"], []).append(row)
+        self._write_projection({"version": 1, "hooks": hooks})
+
+        observed, hook_invariant = self._collect(source)
+        self.assertEqual(observed, (False, None))
+        self.assertEqual(hook_invariant["severity"], "unknown")
 
 
 if __name__ == "__main__":

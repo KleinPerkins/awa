@@ -1636,17 +1636,166 @@ def _mcp_parity(source: Path, probes: list[tuple[Path, str]]) -> bool | None:
             os.environ["AWA_POLICY"] = previous_policy
 
 
+_V1_HOOK_LAYOUT = (
+    (
+        "worktree.session-context",
+        "sessionStart",
+        "kernel/hooks/worktree-session.sh",
+        "host-policy-delegator",
+        {"type": "command", "timeout": 5, "failClosed": False},
+        None,
+    ),
+    (
+        "worktree.shell-guard",
+        "beforeShellExecution",
+        "kernel/hooks/worktree-guard.sh",
+        "host-policy-delegator",
+        {"type": "command", "timeout": 20, "failClosed": False},
+        None,
+    ),
+    (
+        "worktree.file-observer",
+        "afterFileEdit",
+        "kernel/hooks/worktree-guard.sh",
+        "host-policy-delegator",
+        {"type": "command", "timeout": 20},
+        None,
+    ),
+    (
+        "recovery.maintenance",
+        "sessionStart",
+        "kernel/hooks/awa-recovery-maintenance.sh",
+        "installed-awa",
+        {"type": "command", "timeout": 5, "failClosed": False},
+        None,
+    ),
+    (
+        "finish.prompt-recall",
+        "beforeSubmitPrompt",
+        "kernel/hooks/before-submit-prompt.sh",
+        "installed-awa",
+        {
+            "type": "command",
+            "matcher": "UserPromptSubmit",
+            "timeout": 20,
+            "failClosed": False,
+        },
+        None,
+    ),
+)
+_V2_HOOK_LAYOUT = (
+    (
+        "worktree.shell-guard-composite",
+        "beforeShellExecution",
+        "kernel/hooks/worktree-guard-with-integrity.sh",
+        "host-policy-delegator",
+        {"type": "command", "timeout": 20, "failClosed": False},
+        None,
+    ),
+    (
+        "worktree.stop-observer",
+        "stop",
+        "kernel/hooks/awa-integrity-observer.sh",
+        "host-policy-delegator",
+        {"type": "command", "timeout": 5, "failClosed": False},
+        None,
+    ),
+    (
+        "worktree.session-handoff",
+        "sessionStart",
+        "kernel/hooks/awa-session-handoff.sh",
+        "host-policy-delegator",
+        {"type": "command", "timeout": 5, "failClosed": False},
+        "M2.4",
+    ),
+)
+
+
+def _roles_match_layout(roles: object, layout: tuple) -> bool:
+    if not isinstance(roles, list) or len(roles) != len(layout):
+        return False
+    for role, expected in zip(roles, layout):
+        if not isinstance(role, dict):
+            return False
+        observed = (
+            role.get("id"),
+            role.get("event"),
+            role.get("direct_command_role"),
+            role.get("external_command_path_class"),
+            role.get("entry"),
+            role.get("dormant_until_milestone"),
+        )
+        if observed != expected:
+            return False
+    return True
+
+
+def _effective_hook_roles(source: Path) -> list[dict] | None:
+    v1_path = source / "contracts" / "awa-contract.v1.json"
+    try:
+        v1 = json.loads(v1_path.read_text(encoding="utf-8"))["hook_ownership"]
+    except (
+        OSError,
+        KeyError,
+        TypeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ):
+        return None
+    if (
+        not isinstance(v1, dict)
+        or v1.get("schema") != "awa-hook-owner/v1"
+        or v1.get("modes") != ["direct", "external"]
+        or v1.get("default_mode") != "direct"
+        or v1.get("external_real_hook_file_writes") is not False
+        or not _roles_match_layout(v1.get("roles"), _V1_HOOK_LAYOUT)
+    ):
+        return None
+
+    v1_roles = v1["roles"]
+    v2_path = source / "contracts" / "awa-hook-owner.v2.json"
+    if not v2_path.exists():
+        return list(v1_roles)
+    try:
+        v2 = json.loads(v2_path.read_text(encoding="utf-8"))
+    except (
+        OSError,
+        TypeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ):
+        return None
+    if (
+        not isinstance(v2, dict)
+        or v2.get("schema") != "awa-hook-owner/v2"
+        or v2.get("version") != 2
+        or v2.get("successor_of") != "awa-hook-owner/v1"
+        or v2.get("v1_contract")
+        != "contracts/awa-contract.v1.json#hook_ownership"
+        or v2.get("modes") != ["direct", "external"]
+        or v2.get("default_mode") != "direct"
+        or v2.get("external_real_hook_file_writes") is not False
+        or v2.get("supersedes_roles") != ["worktree.shell-guard"]
+        or not _roles_match_layout(v2.get("roles"), _V2_HOOK_LAYOUT)
+    ):
+        return None
+    superseded = set(v2["supersedes_roles"])
+    return [
+        role for role in v1_roles if role["id"] not in superseded
+    ] + list(v2["roles"])
+
+
 def _hook_facts(source: Path) -> tuple[bool | None, bool | None]:
     hook_path = Path(
         os.environ.get("AWA_HOOKS_JSON")
         or (Path.home() / ".cursor" / "hooks.json")
     ).expanduser()
-    contract_path = source / "contracts" / "awa-contract.v1.json"
+    roles = _effective_hook_roles(source)
+    if roles is None:
+        return False, None
     try:
         hooks_doc = json.loads(hook_path.read_text(encoding="utf-8"))
-        contract = json.loads(contract_path.read_text(encoding="utf-8"))
         hooks = hooks_doc["hooks"]
-        roles = contract["hook_ownership"]["roles"]
     except (
         OSError,
         KeyError,
@@ -1655,7 +1804,12 @@ def _hook_facts(source: Path) -> tuple[bool | None, bool | None]:
         json.JSONDecodeError,
     ):
         return False, None
-    if not isinstance(hooks, dict) or not isinstance(roles, list):
+    if (
+        not isinstance(hooks_doc, dict)
+        or hooks_doc.get("version") != 1
+        or not isinstance(hooks, dict)
+        or not isinstance(roles, list)
+    ):
         return False, None
 
     rows_present = True
@@ -1674,18 +1828,29 @@ def _hook_facts(source: Path) -> tuple[bool | None, bool | None]:
             or not isinstance(event_rows, list)
         ):
             return None, None
-        basename = Path(command_role).name
+        expected_command = str((source / command_role).resolve())
+        expected_without_fail = dict(expected)
+        expected_fail_closed = expected_without_fail.pop("failClosed", None)
+        expected_without_fail["command"] = expected_command
         matching = [
             row
             for row in event_rows
             if isinstance(row, dict)
-            and basename in str(row.get("command", ""))
+            and (
+                {
+                    key: value
+                    for key, value in row.items()
+                    if key != "failClosed" or "failClosed" not in expected
+                }
+                == expected_without_fail
+            )
         ]
-        if not matching:
+        if len(matching) != 1:
             rows_present = False
             continue
-        if expected.get("failClosed") is False and not any(
-            row.get("failClosed") is False for row in matching
+        if (
+            expected_fail_closed is False
+            and matching[0].get("failClosed") is not False
         ):
             fail_open = False
     return rows_present, fail_open
