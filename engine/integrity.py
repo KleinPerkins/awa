@@ -1109,25 +1109,42 @@ def _test_facts_from_env() -> Facts | None:
     return Facts(**value)
 
 
-def _collect_facts(previous: dict | None, *, now: float) -> Facts:
+def _collect_facts(
+    previous: dict | None,
+    *,
+    profile: str,
+    now: float,
+) -> Facts:
     source = _source_root()
     primary_deny, cd_deny, linked_allow, probes = _guard_probes(source)
     hook_rows, hook_fail_open = _hook_facts(source)
-    recovery_status, needs_repair = _recovery_facts()
-    (
-        leases_unreconciled,
-        sessions_dangling,
-        husks,
-        disposition_map,
-    ) = _lifecycle_facts(source)
+    if profile == "deep":
+        recovery_status, needs_repair = _recovery_facts()
+        (
+            leases_unreconciled,
+            sessions_dangling,
+            husks,
+            disposition_map,
+        ) = _lifecycle_facts(source)
+        parity_ok = _kernel_parity(source, probes)
+        mcp_matches = _mcp_parity(source, probes)
+    else:
+        recovery_status = None
+        needs_repair = None
+        leases_unreconciled = None
+        sessions_dangling = None
+        husks = None
+        disposition_map = None
+        parity_ok = None
+        mcp_matches = None
     return Facts(
         guard_primary_deny=primary_deny,
         guard_cd_bypass_deny=cd_deny,
         guard_linked_allow=linked_allow,
-        parity_ok=_kernel_parity(source, probes),
+        parity_ok=parity_ok,
         hook_rows_present=hook_rows,
         hook_fail_open=hook_fail_open,
-        mcp_matches=_mcp_parity(source, probes),
+        mcp_matches=mcp_matches,
         release_matches=_release_matches(source),
         recovery_last_status=recovery_status,
         needs_repair=needs_repair,
@@ -1194,7 +1211,11 @@ def evaluate(
     generated_at = _iso_at(now)
     previous = read_status()
     if facts is None:
-        facts = _test_facts_from_env() or _collect_facts(previous, now=now)
+        facts = _test_facts_from_env() or _collect_facts(
+            previous,
+            profile=profile,
+            now=now,
+        )
     if trigger == "launchd":
         facts = replace(facts, launchd_last_success_age_s=0.0)
 

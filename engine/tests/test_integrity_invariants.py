@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import tempfile
 import unittest
@@ -303,6 +304,74 @@ class TestIntegrityInvariants(unittest.TestCase):
                         [(source, "git status")],
                     )
                 )
+
+    def test_fast_profile_skips_deep_collectors_and_carries_prior_evidence(self):
+        previous = self.evaluate()
+        deep_ids = (
+            "recovery",
+            "lifecycle",
+            "parity",
+            "mcp_engine_parity",
+            "release_identity",
+        )
+        prior_deep = {
+            invariant_id: copy.deepcopy(invariant(previous, invariant_id))
+            for invariant_id in deep_ids
+        }
+        deep_collectors = (
+            "_recovery_facts",
+            "_lifecycle_facts",
+            "_kernel_parity",
+            "_mcp_parity",
+        )
+        with contextlib.ExitStack() as stack:
+            collectors = [
+                stack.enter_context(
+                    mock.patch.object(
+                        integrity,
+                        name,
+                        side_effect=AssertionError(f"fast called {name}"),
+                    )
+                )
+                for name in deep_collectors
+            ]
+            stack.enter_context(
+                mock.patch.object(integrity, "read_status", return_value=previous)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    integrity,
+                    "_source_root",
+                    return_value=Path("/source"),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    integrity,
+                    "_guard_probes",
+                    return_value=(True, True, True, []),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    integrity,
+                    "_hook_facts",
+                    return_value=(True, True),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    integrity,
+                    "_release_matches",
+                    return_value=True,
+                )
+            )
+            status = integrity.evaluate("fast", trigger="cli")
+
+        for collector in collectors:
+            collector.assert_not_called()
+        for invariant_id, prior in prior_deep.items():
+            self.assertEqual(invariant(status, invariant_id), prior)
 
 
 if __name__ == "__main__":
