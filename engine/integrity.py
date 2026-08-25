@@ -537,7 +537,7 @@ def _commit(status: dict, *, profile: str, trigger: str) -> int:
                 native=integrity_alert._native,
                 slack=None,
             )
-        except BaseException:  # Alert faults are recorded, never recursively alerted.
+        except Exception:  # Alert faults are recorded, never recursively alerted.
             outcomes = {"native": "failed", "slack": "opted_out"}
         if outcomes is not None:
             commit_alert_receipt(

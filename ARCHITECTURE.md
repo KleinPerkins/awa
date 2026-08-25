@@ -207,9 +207,28 @@ stop; the Cursor chat remains open because no chat-close API exists.
 | `guard` | Adversary-aware mutating-shell classifier + state-aware primary-maintenance decision + engine-OFF decision + cleanup-refusal (`can_clean`) |
 | `mcp_server` | stdio newline-delimited JSON-RPC MCP server exposing three read-only diagnostic tools plus six path-scoped mode tools; inline instructions are the primary agent-routing surface |
 | `mcp_resources` | Pure fixed-resource registry/renderer for the secondary `awa://assistant/operator-guide/v1`; consumes in-memory advertised tool descriptions and reads no environment, filesystem, policy, contract, database, or live state |
+| `integrity` | One observational evaluator plus the dedicated status-last store, closed public projection, immutable transition outbox, and typed CAS delivery-receipt bookkeeping commit |
+| `integrity_alert` | Worsening-only, bounded native notification dispatcher; records `accepted|failed` and turns all-configured-path failure while non-green into RED |
+| `integrity_console` | Deterministic private static HTML renderer with a strict CSP and one clock-only script that forces a stale snapshot's presentation to RED |
 | `remote` | Apply-back execute adapter: read/write token split (S3), SHA-drift refusal, preview→confirm gating (live push is an operator step) |
 | `redact` | S5 secret/PII redaction pass; every persisted audit/command string is piped through it |
 | `cli` / `__main__` | `awa-engine` command surface (launched by `bin/awa-engine.sh`) |
+
+### Integrity surveillance commit boundary (M1-B)
+
+Integrity remains behind the kernel. One `verify --profile fast|deep --trigger ...` evaluation
+publishes generation-tagged `history/public/console/outbox` artifacts first and atomically replaces
+private `status.json` last under a dedicated integrity lock. Readers validate each referenced
+artifact's relative path, generation, and SHA-256. Alert dispatch runs after that lock is released.
+Its result is a separate compare-and-swap bookkeeping generation under the same transition id:
+`receipt/public/console` are written first, then `status.json` last; it does not re-evaluate, create
+another outbox, or recurse. A stale receipt is privately audited and cannot overwrite a newer
+evaluation.
+
+The session-independent `kernel/bin/awa-integrity-sweep.sh` calls the same deep/launchd interface
+and preserves every exit code and signal. The product's schedule contract bounds the interval and
+label, but AWA ships no plist and performs no host activation; `local-jobs` owns that projection.
+M1-C hook observers, M1-D Slack transport, and all M2 lifecycle mutations are deliberately absent.
 
 ## Per-repo mode (ON / OFF)
 

@@ -205,7 +205,7 @@ class TestIntegrityCli(EngineTestCase):
         self.assertIsNone(integrity.read_status())
 
     def test_no_repair_or_export_verb_registered(self):
-        for verb in ("repair", "export"):
+        for verb in ("repair", "export", "sweep"):
             with self.subTest(verb=verb):
                 proc = self._run("integrity", verb)
                 self.assertEqual(proc.returncode, 2)
@@ -213,12 +213,10 @@ class TestIntegrityCli(EngineTestCase):
                 self.assertIn("invalid choice", proc.stderr)
                 self.assertNotIn(integrity.SCHEMA, proc.stderr)
 
-        for next_m1_verb in ("console", "sweep"):
-            with self.subTest(next_m1_verb=next_m1_verb):
-                proc = self._run("integrity", next_m1_verb)
-                self.assertEqual(proc.returncode, 3)
-                self.assertIn(integrity.SCHEMA, proc.stdout)
-                self.assertNotIn("invalid choice", proc.stderr)
+        console = self._run("integrity", "console")
+        self.assertEqual(console.returncode, 2)
+        self.assertIn("awa-integrity-console/v1", console.stdout)
+        self.assertNotIn("invalid choice", console.stderr)
 
 
 if __name__ == "__main__":

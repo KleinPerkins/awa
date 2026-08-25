@@ -366,8 +366,28 @@ The engine (`awa-engine <verb>`, launched by `bin/awa-engine.sh`): `doctor`, lif
 (`recover patch|bundle|archive|restore-patch|restore-bundle|list|prune|status`), guard
 (`guard shell`/`guard can-clean` — engine-off advisory; `guard can-clean` may refuse when kernel
 `clean` succeeds after squash-merge detection because engine cleanup remains ancestry-stricter until
-fast-follow B), `daemon` (`status`/`run-once`), `events`, and `mcp-serve` (a stdio JSON-RPC MCP
-server exposing nine tools plus the fixed advisory operator guide).
+fast-follow B), integrity (`integrity view|verify|console`), `daemon` (`status`/`run-once`),
+`events`, and `mcp-serve` (a stdio JSON-RPC MCP server exposing nine tools plus the fixed advisory
+operator guide).
+
+### Integrity surveillance (M1-B)
+
+`awa-engine integrity verify --profile deep --trigger launchd` evaluates and atomically refreshes
+the private status at `${XDG_STATE_HOME:-~/.local/state}/awa/integrity/status.json`.
+`kernel/bin/awa-integrity-sweep.sh` is the session-independent wrapper: it returns evaluator
+severity/crash codes unchanged. AWA ships its executable and
+`contracts/awa-integrity-schedule.v1.json`, but no plist and no host activation; the host's
+`local-jobs` layer owns scheduling.
+
+A worsening transition attempts a bounded native macOS notification, then records
+`accepted|failed` through a generation-CAS receipt commit under the same transition id. The
+generation-tagged public projection and static console are closed/redacted and private (`0600`);
+`awa-engine integrity console` prints the referenced file and `--open` opens it. The page is
+self-contained and changes its presentation to `STALE / RED` after `fresh_until` using one
+CSP-hashed clock-only script.
+
+This is M1-B only. M1-C owns hook observers, M1-D owns opt-in Slack, and M2 owns lifecycle repair,
+quarantine, and the entry handshake.
 
 ## Recovery retention
 

@@ -175,6 +175,27 @@ model-output matrix, no substitute was fabricated, and no model-routing benefit 
 `consent_prompt()` is only contract-tested candidate copy for a future host integration: the stdio
 server does not render or enforce it, so it is not a production consent control.
 
+## Integrity surveillance security boundary (M1-B)
+
+Integrity surveillance is advisory and engine-side; the kernel guard and cleanup refusal do not
+import it. Its private store uses `0700` directories and `0600` files, generation-tagged artifacts,
+per-child-directory fsync, and a status-last atomic replace. The alert receipt is a typed
+generation/transition compare-and-swap: retry is idempotent, crash-before-status preserves the prior
+authority, and a stale receipt is audited without overwriting newer status.
+
+Neither notification nor console receives raw invariant evidence. The public projection is a closed
+allowlist of fixed invariant ids/severities, bounded counts/history, and timestamps; absolute paths,
+release identity, arbitrary fields, and credentials are dropped. Native notification text is
+derived only from severity names and is bounded by timeout. The static console revalidates the
+closed projection, embeds script-safe JSON (`<`, `>`, `&`, U+2028, U+2029 escaped), has no remote
+assets, and permits one SHA-256-pinned clock-only script under a strict CSP. That script can only
+recompute age and force `STALE / RED`.
+
+AWA installs the sweep executable, schedule contract, and renderer but no plist. It never activates
+`com.kleinperkins.awa-integrity`; host `local-jobs` owns activation and expected-severity exit-code
+normalization. External hook-owner mode remains zero-access. Slack credentials/transport are absent
+until M1-D; lifecycle repair/quarantine remain absent until M2.
+
 ## Cluster D — Security ledger
 
 Status legend: **Verified** (closed with evidence) / **Partially closed** (kernel part done, engine
@@ -189,6 +210,8 @@ decision).
 | S4 | Socket + file perms: state/config/recovery dirs `700`, files `600`, daemon lock/socket `600`. | **Verified (engine)** | The engine sets `umask 0o077` before opening SQLite and `chmod`s on create: `paths.ensure_dir`→`700` (state/recovery/detections/locks/run dirs), `paths.write_private`→`600` (lease.json, manifests, patches), `state.State`→`600` on `state.db`/`-wal`/`-shm`, and the `lock`/`daemon` pidfiles→`600`. `awa-engine doctor` asserts the modes (`s4-perms`) and refuses a synced/network state root (WAL placement, §H6). UATs: `test_state_lock.test_s4_perms`, `test_identity_paths` perms, `awa-engine doctor`. Single-instance uses an flock'd pidfile (the §H6-sanctioned alternative to a Unix socket). |
 | S5 | Audit-log PII: no prompt/transcript/file-content in audit/command logs; secret/PII redaction. | **Verified (engine audit writer)** | The engine audit writer (`state.record_event`) pipes every `detail` through `redact.redact` before persisting; detection records are metadata-only (path+repo+timestamp, never file content). `engine/redact.py` redacts GitHub/AWS/Slack/Google tokens, bearer, private-key blocks, URL credentials, `--password=`/`TOKEN=` assignments. UAT: `test_state_lock.test_event_redaction` (seeded token redacted in the persisted event) + `test_redact` (the redaction pass directly). |
 | S6 | Repo-controlled config is not executed during policy resolution / worktree setup. | **Verified (fixed in §H3)** | `run_worktree_setup` is **default-off**: repo-committed `.cursor/worktrees.json` is not executed unless the operator opts the repo in out-of-repo (`${XDG_CONFIG_HOME}/awa/setup-allow/<repokey>.<confighash>`), re-armed on config change, and never in advisory/exclude/foreign repos. UATs: default-off (setup not run, notice emitted) and opt-in (runs on stderr, JSON stdout pure). |
+| S7 | Integrity status/alert bookkeeping is private, crash-safe, CAS-idempotent, and never overwrites a newer evaluation. | **Verified (engine)** | `test_integrity_store` and `test_integrity_alert` cover `0600`/`0700`, status-last crash cuts, child-dir fsync, immutable outbox/receipt artifacts, receipt race/retry, stale-CAS audit, no re-evaluation/re-alert/outbox recursion, and bounded native failure. |
+| S8 | The integrity console/installer leaks no raw evidence/path/credential, executes no remote content, and cannot activate the host job. | **Verified (engine + install sandbox)** | `test_integrity_console` covers closed projection revalidation, injection/path/credential dropping, deterministic bytes, CSP hash, one clock-only script, self-staling RED, private mode, shipped assets, no plist, no host activation, and unchanged external hook-file bytes. |
 
 **Gating.** Phase 2 (git/worktree lifecycle) gated on **S2, S6** — both **Verified**. Phase 3
 (recovery manager) gated on **S1, S5** — both **Verified** (S1 kernel bundle denylist; S5 engine

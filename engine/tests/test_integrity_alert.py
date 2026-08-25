@@ -493,6 +493,35 @@ class TestIntegrityAlert(EngineTestCase):
             {"native": "accepted", "slack": "opted_out"},
         )
 
+    def _assert_dispatch_process_control_propagates(
+        self,
+        exception_type: type[BaseException],
+    ) -> None:
+        integrity._commit(
+            self._status("green"),
+            profile="deep",
+            trigger="launchd",
+        )
+        with mock.patch.object(
+            integrity_alert,
+            "dispatch",
+            side_effect=exception_type,
+        ), self.assertRaises(exception_type):
+            integrity._commit(
+                self._status("degraded"),
+                profile="deep",
+                trigger="launchd",
+            )
+        current = integrity.read_status()
+        self.assertEqual(current["generation"], 2)
+        self.assertNotIn("receipt", current["artifacts"])
+
+    def test_evaluation_dispatch_does_not_swallow_keyboard_interrupt(self):
+        self._assert_dispatch_process_control_propagates(KeyboardInterrupt)
+
+    def test_evaluation_dispatch_does_not_swallow_system_exit(self):
+        self._assert_dispatch_process_control_propagates(SystemExit)
+
 
 if __name__ == "__main__":
     unittest.main()
