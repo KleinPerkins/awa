@@ -107,6 +107,25 @@ class TestHookOwnerV2Matrix(unittest.TestCase):
         )
         return runtime
 
+    def _doctor_runtime(self, name: str, v2_bytes: bytes | None) -> Path:
+        runtime = self.root / name
+        shutil.copytree(_ROOT / "kernel", runtime / "kernel")
+        (runtime / "contracts").mkdir()
+        shutil.copy2(_V1, runtime / "contracts" / _V1.name)
+        if v2_bytes is not None:
+            (runtime / "contracts" / _V2.name).write_bytes(v2_bytes)
+        return runtime
+
+    def _run_doctor(self, runtime: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [str(runtime / "kernel" / "bin" / "dev-worktree.sh"), "doctor"],
+            cwd=_ROOT,
+            capture_output=True,
+            text=True,
+            env=self.env,
+            timeout=30,
+        )
+
     def test_v2_prefers_and_validates_when_shipped(self):
         installed = self._run_installer()
         self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
@@ -301,6 +320,55 @@ class TestHookOwnerV2Matrix(unittest.TestCase):
         for role_id in _V2_IDS:
             self.assertIn(role_id, result.stdout)
         self.assertIn("compatibility: awa-hook-owner/v1", result.stdout)
+
+    def test_doctor_invalid_v2_reports_controlled_failure(self):
+        role_stubs = {
+            "schema": "awa-hook-owner/v2",
+            "version": 2,
+            "successor_of": "awa-hook-owner/v1",
+            "v1_contract": "contracts/awa-contract.v1.json#hook_ownership",
+            "modes": ["direct", "external"],
+            "default_mode": "direct",
+            "selection_env": "AWA_HOOK_OWNER",
+            "selection_schema": "awa-hook-owner-selection/v1",
+            "external_real_hook_file_writes": False,
+            "supersedes_roles": ["worktree.shell-guard"],
+            "roles": [
+                {"id": role_id}
+                for role_id in _V2_IDS
+            ],
+        }
+        cases = {
+            "malformed": b"{ not json\n",
+            "truncated": b'{"schema":"awa-hook-owner/v2",',
+            "partial": b'{"schema":"awa-hook-owner/v2","roles":[]}\n',
+            "role-stubs": (
+                json.dumps(role_stubs, separators=(",", ":")) + "\n"
+            ).encode("utf-8"),
+        }
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                runtime = self._doctor_runtime(f"doctor-{name}", payload)
+                result = self._run_doctor(runtime)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("== hook-owner role matrix ==", result.stdout)
+                self.assertIn(
+                    "  FAIL  hook-owner v2 contract invalid",
+                    result.stdout,
+                )
+                self.assertIn("== current repo ==", result.stdout)
+                self.assertEqual(result.stderr, "")
+                for leaked in ("Traceback", "KeyError", "JSONDecodeError"):
+                    self.assertNotIn(leaked, result.stdout + result.stderr)
+
+    def test_doctor_v1_fallback_remains_healthy(self):
+        runtime = self._doctor_runtime("doctor-v1", None)
+        result = self._run_doctor(runtime)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("== hook-owner role matrix ==", result.stdout)
+        self.assertIn("preferred: awa-hook-owner/v1", result.stdout)
+        self.assertIn("compatibility: awa-hook-owner/v1", result.stdout)
+        self.assertNotIn("  FAIL  ", result.stdout)
 
 
 if __name__ == "__main__":

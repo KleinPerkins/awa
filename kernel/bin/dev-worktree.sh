@@ -1326,20 +1326,163 @@ import json
 import sys
 from pathlib import Path
 
+V1_IDS = (
+    "worktree.session-context",
+    "worktree.shell-guard",
+    "worktree.file-observer",
+    "recovery.maintenance",
+    "finish.prompt-recall",
+)
+V2_LAYOUT = (
+    (
+        "worktree.shell-guard-composite",
+        "beforeShellExecution",
+        "kernel/hooks/worktree-guard-with-integrity.sh",
+        "host-policy-delegator",
+        {"type": "command", "timeout": 20, "failClosed": False},
+        None,
+    ),
+    (
+        "worktree.stop-observer",
+        "stop",
+        "kernel/hooks/awa-integrity-observer.sh",
+        "host-policy-delegator",
+        {"type": "command", "timeout": 5, "failClosed": False},
+        None,
+    ),
+    (
+        "worktree.session-handoff",
+        "sessionStart",
+        "kernel/hooks/awa-session-handoff.sh",
+        "host-policy-delegator",
+        {"type": "command", "timeout": 5, "failClosed": False},
+        "M2.4",
+    ),
+)
+
+
+def fail(contract):
+    print("== hook-owner role matrix ==")
+    print(f"  FAIL  {contract} contract invalid")
+    raise SystemExit(1)
+
+
+def load(path, contract):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        fail(contract)
+    if not isinstance(value, dict):
+        fail(contract)
+    return value
+
+
+def valid_entry(entry):
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("type") != "command":
+        return False
+    if type(entry.get("timeout")) is not int or entry["timeout"] <= 0:
+        return False
+    if "failClosed" in entry and type(entry["failClosed"]) is not bool:
+        return False
+    if "matcher" in entry and not isinstance(entry["matcher"], str):
+        return False
+    return "command" not in entry
+
+
+def valid_role(role, *, allow_dormant):
+    if not isinstance(role, dict):
+        return False
+    required = {
+        "id",
+        "event",
+        "direct_command_role",
+        "external_command_path_class",
+        "entry",
+    }
+    allowed = required | ({"dormant_until_milestone"} if allow_dormant else set())
+    if set(role) - allowed or not required.issubset(role):
+        return False
+    if not all(
+        isinstance(role[key], str) and role[key]
+        for key in (
+            "id",
+            "event",
+            "direct_command_role",
+            "external_command_path_class",
+        )
+    ):
+        return False
+    if "dormant_until_milestone" in role and not isinstance(
+        role["dormant_until_milestone"], str
+    ):
+        return False
+    return valid_entry(role["entry"])
+
+
+def roles_match(roles, layout):
+    if not isinstance(roles, list) or len(roles) != len(layout):
+        return False
+    for role, expected in zip(roles, layout):
+        if not isinstance(role, dict):
+            return False
+        observed = (
+            role.get("id"),
+            role.get("event"),
+            role.get("direct_command_role"),
+            role.get("external_command_path_class"),
+            role.get("entry"),
+            role.get("dormant_until_milestone"),
+        )
+        if observed != expected:
+            return False
+    return True
+
+
 v1_path = Path(sys.argv[1])
 v2_path = Path(sys.argv[2])
-v1 = json.loads(v1_path.read_text(encoding="utf-8"))["hook_ownership"]
+v1_doc = load(v1_path, "hook-owner v1")
+v1 = v1_doc.get("hook_ownership")
+if (
+    not isinstance(v1, dict)
+    or v1.get("schema") != "awa-hook-owner/v1"
+    or v1.get("modes") != ["direct", "external"]
+    or v1.get("default_mode") != "direct"
+    or v1.get("selection_env") != "AWA_HOOK_OWNER"
+    or v1.get("selection_schema") != "awa-hook-owner-selection/v1"
+    or v1.get("external_real_hook_file_writes") is not False
+    or not isinstance(v1.get("roles"), list)
+    or tuple(
+        role.get("id") for role in v1["roles"] if isinstance(role, dict)
+    )
+    != V1_IDS
+    or not all(valid_role(role, allow_dormant=False) for role in v1["roles"])
+):
+    fail("hook-owner v1")
 roles = list(v1["roles"])
 preferred = v1["schema"]
 if v2_path.is_file():
-    v2 = json.loads(v2_path.read_text(encoding="utf-8"))
+    v2 = load(v2_path, "hook-owner v2")
     if (
         v2.get("schema") != "awa-hook-owner/v2"
+        or v2.get("version") != 2
         or v2.get("successor_of") != "awa-hook-owner/v1"
+        or v2.get("v1_contract")
+        != "contracts/awa-contract.v1.json#hook_ownership"
+        or v2.get("modes") != ["direct", "external"]
+        or v2.get("default_mode") != "direct"
+        or v2.get("selection_env") != "AWA_HOOK_OWNER"
+        or v2.get("selection_schema") != "awa-hook-owner-selection/v1"
+        or v2.get("external_real_hook_file_writes") is not False
         or v2.get("supersedes_roles") != ["worktree.shell-guard"]
-        or len(v2.get("roles", [])) != 3
+        or not isinstance(v2.get("composition_rule"), str)
+        or not v2["composition_rule"]
+        or not isinstance(v2.get("external_rule"), str)
+        or not v2["external_rule"]
+        or not roles_match(v2.get("roles"), V2_LAYOUT)
     ):
-        raise SystemExit("hook-owner v2 contract invalid")
+        fail("hook-owner v2")
     superseded = set(v2["supersedes_roles"])
     roles = [role for role in roles if role["id"] not in superseded]
     roles.extend(v2["roles"])
@@ -1365,15 +1508,19 @@ PY
 }
 
 doctor() {
+  local rc=0
   policy_check
   printf '\n'
-  hook_owner_role_matrix
+  if ! hook_owner_role_matrix; then
+    rc=1
+  fi
   printf '\n== current repo ==\n'
   current_state
   if top_level >/dev/null 2>&1; then
     printf '\n== worktrees ==\n'
     list_worktrees
   fi
+  return "$rc"
 }
 
 dashboard_data() {
