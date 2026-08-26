@@ -6,6 +6,7 @@ import contextlib
 import copy
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ from engine import guard, integrity, mcp_server
 
 _ROOT = Path(__file__).resolve().parents[2]
 _INSTALL_HOOKS = _ROOT / "kernel" / "hooks" / "install-hooks.sh"
+_CONTRACT_FREEZE = _ROOT / "kernel" / "checks" / "awa-contract-freeze.sh"
 _SAFE_FACTS = {
     "guard_primary_deny": True,
     "guard_cd_bypass_deny": True,
@@ -47,6 +49,14 @@ def facts(**overrides) -> integrity.Facts:
 
 def invariant(status: dict, invariant_id: str) -> dict:
     return next(item for item in status["invariants"] if item["id"] == invariant_id)
+
+
+def materialize_role_commands(source: Path, roles: list[dict]) -> None:
+    for role in roles:
+        command = source / role["direct_command_role"]
+        command.parent.mkdir(parents=True, exist_ok=True)
+        command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        command.chmod(0o755)
 
 
 class TestIntegrityInvariants(unittest.TestCase):
@@ -395,6 +405,7 @@ class TestLiveHookFacts(unittest.TestCase):
                 "PYTHONDONTWRITEBYTECODE": "1",
             }
         )
+        self.env = env
         installed = subprocess.run(
             [str(_INSTALL_HOOKS)],
             capture_output=True,
@@ -434,6 +445,312 @@ class TestLiveHookFacts(unittest.TestCase):
             json.dumps(document, indent=2) + "\n",
             encoding="utf-8",
         )
+
+    def _parity_runtime(self, name: str) -> tuple[Path, Path]:
+        runtime = self.root / name
+        shutil.copytree(_ROOT / "kernel", runtime / "kernel")
+        shutil.copytree(_ROOT / "contracts", runtime / "contracts")
+        (runtime / "engine").mkdir()
+        shutil.copy2(
+            _ROOT / "engine" / "integrity_detach.py",
+            runtime / "engine" / "integrity_detach.py",
+        )
+        (runtime / "dashboard").mkdir()
+        shutil.copy2(
+            _ROOT / "dashboard" / "emitter.py",
+            runtime / "dashboard" / "emitter.py",
+        )
+        bounded_freeze = runtime / "kernel" / "checks" / "hook-owner-freeze.sh"
+        freeze_source = _CONTRACT_FREEZE.read_text(encoding="utf-8")
+        bounded_freeze.write_text(
+            freeze_source.split("# 0a) M1-C hook mechanics:", 1)[0]
+            + 'exit "$fail"\n',
+            encoding="utf-8",
+        )
+        bounded_freeze.chmod(0o755)
+
+        projected = runtime / "projected-hooks.json"
+        env = dict(self.env)
+        env["AWA_HOOKS_JSON"] = str(projected)
+        installed = subprocess.run(
+            [str(runtime / "kernel" / "hooks" / "install-hooks.sh")],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        self.assertEqual(
+            installed.returncode,
+            0,
+            installed.stdout + installed.stderr,
+        )
+        return runtime, projected
+
+    def _parity_acceptance(self, runtime: Path, projected: Path) -> dict[str, bool]:
+        env = dict(self.env)
+        env["AWA_HOOKS_JSON"] = str(runtime / "candidate-hooks.json")
+        installer = subprocess.run(
+            [str(runtime / "kernel" / "hooks" / "install-hooks.sh")],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        doctor = subprocess.run(
+            [str(runtime / "kernel" / "bin" / "dev-worktree.sh"), "doctor"],
+            cwd=_ROOT,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        freeze_env = dict(env)
+        freeze_env["AWA_HOME"] = str(runtime)
+        contract_freeze = subprocess.run(
+            [str(runtime / "kernel" / "checks" / "hook-owner-freeze.sh")],
+            capture_output=True,
+            text=True,
+            env=freeze_env,
+            timeout=30,
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"AWA_HOOKS_JSON": str(projected)},
+            clear=False,
+        ):
+            effective = integrity._effective_hook_roles(runtime)
+            observed = integrity._hook_facts(runtime)
+        status = integrity.evaluate(
+            "fast",
+            trigger="beforeShell",
+            facts=facts(
+                hook_rows_present=observed[0],
+                hook_fail_open=observed[1],
+            ),
+        )
+        return {
+            "install": installer.returncode == 0,
+            "doctor": doctor.returncode == 0,
+            "contract-freeze": contract_freeze.returncode == 0,
+            "integrity": effective is not None,
+            "integrity-unknown": (
+                observed == (False, None)
+                and invariant(status, "hooks")["severity"] == "unknown"
+            ),
+            "integrity-green": (
+                observed == (True, True)
+                and invariant(status, "hooks")["severity"] == "green"
+            ),
+        }
+
+    def test_v2_validation_acceptance_parity_matrix(self):
+        header_cases = {
+            "schema": ("schema", "wrong"),
+            "version": ("version", 3),
+            "successor": ("successor_of", "wrong"),
+            "v1-contract": ("v1_contract", "wrong"),
+            "modes": ("modes", ["external", "direct"]),
+            "default-mode": ("default_mode", "external"),
+            "selection-env": ("selection_env", "WRONG"),
+            "selection-schema": ("selection_schema", "wrong"),
+            "external-writes": ("external_real_hook_file_writes", True),
+            "supersedes": ("supersedes_roles", []),
+            "composition-rule": ("composition_rule", ""),
+            "external-rule": ("external_rule", ""),
+        }
+
+        def mutate_header(document, _runtime, field, value):
+            document[field] = value
+
+        def mutate_role(document, _runtime, index, field, value):
+            document["roles"][index][field] = value
+
+        def mutate_entry(document, _runtime, index, field, value):
+            document["roles"][index]["entry"][field] = value
+
+        cases = [
+            (
+                f"header.{name}",
+                lambda document, runtime, field=field, value=value: mutate_header(
+                    document, runtime, field, value
+                ),
+            )
+            for name, (field, value) in header_cases.items()
+        ]
+        cases.extend(
+            [
+                ("roles.count", lambda document, _runtime: document["roles"].pop()),
+                (
+                    "role.id",
+                    lambda document, runtime: mutate_role(
+                        document, runtime, 0, "id", "wrong"
+                    ),
+                ),
+                (
+                    "role.event",
+                    lambda document, runtime: mutate_role(
+                        document, runtime, 0, "event", "afterFileEdit"
+                    ),
+                ),
+                (
+                    "role.path-containment",
+                    lambda document, runtime: mutate_role(
+                        document, runtime, 0, "direct_command_role", "../escape.sh"
+                    ),
+                ),
+                (
+                    "role.external-class",
+                    lambda document, runtime: mutate_role(
+                        document,
+                        runtime,
+                        0,
+                        "external_command_path_class",
+                        "installed-awa",
+                    ),
+                ),
+                (
+                    "role.dormancy",
+                    lambda document, runtime: mutate_role(
+                        document,
+                        runtime,
+                        2,
+                        "dormant_until_milestone",
+                        "M9",
+                    ),
+                ),
+                (
+                    "role.unexpected-dormancy",
+                    lambda document, runtime: mutate_role(
+                        document,
+                        runtime,
+                        0,
+                        "dormant_until_milestone",
+                        "M2.4",
+                    ),
+                ),
+                (
+                    "role.extra-field",
+                    lambda document, runtime: mutate_role(
+                        document, runtime, 0, "unexpected", True
+                    ),
+                ),
+                (
+                    "role.missing-entry",
+                    lambda document, _runtime: document["roles"][0].pop("entry"),
+                ),
+                (
+                    "entry.type",
+                    lambda document, runtime: mutate_entry(
+                        document, runtime, 0, "type", "prompt"
+                    ),
+                ),
+                (
+                    "entry.timeout",
+                    lambda document, runtime: mutate_entry(
+                        document, runtime, 0, "timeout", 0
+                    ),
+                ),
+                (
+                    "entry.timeout-missing",
+                    lambda document, _runtime: document["roles"][0]["entry"].pop(
+                        "timeout"
+                    ),
+                ),
+                (
+                    "entry.fail-closed",
+                    lambda document, runtime: mutate_entry(
+                        document, runtime, 0, "failClosed", True
+                    ),
+                ),
+                (
+                    "entry.fail-closed-missing",
+                    lambda document, _runtime: document["roles"][0]["entry"].pop(
+                        "failClosed"
+                    ),
+                ),
+                (
+                    "entry.command",
+                    lambda document, runtime: mutate_entry(
+                        document, runtime, 0, "command", "/wrong"
+                    ),
+                ),
+                (
+                    "entry.extra-field",
+                    lambda document, runtime: mutate_entry(
+                        document, runtime, 0, "unexpected", True
+                    ),
+                ),
+                (
+                    "executable.missing",
+                    lambda _document, runtime: (
+                        runtime / "kernel" / "hooks" / "awa-integrity-observer.sh"
+                    ).unlink(),
+                ),
+                (
+                    "executable.non-executable",
+                    lambda _document, runtime: (
+                        runtime / "kernel" / "hooks" / "awa-integrity-observer.sh"
+                    ).chmod(0o644),
+                ),
+                (
+                    "executable.symlink-escape",
+                    lambda _document, runtime: (
+                        (
+                            runtime
+                            / "kernel"
+                            / "hooks"
+                            / "awa-integrity-observer.sh"
+                        ).unlink(),
+                        (
+                            runtime
+                            / "kernel"
+                            / "hooks"
+                            / "awa-integrity-observer.sh"
+                        ).symlink_to(self.root / "outside-observer.sh"),
+                    ),
+                ),
+            ]
+        )
+
+        valid_runtime, valid_projection = self._parity_runtime("parity-valid")
+        outside = self.root / "outside-observer.sh"
+        outside.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        outside.chmod(0o755)
+        self.assertEqual(
+            self._parity_acceptance(valid_runtime, valid_projection),
+            {
+                "install": True,
+                "doctor": True,
+                "contract-freeze": True,
+                "integrity": True,
+                "integrity-unknown": False,
+                "integrity-green": True,
+            },
+        )
+
+        for name, mutate in cases:
+            with self.subTest(name=name):
+                runtime, projected = self._parity_runtime(f"parity-{name}")
+                contract_path = (
+                    runtime / "contracts" / "awa-hook-owner.v2.json"
+                )
+                document = json.loads(contract_path.read_text(encoding="utf-8"))
+                mutate(document, runtime)
+                contract_path.write_text(
+                    json.dumps(document, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                self.assertEqual(
+                    self._parity_acceptance(runtime, projected),
+                    {
+                        "install": False,
+                        "doctor": False,
+                        "contract-freeze": False,
+                        "integrity": False,
+                        "integrity-unknown": True,
+                        "integrity-green": False,
+                    },
+                )
 
     def test_v2_direct_projection_collects_green_hooks(self):
         observed, hook_invariant = self._collect()
@@ -491,6 +808,7 @@ class TestLiveHookFacts(unittest.TestCase):
         owner = json.loads(contract_path.read_text(encoding="utf-8"))[
             "hook_ownership"
         ]
+        materialize_role_commands(source, owner["roles"])
         hooks: dict[str, list[dict]] = {}
         for role in owner["roles"]:
             row = dict(role["entry"])
@@ -519,6 +837,7 @@ class TestLiveHookFacts(unittest.TestCase):
         owner = json.loads(v1_path.read_text(encoding="utf-8"))[
             "hook_ownership"
         ]
+        materialize_role_commands(source, owner["roles"])
         hooks: dict[str, list[dict]] = {}
         for role in owner["roles"]:
             row = dict(role["entry"])

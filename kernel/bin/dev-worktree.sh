@@ -1323,6 +1323,7 @@ hook_owner_role_matrix() {
   python3 - "$AWA_HOME/contracts/awa-contract.v1.json" \
     "$AWA_HOME/contracts/awa-hook-owner.v2.json" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -1414,6 +1415,21 @@ def valid_role(role, *, allow_dormant):
         )
     ):
         return False
+    if role["external_command_path_class"] not in {
+        "host-policy-delegator",
+        "installed-awa",
+    }:
+        return False
+    relative = Path(role["direct_command_role"])
+    if relative.is_absolute() or ".." in relative.parts:
+        return False
+    command = (root / relative).resolve()
+    try:
+        command.relative_to(root)
+    except ValueError:
+        return False
+    if not command.is_file() or not os.access(command, os.X_OK):
+        return False
     if "dormant_until_milestone" in role and not isinstance(
         role["dormant_until_milestone"], str
     ):
@@ -1442,6 +1458,7 @@ def roles_match(roles, layout):
 
 v1_path = Path(sys.argv[1])
 v2_path = Path(sys.argv[2])
+root = v1_path.parent.parent.resolve()
 v1_doc = load(v1_path, "hook-owner v1")
 v1 = v1_doc.get("hook_ownership")
 if (
@@ -1481,6 +1498,10 @@ if v2_path.is_file():
         or not isinstance(v2.get("external_rule"), str)
         or not v2["external_rule"]
         or not roles_match(v2.get("roles"), V2_LAYOUT)
+        or not all(
+            valid_role(role, allow_dormant=True)
+            for role in v2.get("roles", [])
+        )
     ):
         fail("hook-owner v2")
     superseded = set(v2["supersedes_roles"])

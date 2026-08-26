@@ -1730,6 +1730,97 @@ def _roles_match_layout(roles: object, layout: tuple) -> bool:
     return True
 
 
+def _valid_hook_entry(entry: object) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("type") != "command":
+        return False
+    if type(entry.get("timeout")) is not int or entry["timeout"] <= 0:
+        return False
+    if "failClosed" in entry and type(entry["failClosed"]) is not bool:
+        return False
+    return "command" not in entry
+
+
+def _valid_hook_role(
+    source: Path,
+    role: object,
+    *,
+    allow_dormant: bool,
+) -> bool:
+    if not isinstance(role, dict):
+        return False
+    required = {
+        "id",
+        "event",
+        "direct_command_role",
+        "external_command_path_class",
+        "entry",
+    }
+    allowed = required | ({"dormant_until_milestone"} if allow_dormant else set())
+    if set(role) - allowed or not required.issubset(role):
+        return False
+    if not all(
+        isinstance(role[key], str) and role[key]
+        for key in (
+            "id",
+            "event",
+            "direct_command_role",
+            "external_command_path_class",
+        )
+    ):
+        return False
+    if role["external_command_path_class"] not in {
+        "host-policy-delegator",
+        "installed-awa",
+    }:
+        return False
+    relative = Path(role["direct_command_role"])
+    if relative.is_absolute() or ".." in relative.parts:
+        return False
+    command = (source / relative).resolve()
+    try:
+        command.relative_to(source.resolve())
+    except ValueError:
+        return False
+    if not command.is_file() or not os.access(command, os.X_OK):
+        return False
+    return _valid_hook_entry(role["entry"])
+
+
+def _valid_v2_hook_contract(source: Path, v2: object) -> bool:
+    if not isinstance(v2, dict):
+        return False
+    roles = v2.get("roles")
+    return (
+        v2.get("schema") == "awa-hook-owner/v2"
+        and v2.get("version") == 2
+        and v2.get("successor_of") == "awa-hook-owner/v1"
+        and v2.get("v1_contract")
+        == "contracts/awa-contract.v1.json#hook_ownership"
+        and v2.get("modes") == ["direct", "external"]
+        and v2.get("default_mode") == "direct"
+        and v2.get("selection_env") == "AWA_HOOK_OWNER"
+        and v2.get("selection_schema") == "awa-hook-owner-selection/v1"
+        and v2.get("external_real_hook_file_writes") is False
+        and v2.get("supersedes_roles") == ["worktree.shell-guard"]
+        and isinstance(v2.get("composition_rule"), str)
+        and bool(v2["composition_rule"])
+        and isinstance(v2.get("external_rule"), str)
+        and bool(v2["external_rule"])
+        and _roles_match_layout(roles, _V2_HOOK_LAYOUT)
+        and all(
+            _valid_hook_role(source, role, allow_dormant=True)
+            for role in roles or []
+        )
+        and all(
+            role["external_command_path_class"] == "host-policy-delegator"
+            and role["entry"].get("failClosed") is False
+            for role in roles or []
+        )
+    )
+
+
 def _effective_hook_roles(source: Path) -> list[dict] | None:
     v1_path = source / "contracts" / "awa-contract.v1.json"
     try:
@@ -1747,8 +1838,14 @@ def _effective_hook_roles(source: Path) -> list[dict] | None:
         or v1.get("schema") != "awa-hook-owner/v1"
         or v1.get("modes") != ["direct", "external"]
         or v1.get("default_mode") != "direct"
+        or v1.get("selection_env") != "AWA_HOOK_OWNER"
+        or v1.get("selection_schema") != "awa-hook-owner-selection/v1"
         or v1.get("external_real_hook_file_writes") is not False
         or not _roles_match_layout(v1.get("roles"), _V1_HOOK_LAYOUT)
+        or not all(
+            _valid_hook_role(source, role, allow_dormant=False)
+            for role in v1.get("roles", [])
+        )
     ):
         return None
 
@@ -1765,19 +1862,7 @@ def _effective_hook_roles(source: Path) -> list[dict] | None:
         json.JSONDecodeError,
     ):
         return None
-    if (
-        not isinstance(v2, dict)
-        or v2.get("schema") != "awa-hook-owner/v2"
-        or v2.get("version") != 2
-        or v2.get("successor_of") != "awa-hook-owner/v1"
-        or v2.get("v1_contract")
-        != "contracts/awa-contract.v1.json#hook_ownership"
-        or v2.get("modes") != ["direct", "external"]
-        or v2.get("default_mode") != "direct"
-        or v2.get("external_real_hook_file_writes") is not False
-        or v2.get("supersedes_roles") != ["worktree.shell-guard"]
-        or not _roles_match_layout(v2.get("roles"), _V2_HOOK_LAYOUT)
-    ):
+    if not _valid_v2_hook_contract(source, v2):
         return None
     superseded = set(v2["supersedes_roles"])
     return [

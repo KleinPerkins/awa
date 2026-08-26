@@ -156,19 +156,25 @@ if v2_path.is_file():
             "worktree.shell-guard-composite",
             "beforeShellExecution",
             "kernel/hooks/worktree-guard-with-integrity.sh",
-            20,
+            "host-policy-delegator",
+            {"type": "command", "timeout": 20, "failClosed": False},
+            None,
         ),
         (
             "worktree.stop-observer",
             "stop",
             "kernel/hooks/awa-integrity-observer.sh",
-            5,
+            "host-policy-delegator",
+            {"type": "command", "timeout": 5, "failClosed": False},
+            None,
         ),
         (
             "worktree.session-handoff",
             "sessionStart",
             "kernel/hooks/awa-session-handoff.sh",
-            5,
+            "host-policy-delegator",
+            {"type": "command", "timeout": 5, "failClosed": False},
+            "M2.4",
         ),
     ]
     v2_roles = v2.get("roles")
@@ -177,7 +183,9 @@ if v2_path.is_file():
             role.get("id"),
             role.get("event"),
             role.get("direct_command_role"),
-            (role.get("entry") or {}).get("timeout"),
+            role.get("external_command_path_class"),
+            role.get("entry"),
+            role.get("dormant_until_milestone"),
         )
         for role in v2_roles
         if isinstance(role, dict)
