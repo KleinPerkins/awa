@@ -13,8 +13,13 @@ KERNEL_DIR="$(cd "$SELF_DIR/.." && pwd)"                        # kernel
 AWA_HOME="${AWA_HOME:-$(cd "$KERNEL_DIR/.." && pwd)}"           # install root (role-resolved)
 
 CONTRACT="$AWA_HOME/contracts/awa-contract.v1.json"
+HOOK_OWNER_V2="$AWA_HOME/contracts/awa-hook-owner.v2.json"
 DEV_WORKTREE="$AWA_HOME/kernel/bin/dev-worktree.sh"
 GUARD="$AWA_HOME/kernel/hooks/worktree-guard.sh"
+COMPOSITE_GUARD="$AWA_HOME/kernel/hooks/worktree-guard-with-integrity.sh"
+INTEGRITY_OBSERVER="$AWA_HOME/kernel/hooks/awa-integrity-observer.sh"
+SESSION_HANDOFF="$AWA_HOME/kernel/hooks/awa-session-handoff.sh"
+INTEGRITY_DETACHER="$AWA_HOME/engine/integrity_detach.py"
 INSTALL_HOOKS="$AWA_HOME/kernel/hooks/install-hooks.sh"
 EMITTER="$AWA_HOME/dashboard/emitter.py"
 
@@ -32,13 +37,19 @@ if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$CONTRACT" 2>/d
   bad "frozen contract is not valid JSON: $CONTRACT"; echo "awa-contract-freeze: FAILED"; exit 1
 fi
 pass "frozen contract present + valid JSON"
-for f in "$DEV_WORKTREE" "$GUARD" "$INSTALL_HOOKS" "$EMITTER"; do
+if [ ! -f "$HOOK_OWNER_V2" ] ||
+   ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$HOOK_OWNER_V2" 2>/dev/null; then
+  bad "hook-owner v2 contract missing or invalid: $HOOK_OWNER_V2"
+fi
+for f in "$DEV_WORKTREE" "$GUARD" "$COMPOSITE_GUARD" \
+  "$INTEGRITY_OBSERVER" "$SESSION_HANDOFF" "$INTEGRITY_DETACHER" \
+  "$INSTALL_HOOKS" "$EMITTER"; do
   [ -f "$f" ] || bad "role-resolved shim missing: $f"
 done
 
-# 0) awa-hook-owner/v1 is the sole ordered five-role owner contract. Generate the direct
-# projection into a throwaway non-live destination and require exact contract parity. External
-# install/check must exit before creating even the selected destination's parent.
+# 0) awa-hook-owner/v2 is the preferred additive successor. The effective direct
+# projection is frozen v1 minus superseded roles plus v2. External install/check
+# must still exit before creating even the selected destination's parent.
 owner_tmp="$(mktemp -d)"
 owner_direct="$owner_tmp/direct-hooks.json"
 owner_external="$owner_tmp/external-parent/hooks.json"
@@ -57,67 +68,125 @@ AWA_HOOK_OWNER=external AWA_HOOKS_JSON="$owner_external" \
 if [ "$owner_install_rc" -eq 0 ] && [ "$owner_check_rc" -eq 0 ] && \
    [ "$owner_external_install_rc" -eq 0 ] && [ "$owner_external_check_rc" -eq 0 ] && \
    [ ! -e "$owner_tmp/external-parent" ] && \
-   CONTRACT="$CONTRACT" OWNER_DIRECT="$owner_direct" AWA_HOME="$AWA_HOME" python3 - <<'PY'
+   CONTRACT="$CONTRACT" HOOK_OWNER_V2="$HOOK_OWNER_V2" \
+   OWNER_DIRECT="$owner_direct" AWA_HOME="$AWA_HOME" python3 - <<'PY'
 import json
 import os
 import pathlib
 import sys
 
 contract = json.load(open(os.environ["CONTRACT"], encoding="utf-8"))
-owner = contract.get("hook_ownership")
-expected_ids = [
+v1 = contract.get("hook_ownership")
+v2 = json.load(open(os.environ["HOOK_OWNER_V2"], encoding="utf-8"))
+v1_ids = [
     "worktree.session-context",
     "worktree.shell-guard",
     "worktree.file-observer",
     "recovery.maintenance",
     "finish.prompt-recall",
 ]
-expected_events = [
+v1_events = [
     "sessionStart",
     "beforeShellExecution",
     "afterFileEdit",
     "sessionStart",
     "beforeSubmitPrompt",
 ]
-expected_classes = [
+v1_classes = [
     "host-policy-delegator",
     "host-policy-delegator",
     "host-policy-delegator",
     "installed-awa",
     "installed-awa",
 ]
+v2_ids = [
+    "worktree.shell-guard-composite",
+    "worktree.stop-observer",
+    "worktree.session-handoff",
+]
+v2_events = ["beforeShellExecution", "stop", "sessionStart"]
+v2_paths = [
+    "kernel/hooks/worktree-guard-with-integrity.sh",
+    "kernel/hooks/awa-integrity-observer.sh",
+    "kernel/hooks/awa-session-handoff.sh",
+]
 errors = []
-if not isinstance(owner, dict):
+if not isinstance(v1, dict):
     errors.append("missing hook_ownership block")
+    v1 = {}
 else:
     required = {
         "schema", "modes", "default_mode", "selection_env",
         "selection_schema", "external_real_hook_file_writes", "roles",
     }
-    if not required.issubset(owner):
-        errors.append("hook_ownership required field drift")
-    if owner.get("schema") != "awa-hook-owner/v1":
-        errors.append("hook-owner schema drift")
-    if owner.get("modes") != ["direct", "external"]:
-        errors.append("hook-owner mode vocabulary/order drift")
-    if owner.get("default_mode") != "direct":
-        errors.append("hook-owner direct default drift")
-    if owner.get("selection_env") != "AWA_HOOK_OWNER":
-        errors.append("hook-owner selection env drift")
-    if owner.get("selection_schema") != "awa-hook-owner-selection/v1":
-        errors.append("hook-owner selection schema drift")
-    if owner.get("external_real_hook_file_writes") is not False:
+    if not required.issubset(v1):
+        errors.append("v1 hook_ownership required field drift")
+    if v1.get("schema") != "awa-hook-owner/v1":
+        errors.append("v1 hook-owner schema drift")
+    if v1.get("modes") != ["direct", "external"]:
+        errors.append("v1 hook-owner mode vocabulary/order drift")
+    if v1.get("default_mode") != "direct":
+        errors.append("v1 hook-owner direct default drift")
+    if v1.get("selection_env") != "AWA_HOOK_OWNER":
+        errors.append("v1 hook-owner selection env drift")
+    if v1.get("selection_schema") != "awa-hook-owner-selection/v1":
+        errors.append("v1 hook-owner selection schema drift")
+    if v1.get("external_real_hook_file_writes") is not False:
         errors.append("external hook-file write boundary drift")
-    roles = owner.get("roles")
-    if not isinstance(roles, list) or len(roles) != 5:
-        errors.append("hook-owner role count drift")
-        roles = []
-    if [role.get("id") for role in roles] != expected_ids:
-        errors.append("hook-owner role identity/order drift")
-    if [role.get("event") for role in roles] != expected_events:
-        errors.append("hook-owner event order drift")
-    if [role.get("external_command_path_class") for role in roles] != expected_classes:
-        errors.append("hook-owner external path-class drift")
+v1_roles = v1.get("roles")
+if not isinstance(v1_roles, list) or len(v1_roles) != 5:
+    errors.append("v1 hook-owner role count drift")
+    v1_roles = []
+if [role.get("id") for role in v1_roles] != v1_ids:
+    errors.append("v1 hook-owner role identity/order drift")
+if [role.get("event") for role in v1_roles] != v1_events:
+    errors.append("v1 hook-owner event order drift")
+if [role.get("external_command_path_class") for role in v1_roles] != v1_classes:
+    errors.append("v1 hook-owner external path-class drift")
+
+required_v2 = {
+    "schema", "version", "successor_of", "v1_contract", "modes",
+    "default_mode", "selection_env", "selection_schema",
+    "external_real_hook_file_writes", "supersedes_roles",
+    "composition_rule", "external_rule", "roles",
+}
+if not required_v2.issubset(v2):
+    errors.append("v2 required field drift")
+if v2.get("schema") != "awa-hook-owner/v2" or v2.get("version") != 2:
+    errors.append("v2 schema/version drift")
+if v2.get("successor_of") != "awa-hook-owner/v1":
+    errors.append("v2 successor drift")
+if v2.get("v1_contract") != "contracts/awa-contract.v1.json#hook_ownership":
+    errors.append("v2 compatibility pointer drift")
+if v2.get("modes") != ["direct", "external"]:
+    errors.append("v2 mode vocabulary/order drift")
+if v2.get("default_mode") != "direct":
+    errors.append("v2 direct default drift")
+if v2.get("selection_env") != "AWA_HOOK_OWNER":
+    errors.append("v2 selection env drift")
+if v2.get("selection_schema") != "awa-hook-owner-selection/v1":
+    errors.append("v2 selection schema drift")
+if v2.get("external_real_hook_file_writes") is not False:
+    errors.append("v2 external write boundary drift")
+if v2.get("supersedes_roles") != ["worktree.shell-guard"]:
+    errors.append("v2 supersession drift")
+v2_roles = v2.get("roles")
+if not isinstance(v2_roles, list) or len(v2_roles) != 3:
+    errors.append("v2 role count drift")
+    v2_roles = []
+if [role.get("id") for role in v2_roles] != v2_ids:
+    errors.append("v2 role identity/order drift")
+if [role.get("event") for role in v2_roles] != v2_events:
+    errors.append("v2 event order drift")
+if [role.get("direct_command_role") for role in v2_roles] != v2_paths:
+    errors.append("v2 direct path drift")
+if any(
+    role.get("external_command_path_class") != "host-policy-delegator"
+    for role in v2_roles
+):
+    errors.append("v2 external path-class drift")
+if v2_roles and v2_roles[-1].get("dormant_until_milestone") != "M2.4":
+    errors.append("session-handoff dormancy drift")
 
 try:
     projection = json.load(open(os.environ["OWNER_DIRECT"], encoding="utf-8"))
@@ -129,15 +198,17 @@ if projection.get("version") != 1 or not isinstance(hooks, dict):
     hooks = {}
 
 home = pathlib.Path(os.environ["AWA_HOME"])
+superseded = set(v2.get("supersedes_roles", []))
+roles = [role for role in v1_roles if role.get("id") not in superseded]
+roles.extend(v2_roles)
 matched = 0
 for role in roles:
-    if (
-        set(role) != {
-            "id", "event", "direct_command_role",
-            "external_command_path_class", "entry",
-        }
-        or not isinstance(role.get("entry"), dict)
-    ):
+    required_role = {
+        "id", "event", "direct_command_role",
+        "external_command_path_class", "entry",
+    }
+    allowed_role = required_role | {"dormant_until_milestone"}
+    if not required_role.issubset(role) or not set(role).issubset(allowed_role):
         errors.append(f"role shape drift: {role.get('id')!r}")
         continue
     wanted = dict(role["entry"])
@@ -148,9 +219,9 @@ for role in roles:
     if count != 1:
         errors.append(f"direct projection count drift: {role['id']}={count}")
     matched += count
-if sum(len(rows) for rows in hooks.values() if isinstance(rows, list)) != 5:
-    errors.append("direct projection does not contain exactly five rows")
-if matched != 5:
+if sum(len(rows) for rows in hooks.values() if isinstance(rows, list)) != 7:
+    errors.append("direct v2 projection does not contain exactly seven rows")
+if matched != 7:
     errors.append("direct projection/contract parity incomplete")
 
 if errors:
@@ -158,11 +229,57 @@ if errors:
     raise SystemExit(1)
 PY
 then
-  pass "awa-hook-owner/v1 declares five exact roles; direct projection matches; external creates no hook destination"
+  pass "awa-hook-owner/v2 preferred; seven-role direct projection matches; v1 compatibility and external zero-access retained"
 else
-  bad "awa-hook-owner/v1 contract/reconciler parity drifted"
+  bad "awa-hook-owner v2/v1 contract or reconciler parity drifted"
 fi
 rm -rf "$owner_tmp" 2>/dev/null || true
+
+# 0a) M1-C hook mechanics: the composite delegates guard output through exec,
+# both observers use the detached fast verifier, and handoff remains dormant.
+if [ -x "$COMPOSITE_GUARD" ] && [ -x "$INTEGRITY_OBSERVER" ] && \
+   [ -x "$SESSION_HANDOFF" ] && [ -x "$INTEGRITY_DETACHER" ] && \
+   grep -Fq 'exec "$GUARD"' "$COMPOSITE_GUARD" && \
+   grep -Fq -- '--trigger beforeShell' "$COMPOSITE_GUARD" && \
+   grep -Fq -- '--trigger stop' "$INTEGRITY_OBSERVER" && \
+   ! grep -Eq 'integrity[[:space:]]+verify|status\.json|handoff_required' "$SESSION_HANDOFF" && \
+   INTEGRITY_DETACHER="$INTEGRITY_DETACHER" python3 - <<'PY'
+import ast
+import os
+from pathlib import Path
+
+source = Path(os.environ["INTEGRITY_DETACHER"]).read_text(encoding="utf-8")
+tree = ast.parse(source)
+popen_calls = [
+    node for node in ast.walk(tree)
+    if isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and node.func.attr == "Popen"
+]
+required = {"stdin", "stdout", "stderr", "start_new_session", "close_fds"}
+if len(popen_calls) < 2:
+    raise SystemExit(1)
+for call in popen_calls:
+    keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+    if not required.issubset(keywords):
+        raise SystemExit(1)
+    for name in ("stdin", "stdout", "stderr"):
+        value = keywords[name]
+        if not (
+            isinstance(value, ast.Attribute)
+            and value.attr == "DEVNULL"
+        ):
+            raise SystemExit(1)
+    for name in ("start_new_session", "close_fds"):
+        value = keywords[name]
+        if not (isinstance(value, ast.Constant) and value.value is True):
+            raise SystemExit(1)
+PY
+then
+  pass "M1-C composite/detacher/stop mechanics valid; session-handoff remains dormant"
+else
+  bad "M1-C hook mechanics or dormant handoff drifted"
+fi
 
 # 1) CLI surface: every frozen verb + flag must appear in dev-worktree.sh usage/dispatch.
 if CONTRACT="$CONTRACT" DEV_SRC="$(cat "$DEV_WORKTREE" 2>/dev/null || true)" python3 - <<'PY'

@@ -1,25 +1,11 @@
 #!/usr/bin/env bash
-# install-hooks.sh — install (or verify) Cursor user hooks for AWA worktree automation
-# without clobbering existing hooks. Path-relative: it wires whatever checkout/install of
-# the kernel hooks it lives beside, so it works both from a clone and from the installed
-# runtime (~/.local/share/awa/current/kernel/hooks).
-#
-# Usage:
-#   install-hooks.sh            install/reconcile ~/.cursor/hooks.json (idempotent)
-#   install-hooks.sh --check    verify deployed==intended for the AWA hook entries
-#                               (X1: catches failClosed drift). Exit 0 if OK/absent, 1 if wrong.
-#
-# Intended failClosed policy (X1/X2; incident 2026-07-05):
-#   beforeShellExecution -> false  (soft backstop / nudge-to-worktree; hook failure MUST NOT brick)
-#   beforeSubmitPrompt   -> false  (finish recall convenience; kernel remains authoritative)
-#   afterFileEdit        -> unset  (observation-only, no permission gate; failClosed is a no-op here)
-#   sessionStart         -> false  (fire-and-forget context; never blocks)
+# install-hooks.sh — reconcile or verify AWA-owned Cursor user-hook rows.
 set -euo pipefail
 
 MODE="install"
 case "${1:-}" in
   --check) MODE="check" ;;
-  "") MODE="install" ;;
+  "") ;;
   *) printf 'usage: %s [--check]\n' "$0" >&2; exit 2 ;;
 esac
 
@@ -36,186 +22,358 @@ case "$HOOK_OWNER" in
     ;;
 esac
 
-# The selected destination is not even resolved until after the external-owner early exit above.
-# This ordering is part of awa-hook-owner/v1: external mode performs zero selected-hook-file
-# reads, stats, directory creation, chmod, backups, or writes.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"   # kernel/hooks
+# The selected destination is not resolved until after the external-owner return.
+# External mode performs zero selected-hook-file reads, stats, directory creation,
+# chmod, backups, writes, or row rendering.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
+AWA_HOME="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 HOOKS_JSON="${AWA_HOOKS_JSON:-$HOME/.cursor/hooks.json}"
-SESSION_HOOK="$SCRIPT_DIR/worktree-session.sh"
-GUARD_HOOK="$SCRIPT_DIR/worktree-guard.sh"
-PROMPT_HOOK="$SCRIPT_DIR/before-submit-prompt.sh"
-# Phase 3: a SECOND, fail-open sessionStart hook (engine retention maintenance) installed BESIDE the
-# kernel-only worktree-session.sh without changing it. Both coexist as distinct sessionStart entries.
-MAINT_HOOK="$SCRIPT_DIR/awa-recovery-maintenance.sh"
+V1_CONTRACT="$AWA_HOME/contracts/awa-contract.v1.json"
+V2_CONTRACT="$AWA_HOME/contracts/awa-hook-owner.v2.json"
 
-if [ "$MODE" = "check" ]; then
-  HOOKS_JSON="$HOOKS_JSON" SESSION_HOOK="$SESSION_HOOK" GUARD_HOOK="$GUARD_HOOK" \
-    PROMPT_HOOK="$PROMPT_HOOK" MAINT_HOOK="$MAINT_HOOK" python3 - <<'PY'
-import json, os, pathlib, sys
+MODE="$MODE" HOOKS_JSON="$HOOKS_JSON" AWA_HOME="$AWA_HOME" \
+V1_CONTRACT="$V1_CONTRACT" V2_CONTRACT="$V2_CONTRACT" python3 - <<'PY'
+from __future__ import annotations
 
-path = os.environ["HOOKS_JSON"]
-if not os.path.exists(path):
-    print(f"install-hooks --check: missing required {path}", file=sys.stderr)
-    sys.exit(1)
-try:
-    with open(path, encoding="utf-8") as fh:
-        data = json.load(fh)
-except Exception as exc:  # noqa: BLE001
-    print(f"install-hooks --check: {path} is not valid JSON: {exc}", file=sys.stderr)
-    sys.exit(1)
-if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("hooks"), dict):
-    print("install-hooks --check: object/version/hooks shape drift", file=sys.stderr)
-    sys.exit(1)
-hooks = data["hooks"]
-# A LIST of (event, wanted) so one event (sessionStart) can carry two distinct AWA-owned entries
-# (the kernel worktree-context hook + the engine retention-maintenance hook).
-expect = [
-    ("sessionStart", {"command": os.path.realpath(os.environ["SESSION_HOOK"]),
-                      "type": "command", "timeout": 5, "failClosed": False}),
-    ("sessionStart", {"command": os.path.realpath(os.environ["MAINT_HOOK"]),
-                      "type": "command", "timeout": 5, "failClosed": False}),
-    ("beforeShellExecution", {"command": os.path.realpath(os.environ["GUARD_HOOK"]),
-                              "type": "command", "timeout": 20, "failClosed": False}),
-    ("beforeSubmitPrompt", {"command": os.path.realpath(os.environ["PROMPT_HOOK"]),
-                            "type": "command", "matcher": "UserPromptSubmit",
-                            "timeout": 20, "failClosed": False}),
-    ("afterFileEdit", {"command": os.path.realpath(os.environ["GUARD_HOOK"]),
-                       "type": "command", "timeout": 20}),
-]
-errors = []
-def awa_owned(entry, wanted_path):
-    command = str(entry.get("command", ""))
-    if not command or len(command.split()) != 1:
+import json
+import os
+import pathlib
+import shutil
+import stat
+import sys
+import tempfile
+import time
+
+
+def refuse(message: str, *, check: bool = False) -> None:
+    prefix = "install-hooks --check" if check else "install-hooks"
+    print(f"{prefix}: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+mode = os.environ["MODE"]
+checking = mode == "check"
+root = pathlib.Path(os.environ["AWA_HOME"]).resolve()
+destination = pathlib.Path(os.environ["HOOKS_JSON"]).expanduser()
+v1_path = pathlib.Path(os.environ["V1_CONTRACT"])
+v2_path = pathlib.Path(os.environ["V2_CONTRACT"])
+
+
+def load_json(path: pathlib.Path, label: str) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        refuse(f"{label} is missing or invalid JSON: {exc}", check=checking)
+    if not isinstance(value, dict):
+        refuse(f"{label} must be a JSON object", check=checking)
+    return value
+
+
+def valid_entry(entry: object) -> bool:
+    if not isinstance(entry, dict):
         return False
-    resolved = os.path.realpath(command)
-    if resolved == wanted_path:
-        return True
-    parts = pathlib.Path(resolved).parts
-    return (len(parts) >= 5 and parts[-5:] == (
-        "awa", "current", "kernel", "hooks", pathlib.Path(wanted_path).name))
-for event, wanted in expect:
-    arr = hooks.get(event)
-    if not isinstance(arr, list):
-        errors.append(f"{event}: missing/non-list")
-        continue
-    matches = [entry for entry in arr if isinstance(entry, dict)
-               and awa_owned(entry, wanted["command"])]
-    if len(matches) != 1:
-        errors.append(f"{event}[{pathlib.Path(wanted['command']).name}]: "
-                      f"expected one exact AWA path, found {len(matches)}")
-    elif matches[0] != wanted:
-        errors.append(f"{event}[{pathlib.Path(wanted['command']).name}]: "
-                      f"exact entry drift {matches[0]!r}")
-if errors:
-    print("install-hooks --check: " + "; ".join(errors), file=sys.stderr)
-    sys.exit(1)
-print("install-hooks --check: exact AWA entries OK")
-PY
-  exit $?
-fi
+    if entry.get("type") != "command":
+        return False
+    if type(entry.get("timeout")) is not int or entry["timeout"] <= 0:
+        return False
+    if "failClosed" in entry and type(entry["failClosed"]) is not bool:
+        return False
+    return "command" not in entry
 
-mkdir -p "$(dirname "$HOOKS_JSON")"
-chmod +x "$SESSION_HOOK" "$GUARD_HOOK" "$PROMPT_HOOK" "$MAINT_HOOK"
 
-tmp="$(mktemp)"
-if [ -f "$HOOKS_JSON" ]; then
-  cp "$HOOKS_JSON" "$tmp"
-else
-  printf '{"version":1,"hooks":{}}\n' > "$tmp"
-fi
+def valid_role(role: object, *, allow_dormant: bool) -> bool:
+    if not isinstance(role, dict):
+        return False
+    required = {
+        "id",
+        "event",
+        "direct_command_role",
+        "external_command_path_class",
+        "entry",
+    }
+    allowed = required | ({"dormant_until_milestone"} if allow_dormant else set())
+    if set(role) - allowed or not required.issubset(role):
+        return False
+    if not all(
+        isinstance(role[key], str) and role[key]
+        for key in (
+            "id",
+            "event",
+            "direct_command_role",
+            "external_command_path_class",
+        )
+    ):
+        return False
+    if role["external_command_path_class"] not in {
+        "host-policy-delegator",
+        "installed-awa",
+    }:
+        return False
+    relative = pathlib.PurePosixPath(role["direct_command_role"])
+    if relative.is_absolute() or ".." in relative.parts:
+        return False
+    command = (root / relative).resolve()
+    try:
+        command.relative_to(root)
+    except ValueError:
+        return False
+    if not command.is_file() or not os.access(command, os.X_OK):
+        return False
+    return valid_entry(role["entry"])
 
-python3 - "$tmp" "$HOOKS_JSON" "$SESSION_HOOK" "$GUARD_HOOK" "$PROMPT_HOOK" "$MAINT_HOOK" <<'PY'
-import json, pathlib, shutil, sys, time
-src, dest, session_hook, guard_hook, prompt_hook, maint_hook = map(pathlib.Path, sys.argv[1:7])
-try:
-    data = json.loads(src.read_text())
-except Exception as exc:
-    print(f"install-hooks: refusing malformed JSON without writing: {exc}", file=sys.stderr)
-    sys.exit(1)
-if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("hooks"), dict):
-    print("install-hooks: refusing invalid object/version/hooks shape without writing", file=sys.stderr)
-    sys.exit(1)
-hooks = data["hooks"]
-for event, arr in hooks.items():
-    if not isinstance(event, str) or not isinstance(arr, list):
-        print("install-hooks: refusing malformed hooks shape without writing", file=sys.stderr)
-        sys.exit(1)
-    if not all(isinstance(entry, dict) for entry in arr):
-        print("install-hooks: refusing non-object hook entry without writing", file=sys.stderr)
-        sys.exit(1)
 
-session_hook = session_hook.resolve()
-guard_hook = guard_hook.resolve()
-prompt_hook = prompt_hook.resolve()
-maint_hook = maint_hook.resolve()
+v1_doc = load_json(v1_path, "awa-contract.v1.json")
+v1 = v1_doc.get("hook_ownership")
+v1_ids = [
+    "worktree.session-context",
+    "worktree.shell-guard",
+    "worktree.file-observer",
+    "recovery.maintenance",
+    "finish.prompt-recall",
+]
+if (
+    not isinstance(v1, dict)
+    or v1.get("schema") != "awa-hook-owner/v1"
+    or v1.get("modes") != ["direct", "external"]
+    or v1.get("default_mode") != "direct"
+    or v1.get("selection_env") != "AWA_HOOK_OWNER"
+    or v1.get("selection_schema") != "awa-hook-owner-selection/v1"
+    or v1.get("external_real_hook_file_writes") is not False
+    or not isinstance(v1.get("roles"), list)
+    or [role.get("id") for role in v1["roles"] if isinstance(role, dict)]
+    != v1_ids
+    or not all(valid_role(role, allow_dormant=False) for role in v1["roles"])
+):
+    refuse("awa-hook-owner/v1 contract validation failed", check=checking)
 
-def awa_owned(existing, wanted_path):
-    command = str(existing.get("command", ""))
-    if not command or len(command.split()) != 1:
+contract_name = "awa-hook-owner/v1"
+effective = list(v1["roles"])
+all_roles = list(v1["roles"])
+if v2_path.is_file():
+    v2 = load_json(v2_path, "awa-hook-owner.v2.json")
+    expected_v2 = [
+        (
+            "worktree.shell-guard-composite",
+            "beforeShellExecution",
+            "kernel/hooks/worktree-guard-with-integrity.sh",
+            "host-policy-delegator",
+            {"type": "command", "timeout": 20, "failClosed": False},
+            None,
+        ),
+        (
+            "worktree.stop-observer",
+            "stop",
+            "kernel/hooks/awa-integrity-observer.sh",
+            "host-policy-delegator",
+            {"type": "command", "timeout": 5, "failClosed": False},
+            None,
+        ),
+        (
+            "worktree.session-handoff",
+            "sessionStart",
+            "kernel/hooks/awa-session-handoff.sh",
+            "host-policy-delegator",
+            {"type": "command", "timeout": 5, "failClosed": False},
+            "M2.4",
+        ),
+    ]
+    v2_roles = v2.get("roles")
+    actual_v2 = [
+        (
+            role.get("id"),
+            role.get("event"),
+            role.get("direct_command_role"),
+            role.get("external_command_path_class"),
+            role.get("entry"),
+            role.get("dormant_until_milestone"),
+        )
+        for role in v2_roles
+        if isinstance(role, dict)
+    ] if isinstance(v2_roles, list) else []
+    if (
+        v2.get("schema") != "awa-hook-owner/v2"
+        or v2.get("version") != 2
+        or v2.get("successor_of") != "awa-hook-owner/v1"
+        or v2.get("v1_contract")
+        != "contracts/awa-contract.v1.json#hook_ownership"
+        or v2.get("modes") != ["direct", "external"]
+        or v2.get("default_mode") != "direct"
+        or v2.get("selection_env") != "AWA_HOOK_OWNER"
+        or v2.get("selection_schema") != "awa-hook-owner-selection/v1"
+        or v2.get("external_real_hook_file_writes") is not False
+        or v2.get("supersedes_roles") != ["worktree.shell-guard"]
+        or not isinstance(v2.get("composition_rule"), str)
+        or not v2["composition_rule"]
+        or not isinstance(v2.get("external_rule"), str)
+        or not v2["external_rule"]
+        or actual_v2 != expected_v2
+        or not all(valid_role(role, allow_dormant=True) for role in v2_roles or [])
+        or v2_roles[-1].get("dormant_until_milestone") != "M2.4"
+        or any(
+            role.get("external_command_path_class") != "host-policy-delegator"
+            or role["entry"].get("failClosed") is not False
+            for role in v2_roles or []
+        )
+    ):
+        refuse("awa-hook-owner/v2 contract validation failed", check=checking)
+    superseded = set(v2["supersedes_roles"])
+    effective = [role for role in v1["roles"] if role["id"] not in superseded]
+    effective.extend(v2_roles)
+    all_roles.extend(v2_roles)
+    contract_name = "awa-hook-owner/v2"
+
+
+def resolved_command(role: dict) -> pathlib.Path:
+    return (root / role["direct_command_role"]).resolve()
+
+
+def row_for(role: dict) -> dict:
+    row = dict(role["entry"])
+    row["command"] = str(resolved_command(role))
+    return row
+
+
+def awa_owned(entry: dict) -> bool:
+    command = entry.get("command")
+    if not isinstance(command, str) or not command:
         return False
     resolved = pathlib.Path(command).expanduser().resolve()
-    if resolved == wanted_path:
-        return True
-    parts = resolved.parts
-    return (len(parts) >= 5 and parts[-5:] == (
-        "awa", "current", "kernel", "hooks", wanted_path.name))
+    for role in all_roles:
+        wanted = resolved_command(role)
+        if resolved == wanted:
+            return True
+        parts = resolved.parts
+        if len(parts) >= 5 and parts[-5:] == (
+            "awa",
+            "current",
+            "kernel",
+            "hooks",
+            wanted.name,
+        ):
+            return True
+    return False
 
-def ensure(event, entry):
-    arr = hooks.setdefault(event, [])
-    wanted_path = pathlib.Path(entry["command"])
-    kept = [existing for existing in arr if not awa_owned(existing, wanted_path)]
-    kept.append(entry)
-    hooks[event] = kept
 
-ensure("sessionStart", {
-    "command": str(session_hook),
-    "type": "command",
-    "timeout": 5,
-    "failClosed": False,
-})
-# Phase 3: the SEPARATE engine retention-maintenance sessionStart hook (fail-open, quiet, throttled
-# by the engine). It coexists with the kernel worktree-context hook above (distinct filenames, so
-# `awa_owned` dedups each independently) and never changes it.
-ensure("sessionStart", {
-    "command": str(maint_hook),
-    "type": "command",
-    "timeout": 5,
-    "failClosed": False,
-})
-# beforeShellExecution is the soft worktree backstop -> fail OPEN on hook failure (incident
-# 2026-07-05: failClosed:true on a global gate bricked every workspace under load/timeout).
-ensure("beforeShellExecution", {
-    "command": str(guard_hook),
-    "type": "command",
-    "timeout": 20,
-    "failClosed": False,
-})
-# beforeSubmitPrompt may block only a successfully rendered local preview. Infrastructure failure
-# stays fail-open globally; missing/invalid authorization still fails closed in the Phase-1 kernel.
-ensure("beforeSubmitPrompt", {
-    "command": str(prompt_hook),
-    "type": "command",
-    "matcher": "UserPromptSubmit",
-    "timeout": 20,
-    "failClosed": False,
-})
-# afterFileEdit is observation-only (Cursor ignores any returned permission). failClosed is a
-# no-op here, so we do NOT set it (X2); drop it if a prior install wrote it.
-ensure("afterFileEdit", {
-    "command": str(guard_hook),
-    "type": "command",
-    "timeout": 20,
-})
+def load_destination() -> dict:
+    if destination.is_symlink():
+        refuse(f"refusing symlink destination {destination}", check=checking)
+    if not destination.exists():
+        if checking:
+            refuse(f"missing required {destination}", check=True)
+        return {"version": 1, "hooks": {}}
+    if not destination.is_file():
+        refuse(f"refusing non-regular destination {destination}", check=checking)
+    try:
+        data = json.loads(destination.read_text(encoding="utf-8"))
+    except Exception as exc:
+        refuse(
+            f"{destination} is not valid JSON: {exc}",
+            check=checking,
+        )
+    if (
+        not isinstance(data, dict)
+        or data.get("version") != 1
+        or not isinstance(data.get("hooks"), dict)
+    ):
+        refuse(
+            "refusing invalid object/version/hooks shape without writing",
+            check=checking,
+        )
+    for event, rows in data["hooks"].items():
+        if (
+            not isinstance(event, str)
+            or not isinstance(rows, list)
+            or not all(isinstance(row, dict) for row in rows)
+        ):
+            refuse("refusing malformed hooks shape without writing", check=checking)
+    return data
+
+
+data = load_destination()
+hooks = data["hooks"]
+wanted_by_event: dict[str, list[dict]] = {}
+for role in effective:
+    wanted_by_event.setdefault(role["event"], []).append(row_for(role))
+
+if checking:
+    errors: list[str] = []
+    for event, wanted_rows in wanted_by_event.items():
+        actual = hooks.get(event)
+        if not isinstance(actual, list):
+            errors.append(f"{event}: missing/non-list")
+            continue
+        for wanted in wanted_rows:
+            count = actual.count(wanted)
+            if count != 1:
+                errors.append(
+                    f"{event}[{pathlib.Path(wanted['command']).name}]: "
+                    f"expected one exact AWA row, found {count}"
+                )
+    for event, rows in hooks.items():
+        wanted_rows = wanted_by_event.get(event, [])
+        for row in rows:
+            if awa_owned(row) and row not in wanted_rows:
+                errors.append(f"{event}: stale or drifted AWA-owned row")
+    if errors:
+        refuse("; ".join(errors), check=True)
+    print(f"install-hooks --check: exact {contract_name} AWA entries OK")
+    raise SystemExit(0)
+
+for event in list(hooks):
+    hooks[event] = [row for row in hooks[event] if not awa_owned(row)]
+    if not hooks[event]:
+        hooks.pop(event)
+for role in effective:
+    hooks.setdefault(role["event"], []).append(row_for(role))
 
 new = json.dumps(data, indent=2, sort_keys=False) + "\n"
-old = dest.read_text() if dest.exists() else None
-if old != new:
-    if dest.exists():
-        shutil.copy2(dest, dest.with_name(dest.name + f".bak-{int(time.time())}"))
-    dest.write_text(new)
-    print(f"install-hooks: updated {dest}")
-else:
-    print(f"install-hooks: already current {dest}")
-PY
+old = destination.read_text(encoding="utf-8") if destination.exists() else None
+if old == new:
+    print(f"install-hooks: already current {destination} ({contract_name})")
+    raise SystemExit(0)
 
-rm -f "$tmp"
+destination.parent.mkdir(parents=True, exist_ok=True)
+if destination.is_symlink():
+    refuse(f"refusing symlink destination {destination}")
+prior_mode = stat.S_IMODE(destination.stat().st_mode) if destination.exists() else 0o600
+if destination.exists():
+    backup = destination.with_name(
+        destination.name + f".bak-{time.time_ns()}"
+    )
+    shutil.copy2(destination, backup, follow_symlinks=False)
+
+temporary: pathlib.Path | None = None
+try:
+    fd, name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.awa-",
+    )
+    temporary = pathlib.Path(name)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(new)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, prior_mode)
+    os.replace(temporary, destination)
+    temporary = None
+    try:
+        parent_fd = os.open(
+            destination.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+    except OSError:
+        parent_fd = None
+    if parent_fd is not None:
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+finally:
+    if temporary is not None:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+print(f"install-hooks: updated {destination} ({contract_name})")
+PY

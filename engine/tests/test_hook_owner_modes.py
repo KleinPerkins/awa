@@ -26,6 +26,7 @@ INSTALL = REPO / "install.sh"
 INSTALL_HOOKS = REPO / "kernel" / "hooks" / "install-hooks.sh"
 GUARD = REPO / "kernel" / "hooks" / "worktree-guard.sh"
 CONTRACT = REPO / "contracts" / "awa-contract.v1.json"
+V2_CONTRACT = REPO / "contracts" / "awa-hook-owner.v2.json"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "hook-owner"
 V150_COMMIT = "331e633027aa489c08f22b96c979fde36079e220"
 
@@ -87,10 +88,17 @@ def _expected_direct_hooks(runtime):
                 "timeout": 5,
                 "failClosed": False,
             },
+            {
+                "command": str((hooks / "awa-session-handoff.sh").resolve()),
+                "type": "command",
+                "timeout": 5,
+                "failClosed": False,
+            },
         ],
         "beforeShellExecution": [
             {
-                "command": str((hooks / "worktree-guard.sh").resolve()),
+                "command": str(
+                    (hooks / "worktree-guard-with-integrity.sh").resolve()),
                 "type": "command",
                 "timeout": 20,
                 "failClosed": False,
@@ -112,7 +120,26 @@ def _expected_direct_hooks(runtime):
                 "timeout": 20,
             },
         ],
+        "stop": [
+            {
+                "command": str((hooks / "awa-integrity-observer.sh").resolve()),
+                "type": "command",
+                "timeout": 5,
+                "failClosed": False,
+            },
+        ],
     }
+
+
+def _effective_direct_roles():
+    v1 = json.loads(CONTRACT.read_text(encoding="utf-8"))["hook_ownership"]
+    if not V2_CONTRACT.is_file():
+        return v1["roles"]
+    v2 = json.loads(V2_CONTRACT.read_text(encoding="utf-8"))
+    superseded = set(v2["supersedes_roles"])
+    return [
+        role for role in v1["roles"] if role["id"] not in superseded
+    ] + v2["roles"]
 
 
 class HookOwnerSandbox(unittest.TestCase):
@@ -231,13 +258,12 @@ class TestHookOwnerContract(HookOwnerSandbox):
         checked = self.run_hook_installer("--check", owner="direct", hooks=staging)
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
         hooks = json.loads(staging.read_text(encoding="utf-8"))["hooks"]
-        owner = json.loads(CONTRACT.read_text(encoding="utf-8"))["hook_ownership"]
-        for role in owner["roles"]:
+        for role in _effective_direct_roles():
             entry = dict(role["entry"])
             entry["command"] = str(
                 (REPO / role["direct_command_role"]).resolve())
             self.assertIn(entry, hooks[role["event"]], role["id"])
-        self.assertEqual(sum(len(rows) for rows in hooks.values()), 5)
+        self.assertEqual(sum(len(rows) for rows in hooks.values()), 7)
 
     def test_hook_owner_fixtures_are_generic_and_token_bounded(self):
         for fixture in FIXTURES.iterdir():
@@ -269,7 +295,7 @@ class TestHookOwnerInstall(HookOwnerSandbox):
             pointer["hook_owner_contract_sha256"],
             _sha256(self.runtime / "contracts" / "awa-contract.v1.json"))
 
-    def test_clean_direct_install_creates_exact_five_roles(self):
+    def test_clean_direct_install_creates_exact_seven_v2_roles(self):
         first = self.run_install()
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         document = json.loads(self.hooks.read_text(encoding="utf-8"))
