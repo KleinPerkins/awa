@@ -541,7 +541,10 @@ def _pending_outbox(status: object) -> dict | None:
     if not isinstance(outbox, dict) or outbox.get("pending") is not True:
         return None
     delivered = _transition_delivery(status, outbox["transition_id"])
-    if isinstance(delivered, dict) and delivered.get("native") == "accepted":
+    if isinstance(delivered, dict) and any(
+        delivered.get(channel) == "accepted"
+        for channel in ("native", "slack")
+    ):
         return None
     return outbox
 
