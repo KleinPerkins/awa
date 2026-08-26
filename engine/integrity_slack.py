@@ -446,6 +446,12 @@ def send(
     retries = min(max_retries, MAX_RETRIES)
     deadline = time.monotonic() + total_timeout
 
+    # Missing/invalid opt-in material is opted out.  Refuse an invalid private
+    # user config before touching machine-global Keychain.  A distinguishable
+    # Keychain operational fault remains failed below: calling it opted out
+    # would hide a broken lookup behind an operator choice that was never made.
+    if not _valid_user_id(user_id):
+        return "opted_out"
     lookup_remaining = _remaining(deadline)
     lookup = _bounded_call(
         lambda: token_lookup(_remaining(deadline)),
@@ -458,9 +464,7 @@ def send(
     if token is None or token == "":
         return "opted_out"
     if not _valid_token(token):
-        return "failed"
-    if not _valid_user_id(user_id):
-        return "failed"
+        return "opted_out"
     message = _closed_message(payload)
     if message is None:
         return "failed"

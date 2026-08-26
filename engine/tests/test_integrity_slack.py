@@ -181,6 +181,21 @@ class TestIntegritySlack(EngineTestCase):
         self.assertIsNotNone(committed)
         return committed
 
+    def _closed_status(self, overall, *, schema=True):
+        status = self._status(
+            overall,
+            transition_id=None,
+            trigger="launchd",
+        )
+        status.pop("_previous_overall")
+        status["release"]["commit"] = "synthetic"
+        for item in status["invariants"]:
+            item["evidence"] = "bounded reason"
+            item.pop("raw_evidence", None)
+        if not schema:
+            status.pop("schema")
+        return status
+
     def test_opted_out_when_no_token(self):
         http = mock.Mock()
         result = self._send(
@@ -387,6 +402,231 @@ class TestIntegritySlack(EngineTestCase):
                     {"native": native_result, "slack": "opted_out"},
                 )
                 self.assertEqual(current["overall"], expected_overall)
+
+    def test_opt_in_material_truth_table_persists_receipt_severity(self):
+        cases = (
+            {
+                "name": "neither_present",
+                "config": "missing",
+                "token": "missing",
+                "slack": "opted_out",
+                "overall": "red",
+                "lookup_calls": 0,
+                "http_calls": 0,
+            },
+            {
+                "name": "token_only_missing_user_config",
+                "config": "missing",
+                "token": "valid",
+                "slack": "opted_out",
+                "overall": "red",
+                "lookup_calls": 0,
+                "http_calls": 0,
+            },
+            {
+                "name": "user_only",
+                "config": "valid",
+                "token": "missing",
+                "slack": "opted_out",
+                "overall": "red",
+                "lookup_calls": 1,
+                "http_calls": 0,
+            },
+            {
+                "name": "invalid_token",
+                "config": "valid",
+                "token": "invalid",
+                "slack": "opted_out",
+                "overall": "red",
+                "lookup_calls": 1,
+                "http_calls": 0,
+            },
+            {
+                "name": "invalid_user_id",
+                "config": "invalid_user",
+                "token": "valid",
+                "slack": "opted_out",
+                "overall": "red",
+                "lookup_calls": 0,
+                "http_calls": 0,
+            },
+            {
+                "name": "unsafe_user_config_mode",
+                "config": "unsafe_mode",
+                "token": "valid",
+                "slack": "opted_out",
+                "overall": "red",
+                "lookup_calls": 0,
+                "http_calls": 0,
+            },
+            {
+                "name": "malformed_user_config",
+                "config": "malformed",
+                "token": "valid",
+                "slack": "opted_out",
+                "overall": "red",
+                "lookup_calls": 0,
+                "http_calls": 0,
+            },
+            {
+                "name": "both_valid",
+                "config": "valid",
+                "token": "valid",
+                "slack": "accepted",
+                "overall": "degraded",
+                "lookup_calls": 1,
+                "http_calls": 2,
+            },
+            {
+                "name": "valid_opt_in_api_failure",
+                "config": "valid",
+                "token": "valid",
+                "slack": "failed",
+                "overall": "red",
+                "lookup_calls": 1,
+                "http_calls": 1,
+            },
+            {
+                "name": "valid_user_keychain_operational_error",
+                "config": "valid",
+                "token": "error",
+                "slack": "failed",
+                "overall": "red",
+                "lookup_calls": 1,
+                "http_calls": 0,
+            },
+        )
+        original_state = os.environ["XDG_STATE_HOME"]
+        original_config = os.environ["XDG_CONFIG_HOME"]
+        try:
+            for case in cases:
+                with self.subTest(case=case["name"]):
+                    case_root = Path(self._tmp.name) / case["name"]
+                    state_home = case_root / "state"
+                    config_home = case_root / "config"
+                    state_home.mkdir(parents=True)
+                    config_home.mkdir(parents=True)
+                    os.environ["XDG_STATE_HOME"] = str(state_home)
+                    os.environ["XDG_CONFIG_HOME"] = str(config_home)
+
+                    if case["config"] == "valid":
+                        self._write_config()
+                    elif case["config"] == "invalid_user":
+                        self._write_config(user_id="C12345678")
+                    elif case["config"] == "unsafe_mode":
+                        self._write_config(mode=0o644)
+                    elif case["config"] == "malformed":
+                        target = integrity_slack.config_path()
+                        target.parent.mkdir(parents=True, mode=0o700)
+                        target.write_text("{", encoding="utf-8")
+                        target.chmod(0o600)
+
+                    if case["token"] == "valid":
+                        lookup = mock.Mock(return_value=TOKEN)
+                    elif case["token"] == "invalid":
+                        lookup = mock.Mock(return_value="not-a-token")
+                    elif case["token"] == "error":
+                        lookup = mock.Mock(
+                            side_effect=integrity_slack.TokenLookupError(
+                                "Keychain token lookup failed"
+                            )
+                        )
+                    else:
+                        lookup = mock.Mock(return_value=None)
+
+                    if case["name"] == "both_valid":
+                        http = accepted_http()
+                    elif case["name"] == "valid_opt_in_api_failure":
+                        http = FakeHTTP(
+                            response(
+                                200,
+                                {"ok": False, "error": "denied"},
+                            )
+                        )
+                    else:
+                        http = mock.Mock()
+
+                    integrity._commit(
+                        self._closed_status("green", schema=False),
+                        profile="deep",
+                        trigger="launchd",
+                    )
+                    stderr = io.StringIO()
+                    stdout = io.StringIO()
+                    with mock.patch.object(
+                        integrity_alert,
+                        "_native",
+                        return_value=False,
+                    ), mock.patch.object(
+                        integrity_slack,
+                        "_runtime_token_lookup",
+                        lookup,
+                    ), mock.patch.object(
+                        integrity_slack,
+                        "_default_http",
+                        http,
+                    ), contextlib.redirect_stderr(
+                        stderr
+                    ), contextlib.redirect_stdout(
+                        stdout
+                    ):
+                        integrity._commit(
+                            self._closed_status("degraded"),
+                            profile="deep",
+                            trigger="launchd",
+                        )
+
+                    current = integrity.read_status()
+                    expected_outcomes = {
+                        "native": "failed",
+                        "slack": case["slack"],
+                    }
+                    self.assertEqual(
+                        current["alert"]["delivered"],
+                        expected_outcomes,
+                    )
+                    self.assertEqual(current["overall"], case["overall"])
+                    receipt_ref = current["artifacts"]["receipt"]
+                    receipt = json.loads(
+                        (
+                            paths.integrity_dir()
+                            / receipt_ref["path"]
+                        ).read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(
+                        receipt["outcomes"],
+                        expected_outcomes,
+                    )
+                    self.assertEqual(
+                        lookup.call_count,
+                        case["lookup_calls"],
+                    )
+                    observed_http_calls = (
+                        len(http.calls)
+                        if isinstance(http, FakeHTTP)
+                        else http.call_count
+                    )
+                    self.assertEqual(
+                        observed_http_calls,
+                        case["http_calls"],
+                    )
+                    self.assertEqual(stderr.getvalue(), "")
+                    self.assertEqual(stdout.getvalue(), "")
+
+                    artifacts = b"".join(
+                        candidate.read_bytes()
+                        for candidate in paths.integrity_dir().rglob("*")
+                        if candidate.is_file()
+                    )
+                    self.assertNotIn(TOKEN.encode("ascii"), artifacts)
+                    self.assertNotIn(USER_ID.encode("ascii"), artifacts)
+                    self.assertNotIn(
+                        str(integrity_slack.config_path()).encode("utf-8"),
+                        artifacts,
+                    )
+        finally:
+            os.environ["XDG_STATE_HOME"] = original_state
+            os.environ["XDG_CONFIG_HOME"] = original_config
 
     def test_never_returning_transport_times_out(self):
         code = """
@@ -672,7 +912,7 @@ print(json.dumps({
                 http = mock.Mock()
                 self.assertEqual(
                     self._send(http, user_id=user_id),
-                    "failed",
+                    "opted_out",
                 )
                 http.assert_not_called()
 
@@ -682,7 +922,7 @@ print(json.dumps({
                 http,
                 token_lookup=lambda _timeout_s: TOKEN + "\r\nX-Test: injected",
             ),
-            "failed",
+            "opted_out",
         )
         http.assert_not_called()
 
