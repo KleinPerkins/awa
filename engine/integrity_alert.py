@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import queue
 import subprocess
+import sys
 import threading
 from collections.abc import Callable
 
@@ -57,11 +58,18 @@ def _accepted(alert: object, transition_id: str) -> bool:
     return bool(
         alert.get("last_transition") == transition_id
         and isinstance(delivered, dict)
-        and delivered.get("native") == "accepted"
+        and any(
+            delivered.get(channel) == "accepted"
+            for channel in ("native", "slack")
+        )
     )
 
 
-def _record_attempt(current: dict, transition_id: str) -> None:
+def _record_attempt(
+    current: dict,
+    transition_id: str,
+    outcomes: dict[str, str],
+) -> None:
     alert = current.setdefault("alert", {})
     if not isinstance(alert, dict):
         alert = {}
@@ -73,7 +81,11 @@ def _record_attempt(current: dict, transition_id: str) -> None:
     attempted.append(
         {
             "transition_id": transition_id,
-            "channels": ["native"],
+            "channels": [
+                channel
+                for channel, outcome in outcomes.items()
+                if outcome != "opted_out"
+            ],
         }
     )
 
@@ -101,6 +113,62 @@ def _force_alert_failure_red(current: dict) -> None:
                 "checked_at": current.get("generated_at"),
             }
         )
+
+
+def _slack_payload(before: object, after: object) -> dict:
+    previous_overall = (
+        before
+        if before in {"green", "degraded", "red"}
+        else "unknown"
+    )
+    overall = after if after in {"degraded", "red"} else "red"
+    return {
+        "schema": "awa-integrity-slack-alert/v1",
+        "previous_overall": previous_overall,
+        "overall": overall,
+    }
+
+
+def _attempt_slack(slack, payload: dict) -> str:
+    try:
+        if slack is None:
+            from . import integrity_slack
+
+            result = integrity_slack.send_configured(payload)
+        elif callable(slack):
+            result = slack(payload)
+        else:
+            result = "failed"
+    except Exception:
+        result = "failed"
+    return (
+        result
+        if result in {"accepted", "failed", "opted_out"}
+        else "failed"
+    )
+
+
+def _fallback_if_all_failed(current: dict, outcomes: dict[str, str]) -> None:
+    configured = [
+        outcome
+        for outcome in outcomes.values()
+        if outcome != "opted_out"
+    ]
+    if (
+        current.get("overall") == "green"
+        or not configured
+        or not all(outcome == "failed" for outcome in configured)
+    ):
+        return
+    _force_alert_failure_red(current)
+    if current.get("trigger") == "cli":
+        try:
+            sys.stderr.write(
+                "awa: integrity alert delivery failed on all configured paths\n"
+            )
+            sys.stderr.flush()
+        except Exception:
+            pass
 
 
 def _bounded_native(
@@ -180,7 +248,6 @@ def dispatch(
     if not pending and _attempted(alert, transition_id):
         return None
 
-    _record_attempt(current, transition_id)
     before = (
         previous.get("overall")
         if isinstance(previous, dict)
@@ -194,16 +261,11 @@ def dispatch(
         if _bounded_native(native, title, body)
         else "failed"
     )
-
-    # M1-B owns native delivery. M1-D replaces this opt-out with its bounded
-    # Keychain-backed Slack adapter.
-    slack_result = "opted_out" if slack is None else "failed"
+    slack_result = _attempt_slack(
+        slack,
+        _slack_payload(before, after),
+    )
     outcomes = {"native": native_result, "slack": slack_result}
-    configured = [native_result]
-    if slack_result != "opted_out":
-        configured.append(slack_result)
-    if current.get("overall") != "green" and all(
-        result == "failed" for result in configured
-    ):
-        _force_alert_failure_red(current)
+    _record_attempt(current, transition_id, outcomes)
+    _fallback_if_all_failed(current, outcomes)
     return outcomes
