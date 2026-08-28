@@ -204,17 +204,59 @@ def publish(worktree_path: str, *, remote: str = "origin", skip_ci: bool = True,
             state.close()
 
 
+def _path_key(value: str) -> str:
+    return os.path.realpath(os.path.abspath(os.path.expanduser(value)))
+
+
 def retire(worktree_path: str, *, state: state_mod.State | None = None) -> None:
     lz = lease_mod.read_lease(worktree_path)
-    if not lz:
-        return
     owns_state = state is None
     if owns_state:
         state = state_mod.State()
     try:
+        orphaned = False
+        if not lz:
+            if os.path.lexists(worktree_path):
+                raise LifecycleError(
+                    "cannot retire an existing worktree without a valid lease.json"
+                )
+            matches = [
+                row
+                for row in state.list_leases("active")
+                if _path_key(str(row.get("worktree_path") or ""))
+                == _path_key(worktree_path)
+            ]
+            if not matches:
+                return
+            if len(matches) != 1:
+                raise LifecycleError(
+                    "cannot retire orphaned worktree: active lease record is ambiguous"
+                )
+            lz = matches[0]
+            orphaned = True
         with lock.common_dir_lock(lz["git_common_dir"]):
+            if orphaned:
+                if os.path.lexists(worktree_path) or lease_mod.read_lease(worktree_path):
+                    raise LifecycleError(
+                        "cannot retire orphaned worktree: path or lease.json reappeared"
+                    )
+                current = state.get_lease(lz["lease_id"])
+                if (
+                    not current
+                    or current.get("status") != "active"
+                    or _path_key(str(current.get("worktree_path") or ""))
+                    != _path_key(worktree_path)
+                ):
+                    raise LifecycleError(
+                        "cannot retire orphaned worktree: lease record changed"
+                    )
             state.set_lease_status(lz["lease_id"], "retired")
-            state.record_event("retire", f"retired lease {lz['lease_id']}", lz["lease_id"])
+            detail = (
+                f"retired orphaned lease {lz['lease_id']}"
+                if orphaned
+                else f"retired lease {lz['lease_id']}"
+            )
+            state.record_event("retire", detail, lz["lease_id"])
     finally:
         if owns_state:
             state.close()

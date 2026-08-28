@@ -15,7 +15,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from engine import guard, gitutil
+from engine import guard, gitutil, lease as lease_mod, state as state_mod
 from engine.tests.helpers import EngineTestCase, commit_all
 
 _CLI = str(Path(__file__).resolve().parents[2] / "bin" / "awa-engine.sh")
@@ -108,6 +108,25 @@ class TestLifecycleUAT(EngineTestCase):
         events = self._cli("events")
         kinds = {e["kind"] for e in events["events"]}
         self.assertTrue({"adopt", "attest", "retire"} <= kinds, kinds)
+
+    def test_cli_retire_reconciles_missing_worktree_lease(self):
+        repo = self.make_repo()
+        missing = str(Path(self._tmp.name) / "missing-worktree")
+        lz = lease_mod.build_lease(
+            missing, "feat/orphan", str(Path(repo) / ".git"), boot="test-boot"
+        )
+        with state_mod.State() as st:
+            st.upsert_lease(lz)
+
+        result = self._cli("retire", "--worktree", missing)
+
+        self.assertTrue(result["ok"], result)
+        with state_mod.State() as st:
+            self.assertEqual(st.list_leases("active"), [])
+            self.assertEqual(
+                [row["lease_id"] for row in st.list_leases("retired")],
+                [lz["lease_id"]],
+            )
 
     def test_publish_quarantine_cleanup_and_apply_back_execute(self):
         """ENGINE path: opt-in publish to a quarantine ref on a LOCAL bare remote, the

@@ -114,7 +114,10 @@ def cmd_publish(args: argparse.Namespace) -> int:
 
 
 def cmd_retire(args: argparse.Namespace) -> int:
-    lifecycle.retire(args.worktree)
+    try:
+        lifecycle.retire(args.worktree)
+    except lifecycle.LifecycleError as exc:
+        return _emit({"action": "retire", "ok": False, "error": str(exc)}, code=1)
     return _emit({"action": "retire", "ok": True, "worktree": args.worktree})
 
 

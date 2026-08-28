@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 
 from engine import gitutil, identity, lease as lease_mod, lifecycle, state as state_mod
 from engine.tests.helpers import EngineTestCase
@@ -154,6 +155,65 @@ class TestLifecycle(EngineTestCase):
         lifecycle.retire(wt)
         with state_mod.State() as st:
             self.assertEqual(len(st.list_leases("retired")), 1)
+
+    def test_retire_reconciles_one_orphaned_active_lease(self):
+        repo = self.make_repo()
+        missing = str(Path(self._tmp.name) / "missing-worktree")
+        lz = lease_mod.build_lease(
+            missing, "feat/x", str(Path(repo) / ".git"), boot="test-boot"
+        )
+        with state_mod.State() as st:
+            st.upsert_lease(lz)
+
+        lifecycle.retire(missing)
+        lifecycle.retire(missing)
+
+        with state_mod.State() as st:
+            self.assertEqual(st.list_leases("active"), [])
+            retired = st.list_leases("retired")
+            self.assertEqual([row["lease_id"] for row in retired], [lz["lease_id"]])
+            events = st.events(lease_id=lz["lease_id"])
+            self.assertEqual([event["kind"] for event in events], ["retire"])
+            self.assertIn("orphaned", events[0]["detail"])
+
+    def test_retire_refuses_existing_path_without_lease(self):
+        repo = self.make_repo()
+        existing = Path(self._tmp.name) / "existing-worktree"
+        existing.mkdir()
+        lz = lease_mod.build_lease(
+            str(existing), "feat/x", str(Path(repo) / ".git"), boot="test-boot"
+        )
+        with state_mod.State() as st:
+            st.upsert_lease(lz)
+
+        with self.assertRaisesRegex(lifecycle.LifecycleError, "existing worktree"):
+            lifecycle.retire(str(existing))
+
+        with state_mod.State() as st:
+            self.assertEqual([row["lease_id"] for row in st.list_leases("active")],
+                             [lz["lease_id"]])
+
+    def test_retire_refuses_ambiguous_orphaned_active_leases(self):
+        repo = self.make_repo()
+        missing = str(Path(self._tmp.name) / "missing-worktree")
+        leases = [
+            lease_mod.build_lease(
+                missing, branch, str(Path(repo) / ".git"), boot="test-boot"
+            )
+            for branch in ("feat/x", "feat/y")
+        ]
+        with state_mod.State() as st:
+            for lz in leases:
+                st.upsert_lease(lz)
+
+        with self.assertRaisesRegex(lifecycle.LifecycleError, "ambiguous"):
+            lifecycle.retire(missing)
+
+        with state_mod.State() as st:
+            self.assertEqual(
+                {row["lease_id"] for row in st.list_leases("active")},
+                {lz["lease_id"] for lz in leases},
+            )
 
 
 if __name__ == "__main__":
