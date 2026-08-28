@@ -5,9 +5,7 @@
 **Date:** 2026-08-28
 **Owning repository:** `KleinPerkins/awa` (`~/dev/capabilities/awa`)
 **Plan-type:** standard
-**Relates to:** accepted
-[ADR 0020](../adr/0020-awa-integrity-surveillance-and-lifecycle.md) and the
-[AWA Integrity Surveillance and Lifecycle plan](awa-integrity-surveillance-and-lifecycle-v1.md).
+**Relates to:** accepted [ADR 0020](../adr/0020-awa-integrity-surveillance-and-lifecycle.md) and the [AWA Integrity Surveillance and Lifecycle plan](awa-integrity-surveillance-and-lifecycle-v1.md).
 **Review provenance:** direct operator decision on 2026-08-28; documentation-only scope record.
 
 **Goal:** record the current execution priority without changing AWA's accepted architecture,
@@ -53,7 +51,7 @@ Slack credentials or configuration, modify code, or revise M1 acceptance.
 
 ## 3. Background and context
 
-The opt-in Slack adapter shipped in
+The opt-in Slack adapter in `engine/integrity_slack.py` shipped in
 [PR #129](https://github.com/KleinPerkins/awa/pull/129). Its existing contract treats absent opt-in
 material as `opted_out`; native remains the configured alert path. The accepted plan separately
 defines M2 (lifecycle and entry), M3 (ephemeral interface interactivity), and M4 (optional
