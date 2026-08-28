@@ -426,7 +426,10 @@ class TestLiveHookFacts(unittest.TestCase):
     def _collect(self, source: Path = _ROOT) -> tuple[tuple, dict]:
         with mock.patch.dict(
             os.environ,
-            {"AWA_HOOKS_JSON": str(self.hooks_path)},
+            {
+                "AWA_HOOK_OWNER": "direct",
+                "AWA_HOOKS_JSON": str(self.hooks_path),
+            },
             clear=False,
         ):
             observed = integrity._hook_facts(source)
@@ -515,7 +518,10 @@ class TestLiveHookFacts(unittest.TestCase):
         )
         with mock.patch.dict(
             os.environ,
-            {"AWA_HOOKS_JSON": str(projected)},
+            {
+                "AWA_HOOK_OWNER": "direct",
+                "AWA_HOOKS_JSON": str(projected),
+            },
             clear=False,
         ):
             effective = integrity._effective_hook_roles(runtime)
@@ -850,6 +856,322 @@ class TestLiveHookFacts(unittest.TestCase):
         observed, hook_invariant = self._collect(source)
         self.assertEqual(observed, (False, None))
         self.assertEqual(hook_invariant["severity"], "unknown")
+
+
+class TestExternalOwnerHookFacts(unittest.TestCase):
+    """External ownership resolves one coherent, exact role projection."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="awa-external-hook-facts.")
+        self.root = Path(self._tmp.name).resolve()
+        self.hooks_path = self.root / "hooks.json"
+        self.owner_dir = self.root / "external-owner" / "hooks"
+        self.selection = self.root / "config" / "awa" / "hook-owner.json"
+        self.selection.parent.mkdir(parents=True)
+        self.selection.write_text(
+            json.dumps(
+                {
+                    "schema": "awa-hook-owner-selection/v1",
+                    "contract": "awa-hook-owner/v1",
+                    "mode": "external",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.selection.chmod(0o600)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _projection(
+        self,
+        source: Path = _ROOT,
+    ) -> tuple[dict, list[dict]]:
+        if self.owner_dir.exists():
+            shutil.rmtree(self.owner_dir)
+        roles = integrity._effective_hook_roles(source)
+        self.assertIsNotNone(roles)
+        assert roles is not None
+        hooks: dict[str, list[dict]] = {}
+        for role in roles:
+            if role["external_command_path_class"] == "host-policy-delegator":
+                target = self.owner_dir / Path(role["direct_command_role"]).name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.parent.chmod(0o755)
+                target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                target.chmod(0o755)
+            else:
+                target = (source / role["direct_command_role"]).resolve()
+            row = dict(role["entry"])
+            row["command"] = str(target)
+            hooks.setdefault(role["event"], []).append(row)
+        return {"version": 1, "hooks": hooks}, roles
+
+    def _write_projection(self, document: dict) -> None:
+        self.hooks_path.write_text(
+            json.dumps(document, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _collect(self, source: Path = _ROOT) -> tuple[bool | None, bool | None]:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AWA_HOOKS_JSON": str(self.hooks_path),
+                "HOME": str(self.root / "home"),
+                "XDG_CONFIG_HOME": str(self.root / "config"),
+                "XDG_DATA_HOME": str(self.root / "data"),
+                "XDG_STATE_HOME": str(self.root / "state"),
+            },
+            clear=False,
+        ):
+            os.environ.pop("AWA_HOOK_OWNER", None)
+            return integrity._hook_facts(source)
+
+    @staticmethod
+    def _role_row(
+        document: dict,
+        roles: list[dict],
+        role_id: str,
+    ) -> tuple[list[dict], dict, dict]:
+        role = next(item for item in roles if item["id"] == role_id)
+        rows = document["hooks"][role["event"]]
+        row = next(
+            item
+            for item in rows
+            if Path(item["command"]).name
+            == Path(role["direct_command_role"]).name
+        )
+        return rows, row, role
+
+    def test_external_owner_seven_role_projection_is_green(self):
+        document, roles = self._projection()
+        self.assertEqual(len(roles), 7)
+        self.assertEqual(
+            sum(len(rows) for rows in document["hooks"].values()),
+            7,
+        )
+        self._write_projection(document)
+
+        observed = self._collect()
+        status = integrity.evaluate(
+            "fast",
+            trigger="beforeShell",
+            facts=facts(
+                hook_rows_present=observed[0],
+                hook_fail_open=observed[1],
+            ),
+        )
+
+        self.assertEqual(observed, (True, True))
+        self.assertEqual(invariant(status, "hooks")["severity"], "green")
+        self.assertEqual(
+            invariant(status, "hooks")["evidence"],
+            "required hook rows are present and fail open",
+        )
+
+    def test_external_owner_rejects_invalid_role_rows(self):
+        cases = {
+            "malformed": (False, None),
+            "missing": (False, True),
+            "duplicate": (False, True),
+            "wrong-target": (False, True),
+            "untrusted-owner": (False, True),
+            "mixed-owner": (False, True),
+            "non-executable": (False, True),
+            "symlink": (False, True),
+            "invalid-command": (False, True),
+            "stale-shell-wrapper": (False, True),
+            "mixed-direct": (False, True),
+            "installed-role-external": (False, True),
+            "fail-closed": (True, False),
+        }
+        for case, expected in cases.items():
+            with self.subTest(case=case):
+                document, roles = self._projection()
+                rows, row, role = self._role_row(
+                    document,
+                    roles,
+                    "worktree.stop-observer",
+                )
+                if case == "malformed":
+                    rows[rows.index(row)] = "not-an-object"
+                elif case == "missing":
+                    rows.remove(row)
+                elif case == "duplicate":
+                    rows.append(copy.deepcopy(row))
+                elif case == "wrong-target":
+                    wrong = self.owner_dir / "wrong-target.sh"
+                    wrong.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                    wrong.chmod(0o755)
+                    row["command"] = str(wrong)
+                elif case == "untrusted-owner":
+                    self.owner_dir.chmod(0o777)
+                elif case == "mixed-owner":
+                    untrusted = (
+                        self.root
+                        / "untrusted"
+                        / Path(role["direct_command_role"]).name
+                    )
+                    untrusted.parent.mkdir()
+                    untrusted.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                    untrusted.chmod(0o755)
+                    row["command"] = str(untrusted)
+                elif case == "non-executable":
+                    Path(row["command"]).chmod(0o644)
+                elif case == "symlink":
+                    link = Path(row["command"])
+                    target = link.with_suffix(".real")
+                    link.replace(target)
+                    link.symlink_to(target)
+                elif case == "invalid-command":
+                    row["command"] = (
+                        "/invalid\x00/"
+                        + Path(role["direct_command_role"]).name
+                    )
+                elif case == "stale-shell-wrapper":
+                    stale = copy.deepcopy(row)
+                    stale["command"] = f"bash {row['command']}"
+                    rows.append(stale)
+                elif case == "mixed-direct":
+                    direct = dict(role["entry"])
+                    direct["command"] = str(
+                        (_ROOT / role["direct_command_role"]).resolve()
+                    )
+                    rows.append(direct)
+                elif case == "installed-role-external":
+                    rows, row, role = self._role_row(
+                        document,
+                        roles,
+                        "recovery.maintenance",
+                    )
+                    target = self.owner_dir / Path(
+                        role["direct_command_role"]
+                    ).name
+                    target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                    target.chmod(0o755)
+                    row["command"] = str(target)
+                elif case == "fail-closed":
+                    row["failClosed"] = True
+                self._write_projection(document)
+                self.assertEqual(self._collect(), expected)
+
+    def test_external_owner_rejects_direct_projection(self):
+        env = os.environ.copy()
+        env.update(
+            {
+                "AWA_HOOK_OWNER": "direct",
+                "AWA_HOOKS_JSON": str(self.hooks_path),
+                "HOME": str(self.root / "direct-home"),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+        )
+        installed = subprocess.run(
+            [str(_INSTALL_HOOKS)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        self.assertEqual(
+            installed.returncode,
+            0,
+            installed.stdout + installed.stderr,
+        )
+        self.assertNotEqual(self._collect(), (True, True))
+
+    def test_external_owner_v1_projection_remains_green(self):
+        source = self.root / "v1-source"
+        contract_path = source / "contracts" / "awa-contract.v1.json"
+        contract_path.parent.mkdir(parents=True)
+        contract_path.write_bytes(
+            (_ROOT / "contracts" / "awa-contract.v1.json").read_bytes()
+        )
+        owner = json.loads(contract_path.read_text(encoding="utf-8"))[
+            "hook_ownership"
+        ]
+        materialize_role_commands(source, owner["roles"])
+        document, roles = self._projection(source)
+        self.assertEqual(len(roles), 5)
+        self._write_projection(document)
+
+        self.assertEqual(self._collect(source), (True, True))
+
+    def test_malformed_external_owner_selection_is_unknown(self):
+        document, _roles = self._projection()
+        self._write_projection(document)
+        malformed = (
+            {"mode": "external"},
+            {
+                "schema": "awa-hook-owner-selection/v1",
+                "contract": "awa-hook-owner/v1",
+                "mode": [],
+            },
+        )
+        for selection in malformed:
+            with self.subTest(selection=selection):
+                self.selection.write_text(
+                    json.dumps(selection) + "\n",
+                    encoding="utf-8",
+                )
+                self.assertEqual(self._collect(), (False, None))
+
+    def test_release_pointer_fallback_resolves_external_owner(self):
+        document, _roles = self._projection()
+        self._write_projection(document)
+        self.selection.unlink()
+        pointer = self.root / "data" / "awa" / "release-pointer.json"
+        pointer.parent.mkdir(parents=True)
+        pointer.write_text(
+            json.dumps(
+                {
+                    "schema": "awa-release-pointer/v1",
+                    "version": "1.7.0",
+                    "source": str(_ROOT),
+                    "commit": "a" * 40,
+                    "runtime": str(_ROOT),
+                    "policy": str(
+                        _ROOT / "kernel" / "policy" / "default-worktree-policy.yml"
+                    ),
+                    "installed_at": "2026-08-28T00:00:00Z",
+                    "hook_owner_contract": "awa-hook-owner/v1",
+                    "hook_owner_mode": "external",
+                    "hook_owner_contract_sha256": "b" * 64,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(self._collect(), (True, True))
+
+    def test_partial_owner_release_pointer_is_unknown(self):
+        document, _roles = self._projection()
+        self._write_projection(document)
+        self.selection.unlink()
+        pointer = self.root / "data" / "awa" / "release-pointer.json"
+        pointer.parent.mkdir(parents=True)
+        pointer.write_text(
+            json.dumps(
+                {
+                    "schema": "awa-release-pointer/v1",
+                    "version": "1.7.0",
+                    "source": str(_ROOT),
+                    "commit": "a" * 40,
+                    "runtime": str(_ROOT),
+                    "policy": str(
+                        _ROOT / "kernel" / "policy" / "default-worktree-policy.yml"
+                    ),
+                    "installed_at": "2026-08-28T00:00:00Z",
+                    "hook_owner_mode": "external",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(self._collect(), (False, None))
 
 
 if __name__ == "__main__":

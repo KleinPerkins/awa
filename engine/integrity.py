@@ -19,6 +19,7 @@ import os
 import re
 import shlex
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1873,53 +1874,177 @@ def _effective_hook_roles(source: Path) -> list[dict] | None:
     ] + list(v2["roles"])
 
 
-def _hook_facts(source: Path) -> tuple[bool | None, bool | None]:
-    hook_path = Path(
-        os.environ.get("AWA_HOOKS_JSON")
-        or (Path.home() / ".cursor" / "hooks.json")
-    ).expanduser()
-    roles = _effective_hook_roles(source)
-    if roles is None:
-        return False, None
+def _bounded_json_object(path: Path) -> dict | None:
     try:
-        hooks_doc = json.loads(hook_path.read_text(encoding="utf-8"))
-        hooks = hooks_doc["hooks"]
+        with path.open("rb") as handle:
+            raw = handle.read(65_537)
+        if len(raw) > 65_536:
+            return None
+        value = json.loads(raw.decode("utf-8"))
     except (
         OSError,
-        KeyError,
-        TypeError,
-        UnicodeDecodeError,
+        UnicodeError,
         json.JSONDecodeError,
     ):
-        return False, None
+        return None
+    return value if type(value) is dict else None
+
+
+def _hook_owner_mode() -> str | None:
+    """Resolve direct/external with the installer's closed precedence."""
+    if "AWA_HOOK_OWNER" in os.environ:
+        explicit = os.environ["AWA_HOOK_OWNER"]
+        return explicit if explicit in {"direct", "external"} else None
+
+    selection_path = paths.config_home() / "awa" / "hook-owner.json"
+    if os.path.lexists(selection_path):
+        selection = _bounded_json_object(selection_path)
+        if (
+            selection is None
+            or set(selection) != {"schema", "contract", "mode"}
+            or selection.get("schema") != "awa-hook-owner-selection/v1"
+            or selection.get("contract") != "awa-hook-owner/v1"
+            or type(selection.get("mode")) is not str
+            or selection["mode"] not in {"direct", "external"}
+        ):
+            return None
+        return selection["mode"]
+
+    pointer_path = paths.data_home() / "awa" / "release-pointer.json"
+    if not os.path.lexists(pointer_path):
+        return "direct"
+    pointer = _bounded_json_object(pointer_path)
+    legacy_keys = {
+        "schema",
+        "version",
+        "source",
+        "commit",
+        "runtime",
+        "policy",
+        "installed_at",
+    }
+    if (
+        pointer is None
+        or pointer.get("schema") != "awa-release-pointer/v1"
+        or not legacy_keys.issubset(pointer)
+        or any(
+            type(pointer.get(key)) is not str or not pointer.get(key)
+            for key in legacy_keys
+        )
+    ):
+        return None
+    owner_keys = {
+        "hook_owner_contract",
+        "hook_owner_mode",
+        "hook_owner_contract_sha256",
+    }
+    present = owner_keys.intersection(pointer)
+    if not present:
+        return "direct"
+    if present != owner_keys:
+        return None
+    mode = pointer.get("hook_owner_mode")
+    digest = pointer.get("hook_owner_contract_sha256")
+    if (
+        pointer.get("hook_owner_contract") != "awa-hook-owner/v1"
+        or type(mode) is not str
+        or mode not in {"direct", "external"}
+        or type(digest) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+    ):
+        return None
+    return mode
+
+
+def _hook_command_path(command: object) -> Path | None:
+    if not isinstance(command, str) or not command:
+        return None
+    try:
+        argv = shlex.split(command)
+        if not argv:
+            return None
+        candidate = argv[0]
+        if Path(candidate).name in {"bash", "sh"}:
+            if len(argv) < 2 or argv[1].startswith("-"):
+                return None
+            candidate = argv[1]
+        return Path(candidate).expanduser()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _hook_row_shape_matches(row: object, role: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    expected = role["entry"]
+    expected_without_fail = dict(expected)
+    expected_without_fail.pop("failClosed", None)
+    observed_without_fail = {
+        key: value
+        for key, value in row.items()
+        if key != "failClosed" or "failClosed" not in expected
+    }
+    observed_without_fail.pop("command", None)
+    return observed_without_fail == expected_without_fail
+
+
+def _safe_external_hook_command(row: object) -> Path | None:
+    if not isinstance(row, dict):
+        return None
+    command = row.get("command")
+    if not isinstance(command, str) or not command:
+        return None
+    try:
+        candidate = Path(command).expanduser()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not candidate.is_absolute():
+        return None
+    try:
+        info = candidate.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or candidate.is_symlink()
+            or info.st_uid != os.getuid()
+            or info.st_mode & 0o022
+            or not os.access(candidate, os.X_OK)
+        ):
+            return None
+        resolved = candidate.resolve(strict=True)
+        if candidate != resolved:
+            return None
+        parent = resolved.parent.stat()
+        if parent.st_uid != os.getuid() or parent.st_mode & 0o022:
+            return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return resolved
+
+
+def _direct_hook_projection_facts(
+    source: Path,
+    hooks_doc: object,
+    roles: list[dict],
+) -> tuple[bool | None, bool | None]:
+    """Preserve the direct-owner evaluator semantics byte-for-byte in behavior."""
     if (
         not isinstance(hooks_doc, dict)
         or hooks_doc.get("version") != 1
-        or not isinstance(hooks, dict)
-        or not isinstance(roles, list)
+        or not isinstance(hooks_doc.get("hooks"), dict)
     ):
         return False, None
-
+    hooks = hooks_doc["hooks"]
     rows_present = True
     fail_open = True
     for role in roles:
-        if not isinstance(role, dict):
+        event_rows = hooks.get(role["event"], [])
+        if not isinstance(event_rows, list):
             return None, None
-        event = role.get("event")
-        command_role = role.get("direct_command_role")
-        expected = role.get("entry")
-        event_rows = hooks.get(event, [])
-        if (
-            not isinstance(event, str)
-            or not isinstance(command_role, str)
-            or not isinstance(expected, dict)
-            or not isinstance(event_rows, list)
-        ):
-            return None, None
-        expected_command = str((source / command_role).resolve())
-        expected_without_fail = dict(expected)
+        expected_without_fail = dict(role["entry"])
         expected_fail_closed = expected_without_fail.pop("failClosed", None)
-        expected_without_fail["command"] = expected_command
+        expected_without_fail["command"] = str(
+            (source / role["direct_command_role"]).resolve()
+        )
         matching = [
             row
             for row in event_rows
@@ -1928,7 +2053,7 @@ def _hook_facts(source: Path) -> tuple[bool | None, bool | None]:
                 {
                     key: value
                     for key, value in row.items()
-                    if key != "failClosed" or "failClosed" not in expected
+                    if key != "failClosed" or "failClosed" not in role["entry"]
                 }
                 == expected_without_fail
             )
@@ -1942,6 +2067,152 @@ def _hook_facts(source: Path) -> tuple[bool | None, bool | None]:
         ):
             fail_open = False
     return rows_present, fail_open
+
+
+def _hook_projection_facts(
+    source: Path,
+    hooks_doc: object,
+    roles: list[dict],
+    owner_mode: str,
+) -> tuple[bool | None, bool | None]:
+    if owner_mode == "direct":
+        return _direct_hook_projection_facts(source, hooks_doc, roles)
+    if (
+        not isinstance(hooks_doc, dict)
+        or type(hooks_doc.get("version")) is not int
+        or hooks_doc.get("version") != 1
+        or not isinstance(hooks_doc.get("hooks"), dict)
+        or owner_mode != "external"
+    ):
+        return False, None
+    hooks = hooks_doc["hooks"]
+    if any(
+        not isinstance(event, str)
+        or not isinstance(rows, list)
+        or any(not isinstance(row, dict) for row in rows)
+        for event, rows in hooks.items()
+    ):
+        return False, None
+
+    direct_targets = {
+        role["id"]: (source / role["direct_command_role"]).resolve()
+        for role in roles
+    }
+    basenames = {
+        Path(role["direct_command_role"]).name
+        for role in roles
+    }
+
+    def classify(row: object, role: dict) -> tuple[str, Path | None] | None:
+        if not _hook_row_shape_matches(row, role):
+            return None
+        command = row.get("command") if isinstance(row, dict) else None
+        if not isinstance(command, str):
+            return "invalid", None
+        lexical = _hook_command_path(command)
+        if (
+            lexical is None
+            or lexical.name != Path(role["direct_command_role"]).name
+        ):
+            return None
+        target = _safe_external_hook_command(row)
+        if target is None:
+            return "invalid", None
+        if target == direct_targets[role["id"]]:
+            return "direct", target
+        return "external", target
+
+    external_owner_dirs: set[Path] = set()
+    if owner_mode == "external":
+        for role in roles:
+            if role["external_command_path_class"] != "host-policy-delegator":
+                continue
+            for row in hooks.get(role["event"], []):
+                candidate = classify(row, role)
+                if candidate is not None and candidate[0] == "external":
+                    assert candidate[1] is not None
+                    external_owner_dirs.add(candidate[1].parent)
+
+    rows_present = True
+    if owner_mode == "external" and len(external_owner_dirs) != 1:
+        rows_present = False
+    external_owner_dir = (
+        next(iter(external_owner_dirs))
+        if len(external_owner_dirs) == 1
+        else None
+    )
+
+    fail_open = True
+    accepted_rows: set[int] = set()
+    for role in roles:
+        candidates = []
+        for row in hooks.get(role["event"], []):
+            candidate = classify(row, role)
+            if candidate is not None:
+                candidates.append((row, *candidate))
+
+        expected_kind = "direct"
+        expected_target = direct_targets[role["id"]]
+        if (
+            owner_mode == "external"
+            and role["external_command_path_class"] == "host-policy-delegator"
+        ):
+            expected_kind = "external"
+            expected_target = (
+                external_owner_dir / Path(role["direct_command_role"]).name
+                if external_owner_dir is not None
+                else None
+            )
+        matching = [
+            item
+            for item in candidates
+            if item[1] == expected_kind and item[2] == expected_target
+        ]
+        if len(candidates) != 1 or len(matching) != 1:
+            rows_present = False
+            continue
+        row = matching[0][0]
+        accepted_rows.add(id(row))
+        if (
+            role["entry"].get("failClosed") is False
+            and row.get("failClosed") is not False
+        ):
+            fail_open = False
+
+    # Reject stale, wrong-event, mixed-owner, and superseded AWA-looking rows.
+    # Unrelated hooks remain allowed, but a canonical role basename is reserved.
+    for rows in hooks.values():
+        for row in rows:
+            if id(row) in accepted_rows:
+                continue
+            command = row.get("command")
+            command_path = _hook_command_path(command)
+            if command_path is not None and command_path.name in basenames:
+                rows_present = False
+
+    return rows_present, fail_open
+
+
+def _hook_facts(source: Path) -> tuple[bool | None, bool | None]:
+    hook_path = Path(
+        os.environ.get("AWA_HOOKS_JSON")
+        or (Path.home() / ".cursor" / "hooks.json")
+    ).expanduser()
+    roles = _effective_hook_roles(source)
+    if roles is None:
+        return False, None
+    owner_mode = _hook_owner_mode()
+    if owner_mode is None:
+        return False, None
+    try:
+        hooks_doc = json.loads(hook_path.read_text(encoding="utf-8"))
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ):
+        return False, None
+    return _hook_projection_facts(source, hooks_doc, roles, owner_mode)
 
 
 def _release_matches(source: Path) -> bool | None:
