@@ -21,6 +21,10 @@ _STOP = _ROOT / "kernel" / "hooks" / "awa-integrity-observer.sh"
 _HANDOFF = _ROOT / "kernel" / "hooks" / "awa-session-handoff.sh"
 _DETACHER = _ROOT / "engine" / "integrity_detach.py"
 _ENGINE = _ROOT / "bin" / "awa-engine.sh"
+_DETACHED_OBSERVER_DELAY_SECONDS = 60.0
+_DETACHED_OBSERVER_TIMEOUT_SECONDS = 30.0
+_HANG_TIMEOUT_SECONDS = 5.0
+_HOOK_RETURN_TIMEOUT_SECONDS = 3.0
 _IDENT = (
     "-c",
     "user.email=fixture@example.invalid",
@@ -321,7 +325,10 @@ raise SystemExit(0)
         env.update(
             {
                 "AWA_FAKE_OBSERVER_MODE": "sleep",
-                "AWA_FAKE_OBSERVER_SLEEP": "1.0",
+                "AWA_FAKE_OBSERVER_SLEEP": str(_DETACHED_OBSERVER_DELAY_SECONDS),
+                "AWA_INTEGRITY_OBSERVER_TIMEOUT_SECONDS": str(
+                    _DETACHED_OBSERVER_TIMEOUT_SECONDS
+                ),
                 "AWA_TEST_INHERITED_FD": str(write_fd),
             }
         )
@@ -330,22 +337,24 @@ raise SystemExit(0)
             separators=(",", ":"),
         ).encode("utf-8")
         standalone = self._run(_GUARD, payload, env=env)
-        started = time.monotonic()
         result = self._run(
             _COMPOSITE,
             payload,
             env=env,
             pass_fds=(write_fd,),
+            timeout=_HOOK_RETURN_TIMEOUT_SECONDS,
         )
-        elapsed = time.monotonic() - started
         self.assertEqual(result.stdout, standalone.stdout)
         self.assertEqual(result.stderr, standalone.stderr)
         self.assertEqual(result.returncode, standalone.returncode)
-        self.assertLess(elapsed, 0.50)
         records = self._wait_for_records(1)
         self.assertEqual(len(records), 1)
         self.assertNotEqual(records[0]["sid"], os.getsid(0))
         self.assertFalse(records[0]["fd_open"])
+        self.assertTrue(
+            self._pid_alive(records[0]["pid"]),
+            "observer exited before the detached hook returned",
+        )
         source = _DETACHER.read_text(encoding="utf-8")
         self.assertIn("start_new_session=True", source)
         self.assertIn("close_fds=True", source)
@@ -365,7 +374,7 @@ raise SystemExit(0)
         env.update(
             {
                 "AWA_FAKE_OBSERVER_MODE": "hang",
-                "AWA_INTEGRITY_OBSERVER_TIMEOUT_SECONDS": "1.0",
+                "AWA_INTEGRITY_OBSERVER_TIMEOUT_SECONDS": str(_HANG_TIMEOUT_SECONDS),
             }
         )
         payload = json.dumps(
@@ -373,17 +382,23 @@ raise SystemExit(0)
             separators=(",", ":"),
         ).encode("utf-8")
         standalone = self._run(_GUARD, payload, env=env)
-        started = time.monotonic()
-        composite = self._run(_COMPOSITE, payload, env=env)
-        elapsed = time.monotonic() - started
+        composite = self._run(
+            _COMPOSITE,
+            payload,
+            env=env,
+            timeout=_HOOK_RETURN_TIMEOUT_SECONDS,
+        )
         self.assertEqual(composite.stdout, standalone.stdout)
         self.assertEqual(composite.stderr, standalone.stderr)
         self.assertEqual(composite.returncode, standalone.returncode)
-        self.assertLess(elapsed, 0.50)
         records = self._wait_for_records(1)
         self.assertEqual(len(records), 1)
         pid = records[0]["pid"]
-        deadline = time.monotonic() + 3
+        self.assertTrue(
+            self._pid_alive(pid),
+            "observer timed out before the detached hook returned",
+        )
+        deadline = time.monotonic() + _HANG_TIMEOUT_SECONDS + 2
         while self._pid_alive(pid) and time.monotonic() < deadline:
             time.sleep(0.05)
         self.assertFalse(self._pid_alive(pid), "timed-out observer survived")
