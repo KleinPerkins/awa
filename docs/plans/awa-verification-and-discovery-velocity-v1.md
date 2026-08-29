@@ -1,11 +1,11 @@
 # AWA Verification and Discovery Velocity — measured feedback without weakening proof
 
 - **Version:** v1
-- **Status:** DRAFT — 2026-08-29
+- **Status:** ACCEPTED — 2026-08-29
 - **Date:** 2026-08-29
 - **Owning repository:** `KleinPerkins/awa` (`~/dev/capabilities/awa`)
 - **Plan-type:** agentic-execution
-- **Relates to:** draft [ADR 0021](../adr/0021-verification-and-discovery-velocity.md), ADR 0001
+- **Relates to:** [ADR 0021](../adr/0021-verification-and-discovery-velocity.md), ADR 0001
   (independent engine/kernel guard parity), ADR 0002 (AWA product vs. host ownership), ADR 0017
   (documentation governance boundary), and ADR 0020 (kernel-first integrity surveillance; ADR 0021
   narrowly supersedes only its guard-byte freeze for conditional M3-B, never its guard behavior).
@@ -27,7 +27,7 @@ dashboard inventory from deep display enrichment.
 contract-freeze/install/live-verify surfaces, and existing runnerless PR automation only.
 
 > **For agentic workers:** REQUIRED SUB-SKILL — use `subagent-driven-development` or
-> `executing-plans`. This plan is DRAFT. Do not execute Task M1-A.1 or any later task without an
+> `executing-plans`. This plan is ACCEPTED. Do not execute Task M1-A.1 or any later task without an
 > explicit operator GO. Work in order, one Draft PR body at a time; leave every Draft PR unarmed.
 > Never call `gh pr merge --auto`, enable/disable auto-merge, or mark a PR ready without the
 > operator's explicit GO.
@@ -2076,5 +2076,4 @@ machine-local evidence after confirming it is not the sole audit record.
   service.
 
 This plan is complete only when every implemented milestone's acceptance rows are evidenced and any
-conditional no-promotion decision is explicit. It authorizes nothing until accepted plus an
-operator GO.
+conditional no-promotion decision is explicit. Ordered execution requires an explicit operator GO.
