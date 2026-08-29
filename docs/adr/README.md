@@ -78,6 +78,7 @@ lands — this directory already follows the reference shape it derived from.
 | [0018](0018-tooling-subtraction-policy.md) | Draft — 2026-08-06 | Subtract no MCP surface now (all 9 tools used/tested; the one resource is retained); establish a durable proof-to-kill rule for any future removal. |
 | [0019](0019-fast-forward-primary-carve-out.md) | Accepted — 2026-08-23 | Allow one exact configured-upstream fetch plus one clean upstream-bound `merge --ff-only --no-overwrite-ignore` as state-aware decision-layer maintenance exceptions; all development and unnecessary Git maintenance remain denied. |
 | [0020](0020-awa-integrity-surveillance-and-lifecycle.md) | Accepted — 2026-08-24 | Guard-bug claim refuted; add one engine-side integrity evaluator, a status-last atomic `status.json` of record (live `mode=ro` reads), runnerless fast hooks + `local-jobs` deep sweep, always-attempted native/opt-in-Slack alerts, a self-staling static console, and read-only lifecycle reconciliation — no guard change; AWA owns product, `~/dev` owns host wiring. |
+| [0021](0021-verification-and-discovery-velocity.md) | Accepted — 2026-08-29 | Adopt one measured verification DAG with explicit feedback/authority lanes, evidence-only receipts, equivalence-gated process isolation, independent fixtures, and display-only discovery optimization; narrowly supersede ADR 0020's guard-byte freeze only for equivalence-gated invocation-local probe collection, never guard behavior. |
 
 ## Related conventions
 
