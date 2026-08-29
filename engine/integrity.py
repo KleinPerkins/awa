@@ -1524,12 +1524,28 @@ def _worktree_paths(source: Path) -> list[Path]:
     return result
 
 
+def _probe_worktree_paths(source: Path) -> list[Path]:
+    """Resolve Git topology separately from the installed runtime code root.
+
+    Installed releases intentionally execute from a non-Git runtime directory,
+    while the release ``source`` checkout may be detached or have only one
+    worktree. External hosts can therefore name one stable, policy-governed
+    repository whose primary/linked topology is safe to probe. An explicit
+    invalid or single-worktree target stays unavailable rather than silently
+    falling back and fabricating coverage.
+    """
+    configured = os.environ.get("AWA_INTEGRITY_PROBE_REPO", "").strip()
+    if configured:
+        return _worktree_paths(Path(configured).expanduser())
+    return _worktree_paths(source)
+
+
 def _guard_probes(
     source: Path,
 ) -> tuple[bool | None, bool | None, bool | None, list[tuple[Path, str]]]:
     from . import guard
 
-    worktrees = _worktree_paths(source)
+    worktrees = _probe_worktree_paths(source)
     if not worktrees:
         return None, None, None, []
     primary = worktrees[0]
