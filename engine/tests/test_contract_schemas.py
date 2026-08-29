@@ -83,6 +83,7 @@ class ContractSchemasTest(EngineTestCase):
             self.assertIn(k, rec, f"contract requires '{k}' but the heartbeat does not emit it")
 
     def test_freeze_checker_passes(self) -> None:
+        """Retained direct integration path after the Makefile duplicate is removed."""
         env = os.environ.copy()
         env["AWA_HOME"] = str(_REPO_ROOT)
         r = subprocess.run(["/bin/bash", str(_FREEZE)], env=env, capture_output=True, text=True)
