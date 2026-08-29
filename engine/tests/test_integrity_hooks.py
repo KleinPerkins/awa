@@ -21,7 +21,8 @@ _STOP = _ROOT / "kernel" / "hooks" / "awa-integrity-observer.sh"
 _HANDOFF = _ROOT / "kernel" / "hooks" / "awa-session-handoff.sh"
 _DETACHER = _ROOT / "engine" / "integrity_detach.py"
 _ENGINE = _ROOT / "bin" / "awa-engine.sh"
-_DETACHED_OBSERVER_DELAY_SECONDS = 30.0
+_DETACHED_OBSERVER_DELAY_SECONDS = 60.0
+_DETACHED_OBSERVER_TIMEOUT_SECONDS = 30.0
 _HANG_TIMEOUT_SECONDS = 5.0
 _IDENT = (
     "-c",
@@ -324,6 +325,9 @@ raise SystemExit(0)
             {
                 "AWA_FAKE_OBSERVER_MODE": "sleep",
                 "AWA_FAKE_OBSERVER_SLEEP": str(_DETACHED_OBSERVER_DELAY_SECONDS),
+                "AWA_INTEGRITY_OBSERVER_TIMEOUT_SECONDS": str(
+                    _DETACHED_OBSERVER_TIMEOUT_SECONDS
+                ),
                 "AWA_TEST_INHERITED_FD": str(write_fd),
             }
         )
