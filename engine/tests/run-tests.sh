@@ -22,7 +22,7 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OB
 cd "$AWA_PKG_PARENT"
 rc=0
 PYTHONPATH="$AWA_PKG_PARENT${PYTHONPATH:+:$PYTHONPATH}" \
-  python3 -m unittest discover -s engine/tests -t . -p 'test_*.py' "$@" || rc=$?
+  python3 -B -m engine.tests.suite_runner "$@" || rc=$?
 
 # The dashboard emitter ships its own focused test suite (dashboard/test_emitter.py) that both
 # PRODUCES and validates the emitted awa-worktree/v1 data. Wire it into the same gate so
