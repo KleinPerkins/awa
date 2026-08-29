@@ -283,6 +283,7 @@ class SuiteRunnerTest(unittest.TestCase):
                 with self.subTest(scope=scope):
                     log.write_text("", encoding="utf-8")
                     env = os.environ.copy()
+                    env.pop("AWA_ENGINE_TESTS_ACTIVE", None)
                     env.pop("BASH_ENV", None)
                     env.pop("ENV", None)
                     env.update(
