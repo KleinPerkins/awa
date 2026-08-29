@@ -24,6 +24,7 @@ _ENGINE = _ROOT / "bin" / "awa-engine.sh"
 _DETACHED_OBSERVER_DELAY_SECONDS = 60.0
 _DETACHED_OBSERVER_TIMEOUT_SECONDS = 30.0
 _HANG_TIMEOUT_SECONDS = 5.0
+_HOOK_RETURN_TIMEOUT_SECONDS = 3.0
 _IDENT = (
     "-c",
     "user.email=fixture@example.invalid",
@@ -341,6 +342,7 @@ raise SystemExit(0)
             payload,
             env=env,
             pass_fds=(write_fd,),
+            timeout=_HOOK_RETURN_TIMEOUT_SECONDS,
         )
         self.assertEqual(result.stdout, standalone.stdout)
         self.assertEqual(result.stderr, standalone.stderr)
@@ -380,7 +382,12 @@ raise SystemExit(0)
             separators=(",", ":"),
         ).encode("utf-8")
         standalone = self._run(_GUARD, payload, env=env)
-        composite = self._run(_COMPOSITE, payload, env=env)
+        composite = self._run(
+            _COMPOSITE,
+            payload,
+            env=env,
+            timeout=_HOOK_RETURN_TIMEOUT_SECONDS,
+        )
         self.assertEqual(composite.stdout, standalone.stdout)
         self.assertEqual(composite.stderr, standalone.stderr)
         self.assertEqual(composite.returncode, standalone.returncode)
