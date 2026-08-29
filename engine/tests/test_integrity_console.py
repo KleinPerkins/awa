@@ -357,11 +357,11 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertEqual(
             (_ROOT / "engine" / "__init__.py")
             .read_text(encoding="utf-8")
-            .count('__version__ = "1.7.2"'),
+            .count('__version__ = "1.7.3"'),
             1,
         )
         self.assertIn(
-            'version = "1.7.2"',
+            'version = "1.7.3"',
             (_ROOT / "pyproject.toml").read_text(encoding="utf-8"),
         )
 

@@ -389,6 +389,185 @@ class TestIntegrityInvariants(unittest.TestCase):
             self.assertEqual(invariant(status, invariant_id), prior)
 
 
+class TestInstalledTopologyFacts(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="awa-integrity-topology.")
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _git(cwd: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def _repo(self, name: str, *, linked: bool) -> tuple[Path, Path | None]:
+        primary = self.root / name
+        primary.mkdir()
+        self._git(primary, "init", "-q")
+        self._git(primary, "config", "user.name", "AWA Test")
+        self._git(primary, "config", "user.email", "awa-test@example.invalid")
+        self._git(primary, "remote", "add", "origin", "https://example.invalid/awa.git")
+        (primary / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+        self._git(primary, "add", "tracked.txt")
+        self._git(primary, "commit", "-qm", "seed")
+        if not linked:
+            return primary, None
+        worktree = self.root / f"{name}-linked"
+        self._git(primary, "worktree", "add", "-q", "-b", f"{name}-linked", str(worktree))
+        return primary, worktree
+
+    def _runtime(self) -> Path:
+        runtime = self.root / "runtime"
+        shutil.copytree(_ROOT / "kernel", runtime / "kernel")
+        return runtime
+
+    def _clean_env(self, **updates: str) -> dict[str, str]:
+        env = os.environ.copy()
+        for name in (
+            "AWA_GOVERNED_ROOT",
+            "CURSOR_BACKGROUND_AGENT",
+            "CURSOR_CLOUD_AGENT",
+            "IS_BACKGROUND_AGENT",
+            "is_background_agent",
+            "AWA_FORCE_CLOUD",
+            "cloud_agent_identity_broker",
+            "CURSOR_AGENT_IDENTITY_BROKER",
+        ):
+            env.pop(name, None)
+        env.update(updates)
+        return env
+
+    def test_installed_runtime_uses_explicit_host_probe_topology(self):
+        runtime = self._runtime()
+        source, _ = self._repo("detached-source", linked=False)
+        self._git(source, "checkout", "-q", "--detach")
+        probe, linked = self._repo("host-probe", linked=True)
+        self.assertIsNotNone(linked)
+        policy = runtime / "kernel" / "policy" / "default-worktree-policy.yml"
+        policy.write_text(
+            "version: 1\n"
+            "governed_roots:\n"
+            f"  - {self.root}\n"
+            f"managed_location: {self.root / 'managed'}\n"
+            "default: include\n"
+            "default_mode: on\n"
+            "include:\n"
+            "  - '*'\n"
+            "exclude: []\n"
+            "detectors:\n"
+            "  governed_markers: []\n"
+            "  foreign_hook_frameworks: []\n"
+            "  read_only_paths: []\n"
+            "overrides:\n"
+            "  include: []\n"
+            "  exclude: []\n",
+            encoding="utf-8",
+        )
+        now = 1_800_000_000.0
+        previous = {
+            "triggers": {"launchd": {"last_success": integrity._iso_at(now)}},
+            "alert": {
+                "delivered": {"native": "accepted", "slack": "opted_out"}
+            },
+        }
+        pointer = {"runtime": str(runtime), "source": str(source)}
+        env = self._clean_env(
+            AWA_INTEGRITY_PROBE_REPO=str(probe),
+            AWA_POLICY=str(policy),
+        )
+
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(integrity, "_release_pointer", return_value=pointer), \
+                mock.patch.object(integrity, "_recovery_facts", return_value=("ok", 0)), \
+                mock.patch.object(
+                    integrity,
+                    "_lifecycle_facts",
+                    return_value=(0, 0, 0, {}),
+                ), \
+                mock.patch.object(integrity, "_hook_facts", return_value=(True, True)), \
+                mock.patch.object(integrity, "_release_matches", return_value=True):
+            self.assertEqual(integrity._source_root(), runtime.resolve())
+            observed = integrity._collect_facts(
+                previous,
+                profile="deep",
+                now=now,
+            )
+
+        self.assertIs(observed.guard_primary_deny, True)
+        self.assertIs(observed.guard_cd_bypass_deny, True)
+        self.assertIs(observed.guard_linked_allow, True)
+        self.assertIs(observed.parity_ok, True)
+        self.assertIs(observed.mcp_matches, True)
+        self.assertEqual(observed.handoff_state, "absent")
+        status = integrity.evaluate(
+            "deep",
+            trigger="launchd",
+            facts=observed,
+        )
+        self.assertEqual(invariant(status, "guard_safety")["severity"], "green")
+        self.assertEqual(invariant(status, "parity")["severity"], "green")
+        self.assertEqual(
+            invariant(status, "mcp_engine_parity")["severity"],
+            "green",
+        )
+        self.assertEqual(
+            invariant(status, "entry_handshake")["severity"],
+            "unknown",
+        )
+        self.assertEqual(status["overall"], "degraded")
+
+    def test_explicit_probe_absence_or_single_worktree_stays_unknown(self):
+        runtime = self._runtime()
+        fallback, _ = self._repo("fallback", linked=True)
+        single, _ = self._repo("single", linked=False)
+        pointer = {"runtime": str(runtime), "source": str(fallback)}
+
+        for candidate in (self.root / "missing", single):
+            with self.subTest(candidate=candidate), \
+                    mock.patch.dict(
+                        os.environ,
+                        self._clean_env(AWA_INTEGRITY_PROBE_REPO=str(candidate)),
+                        clear=True,
+                    ), \
+                    mock.patch.object(
+                        integrity,
+                        "_release_pointer",
+                        return_value=pointer,
+                    ):
+                self.assertLess(
+                    len(integrity._probe_worktree_paths(runtime)),
+                    2,
+                )
+                self.assertEqual(
+                    integrity._guard_probes(runtime),
+                    (None, None, None, []),
+                )
+
+    def test_single_release_source_does_not_fabricate_linked_topology(self):
+        runtime = self._runtime()
+        source, _ = self._repo("single-source", linked=False)
+        self._git(source, "checkout", "-q", "--detach")
+        pointer = {"runtime": str(runtime), "source": str(source)}
+
+        with mock.patch.dict(os.environ, self._clean_env(), clear=True), \
+                mock.patch.object(
+                    integrity,
+                    "_release_pointer",
+                    return_value=pointer,
+                ):
+            self.assertEqual(integrity._probe_worktree_paths(runtime), [])
+            self.assertEqual(
+                integrity._guard_probes(runtime),
+                (None, None, None, []),
+            )
+
+
 class TestLiveHookFacts(unittest.TestCase):
     """The live collector follows the same preferred contract as installation."""
 
