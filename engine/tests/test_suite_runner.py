@@ -5,9 +5,13 @@ from __future__ import annotations
 import copy
 import io
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Optional
+from unittest import mock
 
 from engine.tests import suite_runner, verification_contract
 
@@ -66,7 +70,9 @@ def _context() -> dict:
     }
 
 
-def _receipt(before: dict | None = None, after: dict | None = None) -> dict:
+def _receipt(
+    before: Optional[dict] = None, after: Optional[dict] = None
+) -> dict:
     identity = _identity()
     return suite_runner.build_receipt(
         before or identity,
@@ -209,6 +215,95 @@ class SuiteRunnerTest(unittest.TestCase):
                     suite_runner.inventory_from_unittest_args(args),
                     expected,
                 )
+
+    def test_full_inventory_classification_preserves_dashboard_gate(self) -> None:
+        full_cases = (
+            (),
+            ("--jobs", "1"),
+            ("--json-out", "/tmp/receipt.json", "--lane", "pre-pr"),
+            ("--", "--verbose", "--failfast"),
+        )
+        filtered_cases = (
+            ("--list-ids",),
+            ("--", _REDACT_MODULE),
+            (_REDACT_MODULE, "--failfast"),
+            ("--", "-k", "secret_assignment"),
+        )
+        for args in full_cases:
+            with self.subTest(args=args):
+                self.assertTrue(
+                    suite_runner.invocation_runs_full_inventory(args)
+                )
+        for args in filtered_cases:
+            with self.subTest(args=args):
+                self.assertFalse(
+                    suite_runner.invocation_runs_full_inventory(args)
+                )
+
+    def test_selector_environment_is_classified_as_filtered(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {"AWA_TEST_SELECTORS": _REDACT_MODULE},
+        ):
+            self.assertFalse(
+                suite_runner.invocation_runs_full_inventory(
+                    ("--selectors-env", "AWA_TEST_SELECTORS")
+                )
+            )
+
+    def test_run_tests_dashboard_gate_uses_invocation_scope(self) -> None:
+        run_tests = Path(__file__).with_name("run-tests.sh")
+        with tempfile.TemporaryDirectory(prefix="awa-run-tests-scope.") as tmp:
+            root = Path(tmp)
+            bindir = root / "bin"
+            bindir.mkdir()
+            fake_python = bindir / "python3"
+            fake_python.write_text(
+                "#!/bin/sh\n"
+                'printf "%s\\n" "$*" >> "$AWA_FAKE_PYTHON_LOG"\n'
+                'case "$*" in\n'
+                "  *invocation_runs_full_inventory*)\n"
+                '    printf "%s\\n" "$AWA_FAKE_SCOPE"\n'
+                "    ;;\n"
+                "esac\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            log = root / "python.log"
+            cases = (
+                (
+                    "full",
+                    ("--jobs", "1", "--json-out", str(root / "receipt.json")),
+                    True,
+                ),
+                ("filtered", ("--", _REDACT_MODULE), False),
+            )
+            for scope, args, expect_dashboard in cases:
+                with self.subTest(scope=scope):
+                    log.write_text("", encoding="utf-8")
+                    env = os.environ.copy()
+                    env.pop("BASH_ENV", None)
+                    env.pop("ENV", None)
+                    env.update(
+                        {
+                            "AWA_FAKE_PYTHON_LOG": str(log),
+                            "AWA_FAKE_SCOPE": scope,
+                            "PATH": str(bindir) + os.pathsep + "/usr/bin:/bin",
+                        }
+                    )
+                    result = subprocess.run(
+                        ["/bin/bash", str(run_tests), *args],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        env=env,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    dashboard_ran = "dashboard/test_emitter.py" in log.read_text(
+                        encoding="utf-8"
+                    )
+                    self.assertEqual(dashboard_ran, expect_dashboard)
 
     def test_unknown_unittest_flag_fails_loudly(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported unittest argument"):

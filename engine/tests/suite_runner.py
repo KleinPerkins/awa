@@ -643,6 +643,16 @@ def _arguments_from_environment(arguments: RunnerArguments) -> Tuple[str, ...]:
         raise ValueError(f"{name} contains invalid shell-like quoting") from exc
 
 
+def invocation_runs_full_inventory(argv: Sequence[str] = ()) -> bool:
+    """Return whether one successful invocation executes the full engine inventory."""
+    arguments = _parse_runner_args(tuple(argv))
+    if arguments.help or arguments.list_ids:
+        return False
+    validate_jobs(arguments.jobs)
+    options = _parse_unittest_args(_arguments_from_environment(arguments))
+    return not options.selectors and not options.name_patterns
+
+
 def _effective_command(options: UnittestOptions) -> list:
     command = ["python3", "-B", "-m", "engine.tests.suite_runner"]
     if options.verbosity == 2:
