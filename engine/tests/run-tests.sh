@@ -22,13 +22,32 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OB
 cd "$AWA_PKG_PARENT"
 rc=0
 PYTHONPATH="$AWA_PKG_PARENT${PYTHONPATH:+:$PYTHONPATH}" \
-  python3 -m unittest discover -s engine/tests -t . -p 'test_*.py' "$@" || rc=$?
+  python3 -B -m engine.tests.suite_runner "$@" || rc=$?
+
+# Runner-only flags still execute the full inventory and must not suppress the
+# dashboard gate. Ask the runner's parser instead of duplicating its grammar in
+# Bash; a classifier error fails closed rather than silently dropping coverage.
+dashboard_scope="filtered"
+if [ "$rc" -eq 0 ]; then
+  dashboard_scope="$(
+    PYTHONPATH="$AWA_PKG_PARENT${PYTHONPATH:+:$PYTHONPATH}" \
+      python3 -B -c '
+import sys
+from engine.tests.suite_runner import invocation_runs_full_inventory
+print("full" if invocation_runs_full_inventory(tuple(sys.argv[1:])) else "filtered")
+' "$@"
+  )" || rc=$?
+  if [ "$rc" -eq 0 ] && [ "$dashboard_scope" != "full" ] && [ "$dashboard_scope" != "filtered" ]; then
+    echo "awa-engine tests: invalid dashboard scope classification" >&2
+    rc=2
+  fi
+fi
 
 # The dashboard emitter ships its own focused test suite (dashboard/test_emitter.py) that both
 # PRODUCES and validates the emitted awa-worktree/v1 data. Wire it into the same gate so
 # `make verify`/`make test` cover it. Only run the full dashboard pass on an unfiltered run
 # (no extra args select specific engine tests), and fail the whole run if it fails.
-if [ "$rc" -eq 0 ] && [ "$#" -eq 0 ] && [ -f "$AWA_PKG_PARENT/dashboard/test_emitter.py" ]; then
+if [ "$rc" -eq 0 ] && [ "$dashboard_scope" = "full" ] && [ -f "$AWA_PKG_PARENT/dashboard/test_emitter.py" ]; then
   PYTHONPATH="$AWA_PKG_PARENT${PYTHONPATH:+:$PYTHONPATH}" \
     python3 "$AWA_PKG_PARENT/dashboard/test_emitter.py" || rc=$?
 fi
