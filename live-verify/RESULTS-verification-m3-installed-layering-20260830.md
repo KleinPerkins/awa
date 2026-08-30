@@ -160,4 +160,3 @@ No prior ID was renamed or removed. The five additions are:
 Rollback restores the three installed loops to ordinary execution and removes
 the preflight/canary/fallback wiring; no data or runtime migration exists. The
 M3-A.1 profile remains valid.
-
