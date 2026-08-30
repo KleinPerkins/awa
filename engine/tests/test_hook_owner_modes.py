@@ -626,8 +626,43 @@ class TestHookOwnerParity(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
+    def _install_guard(self):
+        override = os.environ.get("AWA_TEST_INSTALLED_GUARD_OVERRIDE")
+        if override:
+            guard = Path(override)
+            self.assertTrue(guard.is_file())
+            return guard
+        home = self.root / "installed-home"
+        data = home / ".local" / "share"
+        config = home / ".config"
+        state = home / ".local" / "state"
+        hooks = home / ".cursor" / "hooks.json"
+        for path in (home, data, config, state, hooks.parent):
+            path.mkdir(parents=True, exist_ok=True)
+        env = dict(self.git_env)
+        env.update({
+            "HOME": str(home),
+            "XDG_DATA_HOME": str(data),
+            "XDG_CONFIG_HOME": str(config),
+            "XDG_STATE_HOME": str(state),
+            "AWA_HOOKS_JSON": str(hooks),
+            "AWA_HOOK_OWNER": "direct",
+        })
+        result = subprocess.run(
+            [str(INSTALL)],
+            cwd=str(REPO),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=180,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        guard = data / "awa" / "current" / "kernel" / "hooks" / "worktree-guard.sh"
+        self.assertTrue(guard.is_file())
+        return guard
+
     def run_guard(self, command, delegated=False, event="beforeShellExecution",
-                  env_updates=None):
+                  env_updates=None, guard_path=GUARD):
         env = dict(os.environ)
         for key in (
                 "CURSOR_BACKGROUND_AGENT", "CURSOR_CLOUD_AGENT",
@@ -639,7 +674,7 @@ class TestHookOwnerParity(unittest.TestCase):
             "AWA_GOVERNED_ROOT": str(self.root),
             "AWA_EXTERNAL_POLICY": str(self.policy),
             "AWA_EXTERNAL_ROOT": str(self.root),
-            "AWA_DELEGATE_TARGET": str(GUARD),
+            "AWA_DELEGATE_TARGET": str(guard_path),
         })
         if env_updates:
             env.update(env_updates)
@@ -649,7 +684,7 @@ class TestHookOwnerParity(unittest.TestCase):
             "command": command,
             "file_path": str(self.repo / "file"),
         }
-        executable = self.delegator if delegated else GUARD
+        executable = self.delegator if delegated else guard_path
         result = subprocess.run(
             [str(executable)], input=json.dumps(payload), capture_output=True,
             text=True, env=env, timeout=30)
@@ -682,6 +717,29 @@ class TestHookOwnerParity(unittest.TestCase):
                 for case in GUARD_BOUNDARY_CASES
             },
         )
+
+    def test_installed_guard_owner_canaries(self):
+        installed = self._install_guard()
+        for command, expected in (
+            ("git status", "allow"),
+            ("git commit --allow-empty -m installed-owner-canary", "deny"),
+        ):
+            for delegated in (False, True):
+                with self.subTest(
+                    command=command,
+                    expected=expected,
+                    delegated=delegated,
+                ):
+                    response = self.run_guard(
+                        command,
+                        delegated=delegated,
+                        guard_path=installed,
+                    )
+                    self.assertEqual(
+                        response.get("permission"),
+                        expected,
+                        response,
+                    )
 
     def test_hook_fail_open_and_after_file_edit_policy_match_both_paths(self):
         direct_edit = self.run_guard(

@@ -24,6 +24,9 @@ from unittest import mock
 from consumer import finish_current as finish_ux
 from engine import guard as engine_guard
 from engine.tests.guard_boundary_profile import GUARD_BOUNDARY_CASES
+from engine.tests.installed_guard_canaries import (
+    full_installed_matrix_requested,
+)
 from engine.tests.git_guard_command_corpus import (
     GIT_MUTATING_FAMILY_COMMANDS,
     GIT_READONLY_FAMILY_COMMANDS,
@@ -261,6 +264,11 @@ class TestBashGuardWrapperParity(unittest.TestCase):
             self.fail("unknown primary-maintenance state case: {0}".format(case))
 
     def _install_guard(self) -> Path:
+        override = os.environ.get("AWA_TEST_INSTALLED_GUARD_OVERRIDE")
+        if override:
+            guard = Path(override)
+            self.assertTrue(guard.is_file())
+            return guard
         home = self.root / "installed-home"
         data = home / ".local" / "share"
         config = home / ".config"
@@ -326,7 +334,11 @@ class TestBashGuardWrapperParity(unittest.TestCase):
             self.assertIn("agent_message", resp)
 
     def test_primary_maintenance_command_corpus_engine_source_installed_parity(self):
-        installed = self._install_guard()
+        installed = (
+            self._install_guard()
+            if full_installed_matrix_requested()
+            else None
+        )
         for expected, commands in (
             ("allow", PRIMARY_MAINTENANCE_ALLOW_SHAPES),
             ("allow", PRIMARY_MAINTENANCE_UNRELATED_ALLOW),
@@ -340,14 +352,15 @@ class TestBashGuardWrapperParity(unittest.TestCase):
                         str(self.policy),
                     )
                     source = self._guard(cmd)
-                    role_resolved = self._guard(cmd, guard_path=installed)
                     self.assertEqual(engine.permission, expected, (cmd, engine.reason))
                     self.assertEqual(source.get("permission"), expected, (cmd, source))
-                    self.assertEqual(
-                        role_resolved.get("permission"),
-                        expected,
-                        (cmd, role_resolved),
-                    )
+                    if installed is not None:
+                        role_resolved = self._guard(cmd, guard_path=installed)
+                        self.assertEqual(
+                            role_resolved.get("permission"),
+                            expected,
+                            (cmd, role_resolved),
+                        )
                     if expected == "deny":
                         self.assertIn(
                             engine.reason,
@@ -361,7 +374,10 @@ class TestBashGuardWrapperParity(unittest.TestCase):
                             },
                             cmd,
                         )
-                        for response in (source, role_resolved):
+                        responses = [source]
+                        if installed is not None:
+                            responses.append(role_resolved)
+                        for response in responses:
                             self.assertEqual(
                                 response.get("user_message"),
                                 engine.reason,
@@ -374,7 +390,11 @@ class TestBashGuardWrapperParity(unittest.TestCase):
                             )
 
     def test_primary_maintenance_state_corpus_engine_source_installed_parity(self):
-        installed = self._install_guard()
+        installed = (
+            self._install_guard()
+            if full_installed_matrix_requested()
+            else None
+        )
         for index, (case, cmd, reason_code) in enumerate(
             PRIMARY_MAINTENANCE_STATE_CASES
         ):
@@ -395,22 +415,30 @@ class TestBashGuardWrapperParity(unittest.TestCase):
                     repo=repo,
                     env_updates=env_updates,
                 )
-                role_resolved = self._guard(
-                    cmd,
-                    repo=repo,
-                    guard_path=installed,
-                    env_updates=env_updates,
-                )
                 message = engine_guard._PRIMARY_MAINTENANCE_MESSAGES[reason_code]
                 self.assertEqual(engine.permission, "deny", (case, engine.reason))
                 self.assertEqual(engine.reason, message, case)
-                for response in (source, role_resolved):
+                responses = [source]
+                if installed is not None:
+                    responses.append(
+                        self._guard(
+                            cmd,
+                            repo=repo,
+                            guard_path=installed,
+                            env_updates=env_updates,
+                        )
+                    )
+                for response in responses:
                     self.assertEqual(response.get("permission"), "deny", (case, response))
                     self.assertEqual(response.get("user_message"), message, case)
                     self.assertEqual(response.get("agent_message"), message, case)
 
     def test_primary_fetch_state_allow_corpus_engine_source_installed_parity(self):
-        installed = self._install_guard()
+        installed = (
+            self._install_guard()
+            if full_installed_matrix_requested()
+            else None
+        )
         for index, (case, cmd) in enumerate(PRIMARY_MAINTENANCE_STATE_ALLOW_CASES):
             with self.subTest(case=case, cmd=cmd):
                 repo, remote = self._make_maintenance_repo(
@@ -423,14 +451,15 @@ class TestBashGuardWrapperParity(unittest.TestCase):
                     str(self.policy),
                 )
                 source = self._guard(cmd, repo=repo)
-                role_resolved = self._guard(
-                    cmd,
-                    repo=repo,
-                    guard_path=installed,
-                )
                 self.assertEqual(engine.permission, "allow", (case, engine.reason))
                 self.assertEqual(source, {"permission": "allow"}, case)
-                self.assertEqual(role_resolved, {"permission": "allow"}, case)
+                if installed is not None:
+                    role_resolved = self._guard(
+                        cmd,
+                        repo=repo,
+                        guard_path=installed,
+                    )
+                    self.assertEqual(role_resolved, {"permission": "allow"}, case)
 
     def test_m3_profile_manifest_matches_source_and_installed_permissions(self):
         installed = self._install_guard()
@@ -661,19 +690,37 @@ class TestBashGuardWrapperParity(unittest.TestCase):
 
     def test_classifier_unavailable_asks_not_denies(self):
         """classify_context fail-safe (include + reason fail-safe: ask) must ASK, not DENY."""
-        lib = _REPO / "kernel" / "lib" / "awa_policy.py"
-        orig_mode = lib.stat().st_mode
-        try:
-            lib.chmod(0o000)
-            resp = self._guard_payload({
-                "command": "git commit -am x",
-                "cwd": str(self.repo),
-            })
-            self.assertEqual(resp.get("permission"), "ask")
-            self.assertIn("user_message", resp)
-            self.assertIn("agent_message", resp)
-        finally:
-            lib.chmod(orig_mode)
+        installed = self._install_guard()
+        for label, guard, lib in (
+            ("source", _GUARD, _REPO / "kernel" / "lib" / "awa_policy.py"),
+            (
+                "installed",
+                installed,
+                installed.parent.parent / "lib" / "awa_policy.py",
+            ),
+        ):
+            with self.subTest(boundary=label):
+                override = (
+                    label == "installed"
+                    and os.environ.get("AWA_TEST_INSTALLED_GUARD_OVERRIDE")
+                )
+                orig_mode = None if override else lib.stat().st_mode
+                try:
+                    if orig_mode is not None:
+                        lib.chmod(0o000)
+                    resp = self._guard_payload(
+                        {
+                            "command": "git commit -am x",
+                            "cwd": str(self.repo),
+                        },
+                        guard_path=guard,
+                    )
+                    self.assertEqual(resp.get("permission"), "ask")
+                    self.assertIn("user_message", resp)
+                    self.assertIn("agent_message", resp)
+                finally:
+                    if orig_mode is not None:
+                        lib.chmod(orig_mode)
 
     def test_cloud_env_flag_allows(self):
         """Same degrade-to-allow, signalled by an env flag (AWA_FORCE_CLOUD)."""
@@ -704,12 +751,21 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         env = dict(os.environ)
         env["AWA_GOVERNED_ROOT"] = str(self.root)
         env["AWA_POLICY"] = str(self.policy)
-        proc = subprocess.run([str(_GUARD)], input="{not valid json",
-                              capture_output=True, text=True, env=env, cwd=str(self.repo))
-        resp = json.loads(proc.stdout)
-        self.assertEqual(resp.get("permission"), "ask")
-        self.assertIn("user_message", resp)
-        self.assertIn("agent_message", resp)
+        installed = self._install_guard()
+        for label, guard in (("source", _GUARD), ("installed", installed)):
+            with self.subTest(boundary=label):
+                proc = subprocess.run(
+                    [str(guard)],
+                    input="{not valid json",
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    cwd=str(self.repo),
+                )
+                resp = json.loads(proc.stdout)
+                self.assertEqual(resp.get("permission"), "ask")
+                self.assertIn("user_message", resp)
+                self.assertIn("agent_message", resp)
 
     # ---- ADR 0001: target-path-aware mutation scope (bash-hook parity) ---------
     def test_target_outside_governed_root_allows(self):

@@ -20,6 +20,26 @@ export AWA_ENGINE_TESTS_ACTIVE=1
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES 2>/dev/null || true
 
 cd "$AWA_PKG_PARENT"
+
+# M3-A.2 layers the ordinary full source/engine corpus with a closed installed
+# canary set only after a fresh source/install byte + interpreter identity
+# check. Any drift refuses the ordinary lane and names the complete fallback.
+case "${AWA_FULL_INSTALLED_GUARD_MATRIX:-0}" in
+  ""|0)
+    PYTHONPATH="$AWA_PKG_PARENT${PYTHONPATH:+:$PYTHONPATH}" \
+      python3 -B -m engine.tests.installed_guard_canaries --verify-identity || exit $?
+    export AWA_INSTALLED_GUARD_LAYERING_CHECKED=1
+    ;;
+  1)
+    export AWA_FULL_INSTALLED_GUARD_MATRIX=1
+    ;;
+  *)
+    echo "awa-engine tests: AWA_FULL_INSTALLED_GUARD_MATRIX must be exactly 0 or 1" >&2
+    echo "awa-engine tests: full installed matrix required: make verify-guard-installed-full" >&2
+    exit 2
+    ;;
+esac
+
 rc=0
 # M2-A keeps the runner's literal jobs=1 default. Parallel verification is
 # opt-in with an explicit --jobs 2 or --jobs 4 until a later promotion decision.
