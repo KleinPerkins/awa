@@ -1,6 +1,6 @@
 # AWA — Agent Worktree Automation (standalone system). Make targets: help-first, .PHONY.
 .DEFAULT_GOAL := help
-.PHONY: help install repair doctor check uninstall verify verify-docs verify-focused verify-pre-pr verify-release verify-install test trial version
+.PHONY: help install repair doctor check uninstall verify verify-docs verify-focused verify-pre-pr verify-release verify-install verify-guard-installed-full test trial version
 unexport VERIFY_BASE TESTS
 
 help: ## Show available targets
@@ -16,6 +16,7 @@ help: ## Show available targets
 	@echo "  make verify-pre-pr   - complete authoritative local verification"
 	@echo "  make verify-release  - selected release trial (TRIAL_ARGS='<args>')"
 	@echo "  make verify-install  - full install lifecycle in a throwaway HOME (headless/CI-safe)"
+	@echo "  make verify-guard-installed-full - complete serial installed-guard fallback"
 	@echo "  make test            - engine test suite (unittest; local-only, no network)"
 	@echo "  make trial           - run the exact seven-step real-PM trial"
 	@echo "  make version         - print the engine version"
@@ -63,7 +64,13 @@ verify-pre-pr: verify ## Run complete authoritative local verification
 verify-release: ## Run the selected release trial
 	@$(MAKE) trial TRIAL_ARGS="$(TRIAL_ARGS)"
 
-verify-install: ## Exercise the full install lifecycle in a throwaway HOME (never touches real ~)
+verify-guard-installed-full: ## Run the complete pre-layering installed-guard matrix
+	@AWA_FULL_INSTALLED_GUARD_MATRIX=1 \
+	  AWA_TEST_SELECTORS='engine.tests.test_guard_hook_wrappers.TestBashGuardWrapperParity.test_primary_maintenance_command_corpus_engine_source_installed_parity engine.tests.test_guard_hook_wrappers.TestBashGuardWrapperParity.test_primary_maintenance_state_corpus_engine_source_installed_parity engine.tests.test_guard_hook_wrappers.TestBashGuardWrapperParity.test_primary_fetch_state_allow_corpus_engine_source_installed_parity engine.tests.test_guard_hook_wrappers.TestBashGuardWrapperParity.test_m3_profile_manifest_matches_source_and_installed_permissions engine.tests.test_hook_owner_modes.TestHookOwnerParity.test_m3_profile_manifest_matches_owner_paths' \
+	  bash engine/tests/run-tests.sh --jobs 1 --selectors-env AWA_TEST_SELECTORS
+	@echo "verify-guard-installed-full: OK"
+
+verify-install: verify-guard-installed-full ## Exercise the full install lifecycle in a throwaway HOME (never touches real ~)
 	@set -e; direct_tmp=$$(mktemp -d); external_tmp=$$(mktemp -d); \
 	  trap 'rm -rf "$$direct_tmp" "$$external_tmp"' EXIT; \
 	  env -i PATH="$$PATH" TMPDIR=$$direct_tmp HOME=$$direct_tmp XDG_DATA_HOME=$$direct_tmp/.local/share XDG_CONFIG_HOME=$$direct_tmp/.config XDG_STATE_HOME=$$direct_tmp/.local/state ./install.sh >/dev/null; \
