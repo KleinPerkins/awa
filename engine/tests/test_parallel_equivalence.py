@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
@@ -32,6 +33,21 @@ _ISOLATION_NAMES = (
     "XDG_STATE_HOME",
     "XDG_CACHE_HOME",
 )
+_RECEIPT_ENV_NAMES = (
+    "AWA_TEST_RECEIPT",
+    "AWA_TEST_PRIOR_RECEIPT",
+)
+
+
+@contextlib.contextmanager
+def _isolated_main_environment(**values):
+    """Keep nested CLI probes independent from an outer campaign receipt."""
+
+    with mock.patch.dict(os.environ):
+        for name in _RECEIPT_ENV_NAMES:
+            os.environ.pop(name, None)
+        os.environ.update(values)
+        yield
 
 
 def _inventory_digest(test_ids) -> str:
@@ -545,16 +561,24 @@ class ParallelEquivalenceTest(unittest.TestCase):
 
     def test_default_main_path_remains_serial(self) -> None:
         serial_result = {"outcome": "passed"}
-        with mock.patch.object(
+        outer_receipts = {
+            "AWA_TEST_RECEIPT": "/outer/campaign-receipt.json",
+            "AWA_TEST_PRIOR_RECEIPT": "/outer/prior-receipt.json",
+        }
+        with mock.patch.dict(
+            os.environ, outer_receipts
+        ), _isolated_main_environment(), mock.patch.object(
             suite_runner, "run_serial", return_value=serial_result
-        ) as serial, mock.patch.object(suite_runner, "run_parallel") as parallel:
+        ) as serial, mock.patch.object(
+            suite_runner, "run_parallel"
+        ) as parallel:
             self.assertEqual(suite_runner.main(("--", _TEST_A)), 0)
         serial.assert_called_once()
         parallel.assert_not_called()
 
     def test_parallel_cli_writes_valid_jobs_two_receipt(self) -> None:
         identity = {"head": "a" * 40, "clean": True}
-        with mock.patch.object(
+        with _isolated_main_environment(), mock.patch.object(
             suite_runner, "source_identity", return_value=identity
         ), mock.patch.object(
             suite_runner, "runner_digest", return_value="b" * 64
@@ -593,9 +617,8 @@ class ParallelEquivalenceTest(unittest.TestCase):
         ) as temporary:
             target = Path(temporary) / "prior.json"
             target.write_text(json.dumps(prior), encoding="utf-8")
-            with mock.patch.dict(
-                os.environ,
-                {"AWA_TEST_PRIOR_RECEIPT": str(target)},
+            with _isolated_main_environment(
+                AWA_TEST_PRIOR_RECEIPT=str(target)
             ), mock.patch.object(
                 suite_runner,
                 "run_parallel",
@@ -616,9 +639,8 @@ class ParallelEquivalenceTest(unittest.TestCase):
             target = Path(temporary) / "prior.json"
             target.write_text("not-json", encoding="utf-8")
             stderr = io.StringIO()
-            with mock.patch.dict(
-                os.environ,
-                {"AWA_TEST_PRIOR_RECEIPT": str(target)},
+            with _isolated_main_environment(
+                AWA_TEST_PRIOR_RECEIPT=str(target)
             ), mock.patch.object(
                 suite_runner, "run_parallel"
             ) as parallel, mock.patch.object(
@@ -777,7 +799,7 @@ class ParallelEquivalenceTest(unittest.TestCase):
 
     def test_cli_parallel_failfast_refuses_and_jobs_one_remains_serial(self) -> None:
         stderr = io.StringIO()
-        with mock.patch.object(
+        with _isolated_main_environment(), mock.patch.object(
             suite_runner, "_launch_worker"
         ) as launch, mock.patch.object(suite_runner.sys, "stderr", stderr):
             result = suite_runner.main(
@@ -788,7 +810,7 @@ class ParallelEquivalenceTest(unittest.TestCase):
         launch.assert_not_called()
 
         serial_result = {"outcome": "passed"}
-        with mock.patch.object(
+        with _isolated_main_environment(), mock.patch.object(
             suite_runner, "run_serial", return_value=serial_result
         ) as serial, mock.patch.object(suite_runner, "run_parallel") as parallel:
             self.assertEqual(
