@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from engine import guard, lifecycle
+from engine.tests.guard_boundary_profile import GUARD_BOUNDARY_CASES
 from engine.tests.git_guard_command_corpus import (
     GIT_MUTATING_FAMILY_COMMANDS,
     GIT_READONLY_FAMILY_COMMANDS,
@@ -326,6 +327,25 @@ class TestDecideShellDegraded(EngineTestCase):
         pol = self._policy_for(self._tmp.name)
         d = guard.decide_shell(repo, "git status", pol)
         self.assertEqual(d.permission, "allow")
+
+    def test_m3_profile_manifest_matches_engine_permissions(self):
+        for index, case in enumerate(GUARD_BOUNDARY_CASES):
+            with self.subTest(case=case.label):
+                repo, remote, pol = self._maintenance_repo(
+                    "m3-profile-{0}".format(index)
+                )
+                if case.state_fixture != "clean":
+                    self._apply_primary_maintenance_state(
+                        repo,
+                        remote,
+                        case.state_fixture,
+                    )
+                decision = guard.decide_shell(repo, case.command, pol)
+                self.assertEqual(
+                    decision.permission,
+                    case.expected_permission,
+                    (case.label, decision.reason),
+                )
 
     def test_primary_allows_readonly_git_family_forms(self):
         repo = self.make_repo()
