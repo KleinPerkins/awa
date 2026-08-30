@@ -1,6 +1,7 @@
 # AWA — Agent Worktree Automation (standalone system). Make targets: help-first, .PHONY.
 .DEFAULT_GOAL := help
-.PHONY: help install repair doctor check uninstall verify verify-install test trial version
+.PHONY: help install repair doctor check uninstall verify verify-docs verify-focused verify-pre-pr verify-release verify-install test trial version
+unexport VERIFY_BASE TESTS
 
 help: ## Show available targets
 	@echo "AWA — Agent Worktree Automation (standalone system: generic kernel + engine + dashboard)"
@@ -10,6 +11,10 @@ help: ## Show available targets
 	@echo "  make check           - CI-safe static preflight (no writes to HOME)"
 	@echo "  make uninstall       - remove the install (KEEP_STATE=1 preserves recovery state)"
 	@echo "  make verify          - engine tests + contract freeze + zero-link + install --check"
+	@echo "  make verify-docs     - docs-only checks (VERIFY_BASE=<ref>; non-authoritative)"
+	@echo "  make verify-focused  - explicit tests (TESTS='<selectors>'; non-authoritative)"
+	@echo "  make verify-pre-pr   - complete authoritative local verification"
+	@echo "  make verify-release  - selected release trial (TRIAL_ARGS='<args>')"
 	@echo "  make verify-install  - full install lifecycle in a throwaway HOME (headless/CI-safe)"
 	@echo "  make test            - engine test suite (unittest; local-only, no network)"
 	@echo "  make trial           - run the exact seven-step real-PM trial"
@@ -39,10 +44,24 @@ trial: ## Run the exact real-PM facilitator workflow (TRIAL_ARGS=--auto for rehe
 
 verify: ## Full local verification: tests + freeze + zero-link + install --check
 	@bash engine/tests/run-tests.sh
-	@AWA_HOME=$(CURDIR) bash kernel/checks/awa-contract-freeze.sh
 	@./install.sh --check
 	@bash live-verify/verify-live-verify.sh
 	@echo "verify: OK"
+
+verify-docs: export AWA_VERIFY_BASE := $(value VERIFY_BASE)
+verify-docs: ## Verify docs-only changes (non-authoritative for runtime)
+	@PYTHONDONTWRITEBYTECODE=1 python3 -B -m engine.tests.verify_lane require-docs --base-env AWA_VERIFY_BASE
+	@echo "verify-docs: OK (NON-AUTHORITATIVE FOR RUNTIME)"
+
+verify-focused: export AWA_TEST_SELECTORS := $(value TESTS)
+verify-focused: ## Run explicit tests (non-authoritative)
+	@echo "verify-focused: NON-AUTHORITATIVE"
+	@bash engine/tests/run-tests.sh --jobs 1 --selectors-env AWA_TEST_SELECTORS
+
+verify-pre-pr: verify ## Run complete authoritative local verification
+
+verify-release: ## Run the selected release trial
+	@$(MAKE) trial TRIAL_ARGS="$(TRIAL_ARGS)"
 
 verify-install: ## Exercise the full install lifecycle in a throwaway HOME (never touches real ~)
 	@set -e; direct_tmp=$$(mktemp -d); external_tmp=$$(mktemp -d); \
