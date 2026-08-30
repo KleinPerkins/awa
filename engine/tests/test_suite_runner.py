@@ -1,4 +1,4 @@
-"""M1-A verification-runner contract tests."""
+"""M1/M2 verification-runner contract tests."""
 
 from __future__ import annotations
 
@@ -193,11 +193,13 @@ class SuiteRunnerTest(unittest.TestCase):
             ],
         )
 
-    def test_worker_count_other_than_one_is_refused_in_m1(self) -> None:
-        self.assertEqual(suite_runner.validate_jobs(1), 1)
-        for value in (0, 2, 4):
+    def test_worker_count_accepts_only_one_two_or_four(self) -> None:
+        for value in (1, 2, 4):
             with self.subTest(value=value):
-                with self.assertRaisesRegex(ValueError, "M2 sharding is not enabled"):
+                self.assertEqual(suite_runner.validate_jobs(value), value)
+        for value in (0, 3, 5, True, "2"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "one of 1, 2, or 4"):
                     suite_runner.validate_jobs(value)
 
     def test_existing_unittest_flags_remain_compatible(self) -> None:
@@ -228,6 +230,12 @@ class SuiteRunnerTest(unittest.TestCase):
             ("--", _REDACT_MODULE),
             (_REDACT_MODULE, "--failfast"),
             ("--", "-k", "secret_assignment"),
+            (
+                "--worker-module",
+                _REDACT_MODULE,
+                "--worker-json",
+                "/tmp/worker.json",
+            ),
         )
         for args in full_cases:
             with self.subTest(args=args):
@@ -277,6 +285,7 @@ class SuiteRunnerTest(unittest.TestCase):
                     ("--jobs", "1", "--json-out", str(root / "receipt.json")),
                     True,
                 ),
+                ("full", ("--jobs", "2"), True),
                 ("filtered", ("--", _REDACT_MODULE), False),
             )
             for scope, args, expect_dashboard in cases:
@@ -301,10 +310,10 @@ class SuiteRunnerTest(unittest.TestCase):
                         env=env,
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    dashboard_ran = "dashboard/test_emitter.py" in log.read_text(
+                    dashboard_runs = log.read_text(
                         encoding="utf-8"
-                    )
-                    self.assertEqual(dashboard_ran, expect_dashboard)
+                    ).count("dashboard/test_emitter.py")
+                    self.assertEqual(dashboard_runs, 1 if expect_dashboard else 0)
 
     def test_unknown_unittest_flag_fails_loudly(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported unittest argument"):
