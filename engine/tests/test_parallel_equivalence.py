@@ -585,6 +585,54 @@ class ParallelEquivalenceTest(unittest.TestCase):
         self.assertEqual(receipt["test_count"], 2)
         self.assertIn("--jobs", receipt["context"]["command"])
 
+    def test_parallel_cli_loads_validated_prior_receipt(self) -> None:
+        prior = _prior_receipt()
+        parallel_result = {"outcome": "passed"}
+        with tempfile.TemporaryDirectory(
+            prefix="awa-parallel-prior."
+        ) as temporary:
+            target = Path(temporary) / "prior.json"
+            target.write_text(json.dumps(prior), encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {"AWA_TEST_PRIOR_RECEIPT": str(target)},
+            ), mock.patch.object(
+                suite_runner,
+                "run_parallel",
+                return_value=parallel_result,
+            ) as parallel:
+                self.assertEqual(
+                    suite_runner.main(
+                        ("--jobs", "2", "--", _TEST_A, _TEST_B)
+                    ),
+                    0,
+                )
+        self.assertEqual(parallel.call_args.args[2], prior)
+
+    def test_parallel_cli_rejects_malformed_prior_before_worker_launch(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="awa-parallel-prior."
+        ) as temporary:
+            target = Path(temporary) / "prior.json"
+            target.write_text("not-json", encoding="utf-8")
+            stderr = io.StringIO()
+            with mock.patch.dict(
+                os.environ,
+                {"AWA_TEST_PRIOR_RECEIPT": str(target)},
+            ), mock.patch.object(
+                suite_runner, "run_parallel"
+            ) as parallel, mock.patch.object(
+                suite_runner.sys, "stderr", stderr
+            ):
+                self.assertEqual(
+                    suite_runner.main(
+                        ("--jobs", "2", "--", _TEST_A, _TEST_B)
+                    ),
+                    2,
+                )
+        parallel.assert_not_called()
+        self.assertIn("prior receipt is malformed JSON", stderr.getvalue())
+
     def test_completed_peer_is_reaped_when_another_worker_times_out(self) -> None:
         ids_b = suite_runner.discover_test_ids((_MODULE_B,))
         processes = []

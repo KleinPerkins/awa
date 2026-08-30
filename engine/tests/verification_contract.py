@@ -15,6 +15,7 @@ from collections.abc import Mapping
 
 RECEIPT_SCHEMA = "awa-test-receipt/v1"
 WORKER_SCHEMA = "awa-test-worker/v1"
+MAX_RECEIPT_JSON_BYTES = 8 * 1024 * 1024
 MAX_WORKER_JSON_BYTES = 8 * 1024 * 1024
 OUTCOMES = (
     "passed",

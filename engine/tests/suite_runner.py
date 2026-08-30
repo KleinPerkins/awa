@@ -38,6 +38,7 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MODULE_NAME = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$"
 )
+_PRIOR_RECEIPT_ENV = "AWA_TEST_PRIOR_RECEIPT"
 _WORKER_SELECTION_ENV = "AWA_TEST_WORKER_SELECTION"
 _WORKER_SELECTION_SCHEMA = "awa-test-worker-selection/v1"
 _WORKER_POLL_SECONDS = 0.01
@@ -804,6 +805,7 @@ def _worker_environment(root: Path, selection: Path) -> dict:
     for name, path in private_roots.items():
         environment[name] = str(path)
     environment[_WORKER_SELECTION_ENV] = str(selection)
+    environment.pop(_PRIOR_RECEIPT_ENV, None)
     environment.pop("AWA_TEST_RECEIPT", None)
     pythonpath = environment.get("PYTHONPATH")
     environment["PYTHONPATH"] = str(REPO_ROOT) + (
@@ -1393,6 +1395,21 @@ def _receipt_target(arguments: RunnerArguments) -> Optional[Path]:
     return arguments.json_out or (Path(from_environment) if from_environment else None)
 
 
+def _prior_receipt_from_environment() -> Optional[dict]:
+    raw = os.environ.get(_PRIOR_RECEIPT_ENV)
+    if raw is None:
+        return None
+    if not raw:
+        raise ValueError(f"{_PRIOR_RECEIPT_ENV} must be a non-empty path")
+    value = _read_bounded_json(
+        Path(raw),
+        verification_contract.MAX_RECEIPT_JSON_BYTES,
+        "prior receipt",
+    )
+    verification_contract.validate_receipt(value)
+    return dict(value)
+
+
 def _arguments_from_environment(arguments: RunnerArguments) -> Tuple[str, ...]:
     if arguments.selectors_env is None:
         return arguments.unittest_args
@@ -1525,10 +1542,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 options=options,
             )
         else:
+            prior_receipt = _prior_receipt_from_environment()
             result = run_parallel(
                 options.selectors,
                 arguments.jobs,
-                None,
+                prior_receipt,
                 sys.stderr,
                 options=options,
             )
