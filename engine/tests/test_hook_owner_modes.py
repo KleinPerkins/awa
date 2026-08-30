@@ -15,6 +15,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from engine.tests.guard_boundary_profile import (
+    GUARD_BOUNDARY_CASES,
+    run_owner_mode_cases,
+)
 from engine.tests.git_guard_command_corpus import (
     GIT_MUTATING_FAMILY_COMMANDS,
     GIT_READONLY_FAMILY_COMMANDS,
@@ -667,6 +671,17 @@ class TestHookOwnerParity(unittest.TestCase):
                 self.assertEqual(direct["permission"], "deny")
                 self.assertEqual(
                     set(direct), {"permission", "user_message", "agent_message"})
+
+    def test_m3_profile_manifest_matches_owner_paths(self):
+        report = run_owner_mode_cases(GUARD_BOUNDARY_CASES)
+        self.assertTrue(report["passed"])
+        self.assertEqual(
+            report["outcomes"],
+            {
+                case.label: case.expected_permission
+                for case in GUARD_BOUNDARY_CASES
+            },
+        )
 
     def test_hook_fail_open_and_after_file_edit_policy_match_both_paths(self):
         direct_edit = self.run_guard(

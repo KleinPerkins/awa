@@ -23,6 +23,7 @@ from unittest import mock
 
 from consumer import finish_current as finish_ux
 from engine import guard as engine_guard
+from engine.tests.guard_boundary_profile import GUARD_BOUNDARY_CASES
 from engine.tests.git_guard_command_corpus import (
     GIT_MUTATING_FAMILY_COMMANDS,
     GIT_READONLY_FAMILY_COMMANDS,
@@ -430,6 +431,36 @@ class TestBashGuardWrapperParity(unittest.TestCase):
                 self.assertEqual(engine.permission, "allow", (case, engine.reason))
                 self.assertEqual(source, {"permission": "allow"}, case)
                 self.assertEqual(role_resolved, {"permission": "allow"}, case)
+
+    def test_m3_profile_manifest_matches_source_and_installed_permissions(self):
+        installed = self._install_guard()
+        for index, case in enumerate(GUARD_BOUNDARY_CASES):
+            with self.subTest(case=case.label):
+                repo, remote = self._make_maintenance_repo(
+                    "m3-profile-{0}".format(index)
+                )
+                if case.state_fixture != "clean":
+                    self._apply_primary_maintenance_state(
+                        repo,
+                        remote,
+                        case.state_fixture,
+                    )
+                source = self._guard(case.command, repo=repo)
+                role_resolved = self._guard(
+                    case.command,
+                    repo=repo,
+                    guard_path=installed,
+                )
+                self.assertEqual(
+                    source.get("permission"),
+                    case.expected_permission,
+                    (case.label, source),
+                )
+                self.assertEqual(
+                    role_resolved.get("permission"),
+                    case.expected_permission,
+                    (case.label, role_resolved),
+                )
 
     def test_hook_internal_parser_failure_still_fails_open(self):
         shim_dir = self.root / "python-failure-shim"

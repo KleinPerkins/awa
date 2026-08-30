@@ -15,8 +15,10 @@ from collections.abc import Mapping
 
 RECEIPT_SCHEMA = "awa-test-receipt/v1"
 WORKER_SCHEMA = "awa-test-worker/v1"
+GUARD_BOUNDARY_PROFILE_SCHEMA = "awa-guard-boundary-profile/v1"
 MAX_RECEIPT_JSON_BYTES = 8 * 1024 * 1024
 MAX_WORKER_JSON_BYTES = 8 * 1024 * 1024
+MAX_GUARD_BOUNDARY_PROFILE_JSON_BYTES = 1024 * 1024
 OUTCOMES = (
     "passed",
     "failure",
@@ -77,6 +79,30 @@ WORKER_KEYS = frozenset(
         "elapsed_ms",
         "resource",
     }
+)
+GUARD_BOUNDARY_PROFILE_KEYS = frozenset(
+    {
+        "schema",
+        "boundary",
+        "producer_sha256",
+        "case_manifest_sha256",
+        "case_ids",
+        "outcomes",
+        "expected_outcomes",
+        "case_elapsed_ms",
+        "case_git_processes",
+        "elapsed_ms",
+        "git_processes",
+        "counter_scope",
+        "passed",
+    }
+)
+GUARD_BOUNDARIES = ("engine", "source", "installed", "owner")
+GUARD_PERMISSIONS = ("allow", "deny", "ask")
+GUARD_PROFILE_OUTCOMES = GUARD_PERMISSIONS + ("error",)
+GUARD_GIT_COUNTER_SCOPES = (
+    "not counted",
+    "PATH-resolved git children only",
 )
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -355,3 +381,143 @@ def validate_receipt(value: object) -> None:
     expected_reusable = stable and run["outcome"] == "passed"
     if reusable != expected_reusable:
         raise ContractError("receipt.reusable is inconsistent with source/run state")
+
+
+def validate_guard_boundary_profile(value: object) -> None:
+    """Validate one bounded ``awa-guard-boundary-profile/v1`` document."""
+
+    profile = _require_exact_keys(
+        value,
+        GUARD_BOUNDARY_PROFILE_KEYS,
+        "guard boundary profile",
+    )
+    _require_literal(
+        profile["schema"],
+        GUARD_BOUNDARY_PROFILE_SCHEMA,
+        "guard boundary profile.schema",
+    )
+    boundary = _require_string(
+        profile["boundary"],
+        "guard boundary profile.boundary",
+    )
+    if boundary not in GUARD_BOUNDARIES:
+        raise ContractError("guard boundary profile.boundary is not recognized")
+    _require_sha256(
+        profile["producer_sha256"],
+        "guard boundary profile.producer_sha256",
+    )
+    _require_sha256(
+        profile["case_manifest_sha256"],
+        "guard boundary profile.case_manifest_sha256",
+    )
+
+    case_ids = _require_string_list(
+        profile["case_ids"],
+        "guard boundary profile.case_ids",
+    )
+    if not case_ids:
+        raise ContractError("guard boundary profile.case_ids must not be empty")
+    if case_ids != sorted(case_ids) or len(case_ids) != len(set(case_ids)):
+        raise ContractError(
+            "guard boundary profile.case_ids must be sorted and unique"
+        )
+    expected_keys = frozenset(case_ids)
+
+    def require_case_mapping(raw: object, label: str) -> Mapping:
+        mapping = _require_mapping(raw, label)
+        if frozenset(mapping) != expected_keys:
+            raise ContractError(f"{label} keys must exactly match case_ids")
+        return mapping
+
+    outcomes = require_case_mapping(
+        profile["outcomes"],
+        "guard boundary profile.outcomes",
+    )
+    expected_outcomes = require_case_mapping(
+        profile["expected_outcomes"],
+        "guard boundary profile.expected_outcomes",
+    )
+    for case_id in case_ids:
+        outcome = _require_string(
+            outcomes[case_id],
+            f"guard boundary profile.outcomes.{case_id}",
+        )
+        if outcome not in GUARD_PROFILE_OUTCOMES:
+            raise ContractError(
+                f"guard boundary profile.outcomes.{case_id} is not recognized"
+            )
+        expected = _require_string(
+            expected_outcomes[case_id],
+            f"guard boundary profile.expected_outcomes.{case_id}",
+        )
+        if expected not in GUARD_PERMISSIONS:
+            raise ContractError(
+                "guard boundary profile.expected_outcomes."
+                f"{case_id} is not recognized"
+            )
+
+    case_elapsed = require_case_mapping(
+        profile["case_elapsed_ms"],
+        "guard boundary profile.case_elapsed_ms",
+    )
+    case_git = require_case_mapping(
+        profile["case_git_processes"],
+        "guard boundary profile.case_git_processes",
+    )
+    for case_id in case_ids:
+        _require_nonnegative_int(
+            case_elapsed[case_id],
+            f"guard boundary profile.case_elapsed_ms.{case_id}",
+        )
+        _require_nonnegative_int(
+            case_git[case_id],
+            f"guard boundary profile.case_git_processes.{case_id}",
+        )
+
+    elapsed_ms = _require_nonnegative_int(
+        profile["elapsed_ms"],
+        "guard boundary profile.elapsed_ms",
+    )
+    git_processes = _require_nonnegative_int(
+        profile["git_processes"],
+        "guard boundary profile.git_processes",
+    )
+    if elapsed_ms != sum(case_elapsed.values()):
+        raise ContractError(
+            "guard boundary profile.elapsed_ms must sum case_elapsed_ms"
+        )
+    if git_processes != sum(case_git.values()):
+        raise ContractError(
+            "guard boundary profile.git_processes must sum case_git_processes"
+        )
+
+    counter_scope = _require_string(
+        profile["counter_scope"],
+        "guard boundary profile.counter_scope",
+    )
+    if counter_scope not in GUARD_GIT_COUNTER_SCOPES:
+        raise ContractError(
+            "guard boundary profile.counter_scope is not recognized"
+        )
+    if counter_scope == "not counted" and git_processes != 0:
+        raise ContractError(
+            "an uncounted guard boundary profile must report zero Git processes"
+        )
+
+    passed = _require_bool(
+        profile["passed"],
+        "guard boundary profile.passed",
+    )
+    if passed != (dict(outcomes) == dict(expected_outcomes)):
+        raise ContractError(
+            "guard boundary profile.passed is inconsistent with outcomes"
+        )
+
+    encoded = json.dumps(
+        profile,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if len(encoded) > MAX_GUARD_BOUNDARY_PROFILE_JSON_BYTES:
+        raise ContractError("guard boundary profile document is too large")
