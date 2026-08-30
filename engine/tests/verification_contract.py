@@ -7,11 +7,15 @@ verification step or any AWA safety/lifecycle decision.
 from __future__ import annotations
 
 import datetime as _datetime
+import hashlib
+import json
 import re
 from collections.abc import Mapping
 
 
 RECEIPT_SCHEMA = "awa-test-receipt/v1"
+WORKER_SCHEMA = "awa-test-worker/v1"
+MAX_WORKER_JSON_BYTES = 8 * 1024 * 1024
 OUTCOMES = (
     "passed",
     "failure",
@@ -62,9 +66,21 @@ CONTEXT_KEYS = frozenset(
     }
 )
 RESOURCE_KEYS = frozenset({"user_ms", "system_ms", "max_rss_kb"})
+WORKER_KEYS = frozenset(
+    {
+        "schema",
+        "module",
+        "inventory_sha256",
+        "records",
+        "outcome",
+        "elapsed_ms",
+        "resource",
+    }
+)
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_OID = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
+_MODULE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
 
 class ContractError(ValueError):
@@ -143,6 +159,13 @@ def _require_git_oid(value: object, label: str) -> str:
     return text
 
 
+def _require_module_name(value: object, label: str) -> str:
+    text = _require_string(value, label)
+    if not _MODULE_NAME.fullmatch(text):
+        raise ContractError(f"{label} must be a dotted Python module name")
+    return text
+
+
 def _validate_record(value: object, index: int) -> Mapping:
     label = f"records[{index}]"
     record = _require_exact_keys(value, RECORD_KEYS, label)
@@ -181,6 +204,13 @@ def _validate_run(value: object) -> Mapping:
     return run
 
 
+def _validate_resource(value: object, label: str) -> Mapping:
+    resource = _require_exact_keys(value, RESOURCE_KEYS, label)
+    for name in RESOURCE_KEYS:
+        _require_nonnegative_int(resource[name], f"{label}.{name}")
+    return resource
+
+
 def _validate_context(value: object) -> Mapping:
     context = _require_exact_keys(value, CONTEXT_KEYS, "context")
     _require_string_list(context["command"], "context.command")
@@ -200,12 +230,65 @@ def _validate_context(value: object) -> Mapping:
         raise ContractError("context.generated_at_utc must be ISO-8601") from exc
     if parsed.tzinfo is None:
         raise ContractError("context.generated_at_utc must include a timezone")
-    resource = _require_exact_keys(
-        context["resource"], RESOURCE_KEYS, "context.resource"
-    )
-    for name in RESOURCE_KEYS:
-        _require_nonnegative_int(resource[name], f"context.resource.{name}")
+    _validate_resource(context["resource"], "context.resource")
     return context
+
+
+def validate_worker(value: object) -> None:
+    """Validate one bounded ``awa-test-worker/v1`` document."""
+
+    worker = _require_exact_keys(value, WORKER_KEYS, "worker")
+    _require_literal(worker["schema"], WORKER_SCHEMA, "worker.schema")
+    _require_module_name(worker["module"], "worker.module")
+    inventory_sha256 = _require_sha256(
+        worker["inventory_sha256"], "worker.inventory_sha256"
+    )
+    records = worker["records"]
+    if not isinstance(records, list):
+        raise ContractError("worker.records must be an array")
+    for index, record in enumerate(records):
+        _validate_record(record, index)
+        if record["module"] != worker["module"]:
+            raise ContractError(
+                f"worker.records[{index}].module must match worker.module"
+            )
+    ids = [record["test_id"] for record in records]
+    if ids != sorted(ids):
+        raise ContractError("worker.records must be sorted by test_id")
+    if len(ids) != len(set(ids)):
+        raise ContractError("worker.records contain a duplicate test_id")
+    outcome = _require_string(worker["outcome"], "worker.outcome")
+    if outcome not in RUN_OUTCOMES:
+        raise ContractError("worker.outcome is not recognized")
+    counts = {name: 0 for name in OUTCOMES}
+    for record in records:
+        counts[record["outcome"]] += 1
+    expected_outcome = "passed"
+    if counts["error"]:
+        expected_outcome = "error"
+    elif counts["failure"] or counts["unexpected_success"]:
+        expected_outcome = "failure"
+    if outcome != expected_outcome:
+        raise ContractError(
+            "worker.outcome is inconsistent with worker.records"
+        )
+    if outcome == "passed":
+        encoded_inventory = "\n".join(ids).encode("utf-8")
+        expected_digest = hashlib.sha256(encoded_inventory).hexdigest()
+        if inventory_sha256 != expected_digest:
+            raise ContractError(
+                "worker.inventory_sha256 is inconsistent with worker.records"
+            )
+    _require_nonnegative_int(worker["elapsed_ms"], "worker.elapsed_ms")
+    _validate_resource(worker["resource"], "worker.resource")
+    encoded = json.dumps(
+        worker,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if len(encoded) > MAX_WORKER_JSON_BYTES:
+        raise ContractError("worker document is too large")
 
 
 def validate_receipt(value: object) -> None:

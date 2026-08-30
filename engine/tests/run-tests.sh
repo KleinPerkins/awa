@@ -21,12 +21,15 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OB
 
 cd "$AWA_PKG_PARENT"
 rc=0
+# M2-A keeps the runner's literal jobs=1 default. Parallel verification is
+# opt-in with an explicit --jobs 2 or --jobs 4 until a later promotion decision.
 PYTHONPATH="$AWA_PKG_PARENT${PYTHONPATH:+:$PYTHONPATH}" \
   python3 -B -m engine.tests.suite_runner "$@" || rc=$?
 
+# Classify only after the engine run (including worker aggregation) succeeds.
 # Runner-only flags still execute the full inventory and must not suppress the
-# dashboard gate. Ask the runner's parser instead of duplicating its grammar in
-# Bash; a classifier error fails closed rather than silently dropping coverage.
+# one dashboard gate. Ask the runner's parser instead of duplicating its grammar
+# in Bash; a classifier error fails closed rather than silently dropping coverage.
 dashboard_scope="filtered"
 if [ "$rc" -eq 0 ]; then
   dashboard_scope="$(
