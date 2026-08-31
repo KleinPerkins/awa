@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -692,6 +695,157 @@ class TestEmitterDetailProfiles(_EmitterModeTestBase):
                 source = path.read_text(encoding="utf-8")
                 for needle in forbidden:
                     self.assertNotIn(needle, source, f"{needle!r} in {path}")
+
+
+class TestBoundedDeepEnrichment(_EmitterModeTestBase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = Path(_make_repo(self.root, "included/alpha"))
+        self._write_policy(
+            "version: 1\n"
+            "default: advisory\n"
+            "default_mode: on\n"
+            "include:\n"
+            "  - included/*\n"
+        )
+
+    def _item(self, index: int = 0) -> dict:
+        value = {
+            "path": str(self.repo),
+            "branch": "main",
+            "head": f"head-{index}",
+            "ahead": 0,
+            "behind": 0,
+            "ab_status": "even",
+            "is_primary": True,
+            "is_linked": False,
+            "last_commit_ts": None,
+            "last_commit_subject": None,
+            "size_bytes": None,
+            "plain_size": "not checked",
+            "enrichment_state": "not_checked",
+        }
+        return emitter.display_item("worktree", value, str(self.repo))
+
+    def test_worker_choices_are_closed(self) -> None:
+        for workers in (0, 3, 8):
+            with self.subTest(workers=workers), \
+                    self.assertRaisesRegex(ValueError, "1, 2, or 4"):
+                emitter.enrich_many([], 1.0, workers)
+
+    def test_completion_order_cannot_change_output_order(self) -> None:
+        items = [self._item(index) for index in range(4)]
+
+        def identity(item: dict, timeout: float) -> tuple:
+            del timeout
+            return ("identity", item["value"]["head"])
+
+        def reverse_completion(item: dict, timeout: float) -> dict:
+            del timeout
+            index = int(item["value"]["head"].split("-")[1])
+            time.sleep((3 - index) * 0.01)
+            value = dict(item["value"])
+            value["last_commit_subject"] = f"result-{index}"
+            value["enrichment_state"] = "checked"
+            return value
+
+        with mock.patch.object(
+            emitter, "read_display_identity", side_effect=identity,
+        ), mock.patch.object(
+            emitter, "_enrich_one", side_effect=reverse_completion,
+        ):
+            result = emitter.enrich_many(items, 1.0, 4)
+        self.assertEqual(
+            [value["last_commit_subject"] for value in result],
+            [f"result-{index}" for index in range(4)],
+        )
+
+    def test_exception_and_identity_drift_are_unknown_and_nulled(self) -> None:
+        item = self._item()
+        clean_identity = ("path", "common", "head", "status")
+        drifted_identity = ("path", "common", "new-head", "status")
+        failures = (
+            (
+                mock.patch.object(
+                    emitter, "_enrich_one",
+                    side_effect=OSError("secret raw fixture exception"),
+                ),
+                [clean_identity],
+            ),
+            (
+                mock.patch.object(
+                    emitter, "_enrich_one",
+                    return_value={
+                        **item["value"],
+                        "size_bytes": 123,
+                        "plain_size": "123 KB",
+                        "last_commit_ts": "2026-08-31T00:00:00Z",
+                        "last_commit_subject": "must be discarded",
+                        "enrichment_state": "checked",
+                    },
+                ),
+                [clean_identity, drifted_identity],
+            ),
+        )
+        for enrichment, identities in failures:
+            with self.subTest(identities=identities), enrichment, \
+                    mock.patch.object(
+                        emitter, "read_display_identity", side_effect=identities,
+                    ):
+                value = emitter.enrich_many([item], 1.0, 1)[0]
+            self.assertEqual(value["enrichment_state"], "unknown")
+            self.assertIsNone(value["size_bytes"])
+            self.assertEqual(value["plain_size"], "not available")
+            self.assertIsNone(value["last_commit_ts"])
+            self.assertIsNone(value["last_commit_subject"])
+            self.assertNotIn("secret raw fixture", json.dumps(value))
+
+    def test_identity_binds_path_common_dir_head_and_status_digest(self) -> None:
+        item = self._item()
+        identity = emitter.read_display_identity(item, 30.0)
+        self.assertEqual(
+            set(identity),
+            {
+                "canonical_path", "common_git_dir", "head",
+                "inventory_status_sha256",
+            },
+        )
+        self.assertEqual(identity["canonical_path"], str(self.repo.resolve()))
+        self.assertRegex(identity["head"], r"^[0-9a-f]{40,64}$")
+        self.assertRegex(identity["inventory_status_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_worker_threads_are_gone_when_enrichment_returns(self) -> None:
+        with mock.patch.object(
+            emitter, "read_display_identity",
+            return_value=("path", "common", "head", "status"),
+        ), mock.patch.object(
+            emitter, "_enrich_one", return_value=self._item()["value"],
+        ):
+            emitter.enrich_many([self._item(index) for index in range(4)], 1.0, 4)
+        self.assertFalse([
+            thread.name for thread in threading.enumerate()
+            if thread.name.startswith("awa-dashboard-enrich")
+        ])
+
+    def test_deep_output_is_exact_across_worker_choices(self) -> None:
+        _make_repo(self.root, "included/zeta")
+
+        def normalized(doc: dict) -> dict:
+            value = json.loads(json.dumps(doc))
+            value["generated_at"] = "<TIMESTAMP>"
+            return value
+
+        serial = normalized(
+            emitter.build(self.root, timeout=30.0, detail="deep", workers=1),
+        )
+        for workers in (2, 4):
+            with self.subTest(workers=workers):
+                self.assertEqual(
+                    normalized(emitter.build(
+                        self.root, timeout=30.0, detail="deep", workers=workers,
+                    )),
+                    serial,
+                )
 
 
 def load_tests(
