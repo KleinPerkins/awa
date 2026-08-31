@@ -745,7 +745,7 @@ PY
      ! grep -q '/Users/' "$SRC_ROOT/dashboard/seed.canvas.tsx"; then
     echo "  PASS  dashboard seed + background refresh sources present and data-free"
   else echo "  FAIL  dashboard refresh sources carry data / are missing"; rc=1; fi
-  if AWA_HOME="$SRC_ROOT" "$SRC_ROOT/kernel/checks/awa-contract-freeze.sh" >/dev/null 2>&1; then
+  if AWA_HOME="$SRC_ROOT" /bin/bash "$SRC_ROOT/kernel/checks/awa-contract-freeze.sh" >/dev/null 2>&1; then
     echo "  PASS  kernel satisfies the frozen behavior contract"
   else echo "  FAIL  kernel drifted from frozen contract"; rc=1; fi
   if [ "$rc" -eq 0 ]; then echo "awa --check: OK"; else echo "awa --check: FAILED"; fi

@@ -1,6 +1,6 @@
 # AWA — Agent Worktree Automation (standalone system). Make targets: help-first, .PHONY.
 .DEFAULT_GOAL := help
-.PHONY: help install repair doctor check uninstall verify verify-docs verify-focused verify-pre-pr verify-release verify-install verify-guard-installed-full test trial version
+.PHONY: help install repair doctor check uninstall verify verify-docs verify-focused verify-pre-pr verify-performance verify-release verify-install verify-guard-installed-full test trial version
 unexport VERIFY_BASE TESTS
 
 help: ## Show available targets
@@ -14,6 +14,7 @@ help: ## Show available targets
 	@echo "  make verify-docs     - docs-only checks (VERIFY_BASE=<ref>; non-authoritative)"
 	@echo "  make verify-focused  - explicit tests (TESTS='<selectors>'; non-authoritative)"
 	@echo "  make verify-pre-pr   - complete authoritative local verification"
+	@echo "  make verify-performance - full gate + explicit advisory process profile"
 	@echo "  make verify-release  - selected release trial (TRIAL_ARGS='<args>')"
 	@echo "  make verify-install  - full install lifecycle in a throwaway HOME (headless/CI-safe)"
 	@echo "  make verify-guard-installed-full - complete serial installed-guard fallback"
@@ -44,15 +45,31 @@ trial: ## Run the exact real-PM facilitator workflow (TRIAL_ARGS=--auto for rehe
 	  $(if $(TRIAL_FACILITATOR_LOG),--facilitator-log "$(TRIAL_FACILITATOR_LOG)",) $(TRIAL_ARGS)
 
 verify: ## Full local verification: tests + freeze + zero-link + install --check
-	@bash engine/tests/run-tests.sh
-	@./install.sh --check
-	@bash live-verify/verify-live-verify.sh
-	@echo "verify: OK"
+	@set -e; external_receipt="$${AWA_PERFORMANCE_RECEIPT:-}"; \
+	  receipt="$$external_receipt"; \
+	  if [ -z "$$receipt" ]; then receipt=$$(mktemp "$${TMPDIR:-/tmp}/awa-performance-receipt.XXXXXX"); fi; \
+	  trap 'if [ -z "$$external_receipt" ]; then rm -f "$$receipt"; fi' EXIT; \
+	  AWA_TEST_RECEIPT="$$receipt" AWA_TEST_LANE=pre-pr bash engine/tests/run-tests.sh; \
+	  ./install.sh --check; \
+	  bash live-verify/verify-live-verify.sh; \
+	  echo "verify: OK"; \
+	  if [ "$${AWA_PERFORMANCE_WARNINGS_DISABLED:-0}" != "1" ]; then \
+	    elapsed=$$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run"]["elapsed_ms"])' "$$receipt"); \
+	    python3 -B -m engine.tests.performance_policy evaluate-lane --lane pre-pr --elapsed-ms "$$elapsed" --receipt "$$receipt"; \
+	  fi
 
 verify-docs: export AWA_VERIFY_BASE := $(value VERIFY_BASE)
 verify-docs: ## Verify docs-only changes (non-authoritative for runtime)
-	@PYTHONDONTWRITEBYTECODE=1 python3 -B -m engine.tests.verify_lane require-docs --base-env AWA_VERIFY_BASE
-	@echo "verify-docs: OK (NON-AUTHORITATIVE FOR RUNTIME)"
+	@set -e; manifest=$$(mktemp "$${TMPDIR:-/tmp}/awa-docs-manifest.XXXXXX"); \
+	  trap 'rm -f "$$manifest"' EXIT; \
+	  start=$$(python3 -c 'import time; print(time.monotonic_ns())'); \
+	  PYTHONDONTWRITEBYTECODE=1 python3 -B -m engine.tests.verify_lane require-docs --base-env AWA_VERIFY_BASE >"$$manifest"; \
+	  end=$$(python3 -c 'import time; print(time.monotonic_ns())'); \
+	  elapsed=$$(((end-start)/1000000)); \
+	  cat "$$manifest"; \
+	  digest=$$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$$manifest"); \
+	  echo "verify-docs: OK (NON-AUTHORITATIVE FOR RUNTIME)"; \
+	  python3 -B -m engine.tests.performance_policy evaluate-lane --lane docs --elapsed-ms "$$elapsed" --inventory-sha256 "$$digest" --test-count 0 --load-note "$${AWA_TEST_LOAD_NOTE:-not_provided}"
 
 verify-focused: export AWA_TEST_SELECTORS := $(value TESTS)
 verify-focused: ## Run explicit tests (non-authoritative)
@@ -60,6 +77,21 @@ verify-focused: ## Run explicit tests (non-authoritative)
 	@bash engine/tests/run-tests.sh --jobs 1 --selectors-env AWA_TEST_SELECTORS
 
 verify-pre-pr: verify ## Run complete authoritative local verification
+
+verify-performance: ## Explicit expensive process profile + one authoritative verify
+	@set -u; profile=$$(mktemp "$${TMPDIR:-/tmp}/awa-performance-profile.XXXXXX"); \
+	  receipt=$$(mktemp "$${TMPDIR:-/tmp}/awa-performance-receipt.XXXXXX"); \
+	  trap 'rm -f "$$profile" "$$receipt"' EXIT; \
+	  first_rc=0; \
+	  AWA_PERFORMANCE_WARNINGS_DISABLED=1 AWA_PERFORMANCE_RECEIPT="$$receipt" $(MAKE) verify || { verify_rc=$$?; if [ "$$first_rc" -eq 0 ]; then first_rc=$$verify_rc; fi; }; \
+	  if [ "$$first_rc" -eq 0 ]; then \
+	    python3 -B -m engine.tests.guard_boundary_profile --boundary source --count-git --json-out "$$profile" || first_rc=$$?; \
+	  fi; \
+	  if [ "$$first_rc" -eq 0 ]; then \
+	    elapsed=$$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run"]["elapsed_ms"])' "$$receipt"); \
+	    python3 -B -m engine.tests.performance_policy evaluate-lane --lane pre-pr --elapsed-ms "$$elapsed" --receipt "$$receipt" --process-profile "$$profile" || first_rc=$$?; \
+	  fi; \
+	  exit "$$first_rc"
 
 verify-release: ## Run the selected release trial
 	@$(MAKE) trial TRIAL_ARGS="$(TRIAL_ARGS)"

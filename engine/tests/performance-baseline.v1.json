@@ -1,0 +1,42 @@
+{
+  "schema": "awa-test-performance-baseline/v1",
+  "status": "hypothesis",
+  "head": "edf740f58ae35f79289836f8e55465da5b144a5a",
+  "inventory_sha256": "7f68d44a11e02bb59be5d25672d2a6457aade3593a4b950918365c76146d60a4",
+  "python": "3.14.6",
+  "git": "git version 2.50.1 (Apple Git-155)",
+  "test_count": 1148,
+  "observation_count": 0,
+  "session_count": 0,
+  "lanes": {
+    "docs": {
+      "status": "hypothesis",
+      "workload_sha256": "d32fb511f0604d0d582eb18fdae4ca233454db1e812d10a375ca9572f4977836",
+      "observation_count": 0,
+      "session_count": 0,
+      "p90_ms": null,
+      "warning_elapsed_ms": null
+    },
+    "pre-pr": {
+      "status": "hypothesis",
+      "workload_sha256": "d28f211aeb67b6e82a2768e54dc03ad4595f13cd4f37eab4b4b1964ca13a7c6b",
+      "observation_count": 0,
+      "session_count": 0,
+      "p90_ms": null,
+      "warning_elapsed_ms": null
+    }
+  },
+  "module_durations_ms": {},
+  "process_measurement": {
+    "status": "measured",
+    "counter_scope": "PATH-resolved git children only",
+    "producer_sha256": "5475ffc4a3f86cf3387517fe4416590bf5e5b46c42bed53afceb652249e339de",
+    "case_manifest_sha256": "eb4e7662f096cecc6d0a99717d71e1868552596f22abe1db61536e61d4476435",
+    "git_processes": 77
+  },
+  "machine_contexts": [],
+  "evidence": [
+    "live-verify/RESULTS-verification-m3-guard-boundaries-20260830.md",
+    "live-verify/RESULTS-verification-m6-performance-governance-20260831.md"
+  ]
+}

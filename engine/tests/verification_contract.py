@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as _datetime
 import hashlib
 import json
+import pathlib
 import re
 from collections.abc import Mapping
 
@@ -16,9 +17,11 @@ from collections.abc import Mapping
 RECEIPT_SCHEMA = "awa-test-receipt/v1"
 WORKER_SCHEMA = "awa-test-worker/v1"
 GUARD_BOUNDARY_PROFILE_SCHEMA = "awa-guard-boundary-profile/v1"
+PERFORMANCE_BASELINE_SCHEMA = "awa-test-performance-baseline/v1"
 MAX_RECEIPT_JSON_BYTES = 8 * 1024 * 1024
 MAX_WORKER_JSON_BYTES = 8 * 1024 * 1024
 MAX_GUARD_BOUNDARY_PROFILE_JSON_BYTES = 1024 * 1024
+MAX_PERFORMANCE_BASELINE_JSON_BYTES = 256 * 1024
 OUTCOMES = (
     "passed",
     "failure",
@@ -104,6 +107,54 @@ GUARD_GIT_COUNTER_SCOPES = (
     "not counted",
     "PATH-resolved git children only",
 )
+PERFORMANCE_BASELINE_KEYS = frozenset(
+    {
+        "schema",
+        "status",
+        "head",
+        "inventory_sha256",
+        "python",
+        "git",
+        "test_count",
+        "observation_count",
+        "session_count",
+        "lanes",
+        "module_durations_ms",
+        "process_measurement",
+        "machine_contexts",
+        "evidence",
+    }
+)
+PERFORMANCE_LANE_KEYS = frozenset(
+    {
+        "status",
+        "workload_sha256",
+        "observation_count",
+        "session_count",
+        "p90_ms",
+        "warning_elapsed_ms",
+    }
+)
+PERFORMANCE_PROCESS_KEYS = frozenset(
+    {
+        "status",
+        "counter_scope",
+        "producer_sha256",
+        "case_manifest_sha256",
+        "git_processes",
+    }
+)
+PERFORMANCE_MACHINE_CONTEXT_KEYS = frozenset(
+    {
+        "platform",
+        "architecture",
+        "logical_cpu_count",
+        "load_note",
+    }
+)
+PERFORMANCE_STATUSES = ("accepted", "hypothesis", "rejected")
+PERFORMANCE_LANES = ("docs", "pre-pr")
+PERFORMANCE_PROCESS_STATUSES = ("measured", "not_measured")
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_OID = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
@@ -190,6 +241,30 @@ def _require_module_name(value: object, label: str) -> str:
     text = _require_string(value, label)
     if not _MODULE_NAME.fullmatch(text):
         raise ContractError(f"{label} must be a dotted Python module name")
+    return text
+
+
+def _require_nullable_nonnegative_int(value: object, label: str) -> None:
+    if value is not None:
+        _require_nonnegative_int(value, label)
+
+
+def _require_bounded_text(value: object, label: str, limit: int = 256) -> str:
+    text = _require_string(value, label)
+    if len(text) > limit or any(character in text for character in "\r\n\0"):
+        raise ContractError(f"{label} is not bounded single-line text")
+    return text
+
+
+def _require_relative_evidence_path(value: object, label: str) -> str:
+    text = _require_bounded_text(value, label)
+    path = pathlib.PurePosixPath(text)
+    if path.is_absolute() or ".." in path.parts or text.startswith("~"):
+        raise ContractError(f"{label} must be a repository-relative path")
+    if not text.startswith("live-verify/") or not text.endswith(".md"):
+        raise ContractError(
+            f"{label} must name a durable live-verify Markdown record"
+        )
     return text
 
 
@@ -521,3 +596,200 @@ def validate_guard_boundary_profile(value: object) -> None:
     ).encode("utf-8")
     if len(encoded) > MAX_GUARD_BOUNDARY_PROFILE_JSON_BYTES:
         raise ContractError("guard boundary profile document is too large")
+
+
+def validate_performance_baseline(value: object) -> None:
+    """Validate one closed advisory ``awa-test-performance-baseline/v1``."""
+
+    document = _require_exact_keys(
+        value, PERFORMANCE_BASELINE_KEYS, "performance baseline"
+    )
+    _require_literal(
+        document["schema"],
+        PERFORMANCE_BASELINE_SCHEMA,
+        "performance baseline.schema",
+    )
+    status = _require_string(document["status"], "performance baseline.status")
+    if status not in PERFORMANCE_STATUSES:
+        raise ContractError("performance baseline.status is not recognized")
+    _require_git_oid(document["head"], "performance baseline.head")
+    _require_sha256(
+        document["inventory_sha256"],
+        "performance baseline.inventory_sha256",
+    )
+    _require_bounded_text(document["python"], "performance baseline.python")
+    _require_bounded_text(document["git"], "performance baseline.git")
+    _require_nonnegative_int(
+        document["test_count"], "performance baseline.test_count"
+    )
+    observations = _require_nonnegative_int(
+        document["observation_count"],
+        "performance baseline.observation_count",
+    )
+    sessions = _require_nonnegative_int(
+        document["session_count"], "performance baseline.session_count"
+    )
+    if observations < sessions:
+        raise ContractError(
+            "performance baseline.observation_count must cover session_count"
+        )
+
+    lanes = _require_exact_keys(
+        document["lanes"],
+        frozenset(PERFORMANCE_LANES),
+        "performance baseline.lanes",
+    )
+    lane_observations = 0
+    lane_session_max = 0
+    for lane_name in PERFORMANCE_LANES:
+        label = f"performance baseline.lanes.{lane_name}"
+        lane = _require_exact_keys(
+            lanes[lane_name], PERFORMANCE_LANE_KEYS, label
+        )
+        lane_status = _require_string(lane["status"], f"{label}.status")
+        if lane_status not in PERFORMANCE_STATUSES:
+            raise ContractError(f"{label}.status is not recognized")
+        _require_sha256(lane["workload_sha256"], f"{label}.workload_sha256")
+        lane_count = _require_nonnegative_int(
+            lane["observation_count"], f"{label}.observation_count"
+        )
+        session_count = _require_nonnegative_int(
+            lane["session_count"], f"{label}.session_count"
+        )
+        if lane_count < session_count:
+            raise ContractError(
+                f"{label}.observation_count must cover session_count"
+            )
+        p90 = lane["p90_ms"]
+        warning = lane["warning_elapsed_ms"]
+        _require_nullable_nonnegative_int(p90, f"{label}.p90_ms")
+        _require_nullable_nonnegative_int(
+            warning, f"{label}.warning_elapsed_ms"
+        )
+        if lane_status == "accepted":
+            if lane_count < 5 or session_count < 2:
+                raise ContractError(
+                    f"{label} needs five observations across two sessions"
+                )
+            if p90 is None or warning is None or warning < p90:
+                raise ContractError(
+                    f"{label} accepted timing needs warning_elapsed_ms >= p90_ms"
+                )
+        elif any(
+            item is not None for item in (p90, warning)
+        ) or lane_count or session_count:
+            raise ContractError(
+                f"{label} non-accepted timing must remain unmeasured"
+            )
+        lane_observations += lane_count
+        lane_session_max = max(lane_session_max, session_count)
+    if observations != lane_observations or sessions < lane_session_max:
+        raise ContractError(
+            "performance baseline observation/session totals are inconsistent"
+        )
+
+    durations = _require_mapping(
+        document["module_durations_ms"],
+        "performance baseline.module_durations_ms",
+    )
+    if list(durations) != sorted(durations):
+        raise ContractError(
+            "performance baseline.module_durations_ms must be sorted"
+        )
+    for module, duration in durations.items():
+        _require_module_name(
+            module, f"performance baseline.module_durations_ms key {module!r}"
+        )
+        _require_nonnegative_int(
+            duration,
+            f"performance baseline.module_durations_ms.{module}",
+        )
+
+    process = _require_exact_keys(
+        document["process_measurement"],
+        PERFORMANCE_PROCESS_KEYS,
+        "performance baseline.process_measurement",
+    )
+    process_status = _require_string(
+        process["status"],
+        "performance baseline.process_measurement.status",
+    )
+    if process_status not in PERFORMANCE_PROCESS_STATUSES:
+        raise ContractError(
+            "performance baseline.process_measurement.status is not recognized"
+        )
+    if process_status == "measured":
+        _require_literal(
+            process["counter_scope"],
+            "PATH-resolved git children only",
+            "performance baseline.process_measurement.counter_scope",
+        )
+        _require_sha256(
+            process["producer_sha256"],
+            "performance baseline.process_measurement.producer_sha256",
+        )
+        _require_sha256(
+            process["case_manifest_sha256"],
+            "performance baseline.process_measurement.case_manifest_sha256",
+        )
+        _require_nonnegative_int(
+            process["git_processes"],
+            "performance baseline.process_measurement.git_processes",
+        )
+    else:
+        for name in (
+            "counter_scope",
+            "producer_sha256",
+            "case_manifest_sha256",
+            "git_processes",
+        ):
+            if process[name] is not None:
+                raise ContractError(
+                    "an unmeasured process baseline must null every measurement"
+                )
+
+    contexts = document["machine_contexts"]
+    if not isinstance(contexts, list):
+        raise ContractError(
+            "performance baseline.machine_contexts must be an array"
+        )
+    for index, raw in enumerate(contexts):
+        label = f"performance baseline.machine_contexts[{index}]"
+        context = _require_exact_keys(
+            raw, PERFORMANCE_MACHINE_CONTEXT_KEYS, label
+        )
+        _require_bounded_text(context["platform"], f"{label}.platform")
+        _require_bounded_text(
+            context["architecture"], f"{label}.architecture"
+        )
+        _require_positive_int(
+            context["logical_cpu_count"], f"{label}.logical_cpu_count"
+        )
+        _require_bounded_text(context["load_note"], f"{label}.load_note")
+    if len(contexts) != sessions:
+        raise ContractError(
+            "performance baseline.machine_contexts must represent every session"
+        )
+
+    evidence = document["evidence"]
+    if not isinstance(evidence, list) or not evidence:
+        raise ContractError(
+            "performance baseline.evidence must be a non-empty array"
+        )
+    for index, path in enumerate(evidence):
+        _require_relative_evidence_path(
+            path, f"performance baseline.evidence[{index}]"
+        )
+    if evidence != sorted(evidence) or len(evidence) != len(set(evidence)):
+        raise ContractError(
+            "performance baseline.evidence must be sorted and unique"
+        )
+
+    encoded = json.dumps(
+        document,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if len(encoded) > MAX_PERFORMANCE_BASELINE_JSON_BYTES:
+        raise ContractError("performance baseline document is too large")

@@ -407,14 +407,28 @@ def _run_outcome(counts: Mapping[str, int]) -> str:
     return "passed"
 
 
+def module_durations_ms(
+    records: Sequence[Mapping[str, object]],
+) -> dict[str, int]:
+    """Return the complete deterministic module-duration projection."""
+
+    durations: dict[str, int] = {}
+    for record in records:
+        module = str(record["module"])
+        durations[module] = durations.get(module, 0) + int(record["elapsed_ms"])
+    return dict(sorted(durations.items()))
+
+
 def summarize_timings(records: Sequence[Mapping[str, object]], limit: int = 20) -> dict:
     if type(limit) is not int or limit <= 0:
         raise ValueError("timing summary limit must be a positive integer")
-    modules = {}
+    durations = module_durations_ms(records)
+    modules = {
+        module: {"elapsed_ms": elapsed_ms, "test_count": 0}
+        for module, elapsed_ms in durations.items()
+    }
     for record in records:
-        module = str(record["module"])
-        current = modules.setdefault(module, {"elapsed_ms": 0, "test_count": 0})
-        current["elapsed_ms"] += int(record["elapsed_ms"])
+        current = modules[str(record["module"])]
         current["test_count"] += 1
     module_rows = [
         {

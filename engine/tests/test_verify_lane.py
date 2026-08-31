@@ -242,7 +242,7 @@ class VerifyLaneTest(unittest.TestCase):
             (ROOT / "install.sh").read_text(encoding="utf-8"),
         )
         self.assertIn(
-            "test_freeze_checker_passes",
+            "test_install_check_is_single_pre_pr_freeze_owner",
             (ROOT / "engine" / "tests" / "test_contract_schemas.py").read_text(
                 encoding="utf-8"
             ),

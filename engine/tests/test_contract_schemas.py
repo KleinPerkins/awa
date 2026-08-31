@@ -3,23 +3,21 @@ and `clean --bundle` stays contract-compatible within v1.
 
 Proves the contract DECLARES both new schema blocks with the exact vocabularies the kernel
 emits, that the declared receipt required_keys are a subset of what awa_roots actually writes
-(contract <-> code lock), that --bundle remains a frozen `clean` flag, and that the wired
-freeze checker (kernel/checks/awa-contract-freeze.sh) passes end-to-end.
+(contract <-> code lock), that --bundle remains a frozen `clean` flag, and that
+the pre-PR install check remains the single executable source-freeze owner.
 """
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
-import os
-import subprocess
 from pathlib import Path
 
 from .helpers import EngineTestCase
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CONTRACT = _REPO_ROOT / "contracts" / "awa-contract.v1.json"
-_FREEZE = _REPO_ROOT / "kernel" / "checks" / "awa-contract-freeze.sh"
 _ROOTS_PY = _REPO_ROOT / "kernel" / "lib" / "awa_roots.py"
 
 
@@ -82,15 +80,27 @@ class ContractSchemasTest(EngineTestCase):
         for k in self.contract["active_root"]["required_keys"]:
             self.assertIn(k, rec, f"contract requires '{k}' but the heartbeat does not emit it")
 
-    def test_freeze_checker_passes(self) -> None:
-        """Retained direct integration path after the Makefile duplicate is removed."""
-        env = os.environ.copy()
-        env["AWA_HOME"] = str(_REPO_ROOT)
-        r = subprocess.run(["/bin/bash", str(_FREEZE)], env=env, capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("clean_receipt/v1 declared", r.stdout)
-        self.assertIn("active_root/v1 declared", r.stdout)
-        self.assertIn("awa-contract-freeze: OK", r.stdout)
+    def test_install_check_is_single_pre_pr_freeze_owner(self) -> None:
+        """Executable freeze integration belongs only to install --check."""
+        source = Path(__file__).read_text(encoding="utf-8")
+        imported = {
+            alias.name
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in node.names
+        }
+        self.assertFalse({"os", "subprocess"} & imported)
+        install = (_REPO_ROOT / "install.sh").read_text(encoding="utf-8")
+        makefile = (_REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+        source_command = (
+            'AWA_HOME="$SRC_ROOT" /bin/bash '
+            '"$SRC_ROOT/kernel/checks/awa-contract-freeze.sh"'
+        )
+        self.assertEqual(install.count(source_command), 1)
+        verify_body = makefile.split("verify:", 1)[1].split(
+            "verify-docs:", 1
+        )[0]
+        self.assertEqual(verify_body.count("./install.sh --check"), 1)
 
 
 if __name__ == "__main__":
