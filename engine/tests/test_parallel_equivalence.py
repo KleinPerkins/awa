@@ -231,6 +231,27 @@ class ParallelEquivalenceTest(unittest.TestCase):
             ),
         )
 
+    def test_unmeasured_worker_gets_safe_bounded_deadline(self) -> None:
+        module = "engine.tests.test_new"
+        self.assertEqual(
+            suite_runner.worker_timeout_seconds(module, {}, None),
+            1800.0,
+        )
+        self.assertEqual(
+            suite_runner.worker_timeout_seconds(module, {module: 0}, None),
+            300.0,
+        )
+        self.assertEqual(
+            suite_runner.worker_timeout_seconds(module, {module: 100_000}, None),
+            400.0,
+        )
+        self.assertEqual(
+            suite_runner.worker_timeout_seconds(
+                module, {module: 1_000_000}, None
+            ),
+            1800.0,
+        )
+
     def test_group_by_module_is_sorted_and_exact(self) -> None:
         self.assertEqual(
             suite_runner.group_by_module((_TEST_B, _TEST_A)),
