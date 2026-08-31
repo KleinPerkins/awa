@@ -54,7 +54,7 @@ V151_UNCHANGED_BEHAVIOR_SHA256 = {
 }
 V160_PRIMARY_MAINTENANCE_SHA256 = {
     "kernel/hooks/worktree-guard.sh":
-        "4a1c81064fccf8ca8fb5bd82a4787fc6e6e17111d5fcc8c99e578cee11606974",
+        "e79d650d71769998dc02d71129312eee7c3a974bb877ca641cedaf7f9661803e",
     "engine/tests/git_guard_command_corpus.py":
         "0ba21e1c7d2e8702a4b963ed8d08b8c90e993645200e7eaff23c867e7a2e36b5",
 }

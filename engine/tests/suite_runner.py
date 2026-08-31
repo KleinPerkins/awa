@@ -1,7 +1,8 @@
 """Measured stdlib unittest runner for AWA.
 
-The default remains serial. Opt-in module workers use isolated Python
-processes, and every receipt remains descriptive evidence only.
+The direct internal CLI defaults to serial; the ordinary ``run-tests.sh``
+entrypoint supplies the owner-approved two-worker default. Module workers use
+isolated Python processes, and every receipt remains descriptive evidence only.
 """
 
 from __future__ import annotations
@@ -524,6 +525,11 @@ def worker_timeout_seconds(
         if not math.isfinite(value):
             raise ValueError("worker timeout must be finite")
         return max(0.01, min(value, 1800.0))
+    if module not in prior_ms:
+        # An unmeasured module may legitimately exceed the measured 300-second
+        # floor. Keep it bounded by the existing hard cap instead of guessing
+        # a shorter deadline that makes an ordinary no-prior run fail closed.
+        return 1800.0
     prior = prior_ms.get(module, 0)
     if type(prior) is not int or prior < 0:
         raise ValueError("prior module durations must be non-negative integers")

@@ -280,19 +280,30 @@ class SuiteRunnerTest(unittest.TestCase):
             fake_python.chmod(0o755)
             log = root / "python.log"
             cases = (
+                ("full", (), None, ("--jobs", "2"), True),
+                ("full", (), "1", ("--jobs", "1"), True),
                 (
                     "full",
                     ("--jobs", "1", "--json-out", str(root / "receipt.json")),
+                    "4",
+                    ("--jobs", "1"),
                     True,
                 ),
-                ("full", ("--jobs", "2"), True),
-                ("filtered", ("--", _REDACT_MODULE), False),
+                ("full", ("--jobs=2",), None, ("--jobs=2",), True),
+                (
+                    "filtered",
+                    ("--", _REDACT_MODULE),
+                    None,
+                    ("--jobs", "2"),
+                    False,
+                ),
             )
-            for scope, args, expect_dashboard in cases:
-                with self.subTest(scope=scope):
+            for scope, args, jobs_env, expected_jobs, expect_dashboard in cases:
+                with self.subTest(scope=scope, args=args, jobs_env=jobs_env):
                     log.write_text("", encoding="utf-8")
                     env = os.environ.copy()
                     env.pop("AWA_ENGINE_TESTS_ACTIVE", None)
+                    env.pop("AWA_TEST_JOBS", None)
                     env.pop("BASH_ENV", None)
                     env.pop("ENV", None)
                     env.update(
@@ -302,6 +313,8 @@ class SuiteRunnerTest(unittest.TestCase):
                             "PATH": str(bindir) + os.pathsep + "/usr/bin:/bin",
                         }
                     )
+                    if jobs_env is not None:
+                        env["AWA_TEST_JOBS"] = jobs_env
                     result = subprocess.run(
                         ["/bin/bash", str(run_tests), *args],
                         text=True,
@@ -314,6 +327,21 @@ class SuiteRunnerTest(unittest.TestCase):
                         encoding="utf-8"
                     ).count("dashboard/test_emitter.py")
                     self.assertEqual(dashboard_runs, 1 if expect_dashboard else 0)
+                    runner_runs = [
+                        line
+                        for line in log.read_text(encoding="utf-8").splitlines()
+                        if "-m engine.tests.suite_runner" in line
+                    ]
+                    self.assertEqual(len(runner_runs), 1)
+                    runner_args = runner_runs[0].split()
+                    actual_job_flags = [
+                        (token, runner_args[index + 1])
+                        if token == "--jobs" and index + 1 < len(runner_args)
+                        else (token,)
+                        for index, token in enumerate(runner_args)
+                        if token == "--jobs" or token.startswith("--jobs=")
+                    ]
+                    self.assertEqual(actual_job_flags, [expected_jobs])
 
     def test_unknown_unittest_flag_fails_loudly(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported unittest argument"):
