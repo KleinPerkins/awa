@@ -22,7 +22,7 @@ _INSTALL_HOOKS = _REPO / "kernel" / "hooks" / "install-hooks.sh"
 
 class Phase2Base(EngineTestCase):
     def linked(self, name: str = "finish2") -> tuple[str, str]:
-        repo = self.make_repo(name)
+        repo = self.make_seeded_repo(name)
         wt = self.add_worktree(repo, f"cursor/worktree/{name}")
         return repo, wt
 

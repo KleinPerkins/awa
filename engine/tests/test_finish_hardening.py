@@ -20,7 +20,7 @@ INSTALL_HOOKS = REPO / "kernel" / "hooks" / "install-hooks.sh"
 
 class HardeningBase(EngineTestCase):
     def linked(self, name: str) -> tuple[str, str]:
-        repo = self.make_repo(name)
+        repo = self.make_seeded_repo(name)
         return repo, self.add_worktree(repo, f"cursor/worktree/{name}")
 
     def target(self, wt: str) -> dict:
