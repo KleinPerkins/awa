@@ -55,7 +55,7 @@ class FinishBase(EngineTestCase):
                      branch: str | None = None) -> tuple[str, str, str]:
         """A repo + a linked worktree on an AWA-ephemeral branch (cursor/worktree/<name>) with
         `files` written (uncommitted). Returns (repo, wt, branch)."""
-        repo = self.make_repo(name)
+        repo = self.make_seeded_repo(name)
         br = branch or f"cursor/worktree/{name}"
         wt = repo + ".wt"
         git(repo, "worktree", "add", "-q", "-b", br, wt, "main")

@@ -21,7 +21,7 @@ FIN = kernel_tests.FIN
 class FinalHardeningBase(EngineTestCase):
     def linked(self, name: str, *, object_format: str = "sha1") -> tuple[str, str]:
         if object_format == "sha1":
-            repo = self.make_repo(name)
+            repo = self.make_seeded_repo(name)
         else:
             repo = str(Path(self._tmp.name) / name)
             Path(repo).mkdir()

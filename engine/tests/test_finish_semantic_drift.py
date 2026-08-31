@@ -18,7 +18,7 @@ from .test_finish_hardening import HardeningBase
 
 class FinishSemanticDriftTest(HardeningBase):
     def linked_fixture(self, name: str) -> tuple[str, str]:
-        repo = self.make_repo(name)
+        repo = self.make_seeded_repo(name)
         Path(repo, ".gitignore").write_text(
             ".cursor/hooks/state/\nignored-operator/\nignored-structural/\n",
             encoding="utf-8")
@@ -87,7 +87,7 @@ class FinishSemanticDriftTest(HardeningBase):
 
     def test_tracked_cursor_hook_state_remains_operator_inventory_without_sibling_drift(self) -> None:
         name = "tracked-hook-state"
-        repo = self.make_repo(name)
+        repo = self.make_seeded_repo(name)
         tracked = Path(repo, ".cursor/hooks/state/operator-note.txt")
         tracked.parent.mkdir(parents=True)
         tracked.write_text("tracked\n", encoding="utf-8")
@@ -289,7 +289,7 @@ class FinishSemanticDriftTest(HardeningBase):
 
     def test_secret_and_ignored_gates_survive_unselected_content_drift(self) -> None:
         name = "semantic-secret-gate"
-        repo = self.make_repo(name)
+        repo = self.make_seeded_repo(name)
         Path(repo, ".gitignore").write_text(
             ".cursor/\n.env.production\n", encoding="utf-8")
         commit_all(repo, "ignore secret and hook state")
