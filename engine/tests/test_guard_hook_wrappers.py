@@ -146,6 +146,64 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         self._git("-C", str(source), *_IDENT, "commit", "-qm", "remote")
         self._git("-C", str(source), "push", "-q", "origin", "main")
 
+    def _state_drift_git_environment(
+        self,
+        repo: Path,
+        mutation: str,
+        target_oid: str = "",
+    ) -> dict:
+        wrapper_dir = self.root / "state-drift-wrapper-{0}-{1}".format(
+            mutation,
+            repo.name,
+        )
+        wrapper_dir.mkdir()
+        wrapper = wrapper_dir / "git"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            "\"$AWA_TEST_M3B_REAL_GIT\" \"$@\"\n"
+            "rc=$?\n"
+            "trigger=no\n"
+            "case \"$AWA_TEST_M3B_MUTATION:$*\" in\n"
+            "  config:*\" config --null --list\"*|"
+            "operation:*\" config --null --list\"*) trigger=yes ;;\n"
+            "  head:*\" status --porcelain=v2 \"*|"
+            "dirty:*\" status --porcelain=v2 \"*|"
+            "upstream:*\" status --porcelain=v2 \"*) trigger=yes ;;\n"
+            "esac\n"
+            "if [ \"$trigger\" = yes ]; then\n"
+            "    if (set -C; : >\"$AWA_TEST_M3B_ONCE\") 2>/dev/null; then\n"
+            "      case \"$AWA_TEST_M3B_MUTATION\" in\n"
+            "        head) printf '%s\\n' \"$AWA_TEST_M3B_TARGET\" "
+            ">\"$AWA_TEST_M3B_REPO/.git/refs/heads/main\" ;;\n"
+            "        dirty) printf 'drift\\n' >\"$AWA_TEST_M3B_REPO/drift\" ;;\n"
+            "        upstream)\n"
+            "          mkdir -p \"$AWA_TEST_M3B_REPO/.git/refs/remotes/origin\"\n"
+            "          printf '%s\\n' \"$AWA_TEST_M3B_TARGET\" "
+            ">\"$AWA_TEST_M3B_REPO/.git/refs/remotes/origin/main\"\n"
+            "          ;;\n"
+            "        config) printf '\\n# drift\\n' >>\"$AWA_TEST_M3B_REPO/.git/config\" ;;\n"
+            "        operation) \"$AWA_TEST_M3B_REAL_GIT\" -C "
+            "\"$AWA_TEST_M3B_REPO\" rev-parse HEAD "
+            ">\"$AWA_TEST_M3B_REPO/.git/MERGE_HEAD\" ;;\n"
+            "        *) exit 70 ;;\n"
+            "      esac\n"
+            "    fi\n"
+            "fi\n"
+            "exit \"$rc\"\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o700)
+        real_git = shutil.which("git")
+        self.assertIsNotNone(real_git)
+        return {
+            "PATH": str(wrapper_dir) + os.pathsep + os.environ.get("PATH", ""),
+            "AWA_TEST_M3B_REAL_GIT": str(real_git),
+            "AWA_TEST_M3B_ONCE": str(wrapper_dir / "once"),
+            "AWA_TEST_M3B_MUTATION": mutation,
+            "AWA_TEST_M3B_REPO": str(repo),
+            "AWA_TEST_M3B_TARGET": target_oid,
+        }
+
     def _apply_primary_maintenance_state(
         self,
         repo: Path,
@@ -460,6 +518,138 @@ class TestBashGuardWrapperParity(unittest.TestCase):
                         guard_path=installed,
                     )
                     self.assertEqual(role_resolved, {"permission": "allow"}, case)
+
+    def test_primary_maintenance_hook_state_drift_uses_uncertainty_path(self):
+        installed = self._install_guard()
+        message = engine_guard._PRIMARY_MAINTENANCE_MESSAGES[
+            "inspection_failed"
+        ]
+        for index, mutation in enumerate(
+            ("head", "dirty", "upstream", "config", "operation")
+        ):
+            for boundary, guard_path in (
+                ("source", _GUARD),
+                ("installed", installed),
+            ):
+                with self.subTest(mutation=mutation, boundary=boundary):
+                    repo, remote = self._make_maintenance_repo(
+                        "hook-drift-{0}-{1}".format(index, boundary)
+                    )
+                    target_oid = ""
+                    if mutation in {"head", "upstream"}:
+                        self._advance_remote(
+                            remote,
+                            "hook-drift-{0}-{1}".format(index, boundary),
+                        )
+                        target_oid = self._git(
+                            "-C",
+                            str(repo),
+                            "ls-remote",
+                            "origin",
+                            "refs/heads/main",
+                        ).stdout.split()[0]
+                        self._git(
+                            "-C",
+                            str(repo),
+                            "fetch",
+                            "-q",
+                            "--no-write-fetch-head",
+                            str(remote),
+                            target_oid,
+                        )
+                    response = self._guard(
+                        "git fetch",
+                        repo=repo,
+                        guard_path=guard_path,
+                        env_updates=self._state_drift_git_environment(
+                            repo,
+                            mutation,
+                            target_oid,
+                        ),
+                    )
+                    self.assertEqual(response.get("permission"), "deny", response)
+                    self.assertEqual(response.get("user_message"), message)
+                    self.assertEqual(response.get("agent_message"), message)
+
+    def test_primary_maintenance_hook_second_invocation_observes_dirty_state(self):
+        installed = self._install_guard()
+        for boundary, guard_path in (
+            ("source", _GUARD),
+            ("installed", installed),
+        ):
+            with self.subTest(boundary=boundary):
+                repo, _remote = self._make_maintenance_repo(
+                    "hook-live-dirty-{0}".format(boundary)
+                )
+                self.assertEqual(
+                    self._guard(
+                        "git fetch",
+                        repo=repo,
+                        guard_path=guard_path,
+                    ),
+                    {"permission": "allow"},
+                )
+                (repo / "dirty").write_text("dirty\n", encoding="utf-8")
+                response = self._guard(
+                    "git fetch",
+                    repo=repo,
+                    guard_path=guard_path,
+                )
+                self.assertEqual(response.get("permission"), "deny", response)
+                self.assertEqual(
+                    response.get("user_message"),
+                    engine_guard._PRIMARY_MAINTENANCE_MESSAGES["dirty"],
+                )
+
+    def test_incomplete_hook_context_preserves_uncached_fallback_verdict(self):
+        installed = self._install_guard()
+        wrapper_dir = self.root / "incomplete-context-wrapper"
+        wrapper_dir.mkdir()
+        wrapper = wrapper_dir / "git"
+        real_git = shutil.which("git")
+        self.assertIsNotNone(real_git)
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            "case \" $* \" in\n"
+            "  *\" status --porcelain=v2 \"*) exit 70 ;;\n"
+            "esac\n"
+            "exec \"$AWA_TEST_M3B_REAL_GIT\" \"$@\"\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o700)
+        env_updates = {
+            "PATH": str(wrapper_dir) + os.pathsep + os.environ.get("PATH", ""),
+            "AWA_TEST_M3B_REAL_GIT": str(real_git),
+        }
+        for boundary, guard_path in (
+            ("source", _GUARD),
+            ("installed", installed),
+        ):
+            with self.subTest(boundary=boundary):
+                repo, _remote = self._make_maintenance_repo(
+                    "hook-context-fallback-{0}".format(boundary)
+                )
+                self.assertEqual(
+                    self._guard(
+                        "git fetch",
+                        repo=repo,
+                        guard_path=guard_path,
+                        env_updates=env_updates,
+                    ),
+                    {"permission": "allow"},
+                )
+                (repo / "dirty").write_text("dirty\n", encoding="utf-8")
+                denied = self._guard(
+                    "git fetch",
+                    repo=repo,
+                    guard_path=guard_path,
+                    env_updates=env_updates,
+                )
+                self.assertEqual(denied.get("permission"), "deny", denied)
+                self.assertEqual(
+                    denied.get("user_message"),
+                    engine_guard._PRIMARY_MAINTENANCE_MESSAGES["dirty"],
+                )
 
     def test_m3_profile_manifest_matches_source_and_installed_permissions(self):
         installed = self._install_guard()

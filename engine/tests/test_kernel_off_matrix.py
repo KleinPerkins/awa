@@ -16,6 +16,7 @@ matrix proves it structurally and behaviorally:
 from __future__ import annotations
 
 import ast
+import json
 import os
 import subprocess
 import sys
@@ -28,6 +29,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _KERNEL = _REPO_ROOT / "kernel"
 _ENGINE = _REPO_ROOT / "engine"
 _DEV_WORKTREE = _KERNEL / "bin" / "dev-worktree.sh"
+_GUARD = _KERNEL / "hooks" / "worktree-guard.sh"
 _ROOTS_PY = _KERNEL / "lib" / "awa_roots.py"
 
 # stdlib roots the kernel libs are ALLOWED to import (union'd with sys.stdlib_module_names when
@@ -102,6 +104,61 @@ class KernelOffMatrixTest(EngineTestCase):
                            capture_output=True, text=True, cwd=str(self.data_home))
         self.assertNotEqual(r.returncode, 0,
                             "matrix env must make the engine package UNIMPORTABLE (engine-off)")
+
+    def test_maintenance_context_stays_live_with_engine_off(self) -> None:
+        repo = self.make_repo("engoff-maintenance")
+        remote = self.add_bare_remote(repo, "engoff-maintenance-origin.git")
+        git(repo, "push", "-q", "-u", "origin", "main")
+        policy = self.data_home / "engoff-maintenance-policy.yml"
+        policy.write_text(
+            "version: 1\n"
+            "governed_roots:\n"
+            "  - {0}\n"
+            "default: include\n"
+            "include:\n"
+            "  - '*'\n"
+            "exclude:\n"
+            "  - .\n"
+            "detectors:\n"
+            "  governed_markers:\n"
+            "    - _ops/POLICY.md\n"
+            "  foreign_hook_frameworks:\n"
+            "    - husky\n".format(self.data_home),
+            encoding="utf-8",
+        )
+        env = self._engine_off_env()
+        env.update(
+            {
+                "AWA_GOVERNED_ROOT": str(self.data_home),
+                "AWA_POLICY": str(policy),
+            }
+        )
+
+        def guard(command: str) -> dict:
+            result = subprocess.run(
+                [str(_GUARD)],
+                input=json.dumps({"cwd": repo, "command": command}),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return json.loads(result.stdout)
+
+        self.assertEqual(guard("git fetch"), {"permission": "allow"})
+        Path(repo, "dirty").write_text("dirty\n", encoding="utf-8")
+        denied = guard("git fetch")
+        self.assertEqual(denied.get("permission"), "deny", denied)
+
+    def test_maintenance_context_has_no_persistent_cache_surface(self) -> None:
+        source = _GUARD.read_text(encoding="utf-8")
+        for forbidden in (
+            "functools.lru_cache",
+            "functools.cache",
+            "PRIMARY_MAINTENANCE_CONTEXT=",
+            "AWA_PRIMARY_MAINTENANCE_CONTEXT",
+        ):
+            self.assertNotIn(forbidden, source)
 
     def test_active_root_blocks_with_engine_off(self) -> None:
         repo = self.make_repo("engoff")

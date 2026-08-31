@@ -12,6 +12,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -545,6 +546,216 @@ class TestDecideShellDegraded(EngineTestCase):
                 "allow",
                 command,
             )
+
+    def test_primary_maintenance_collects_two_states_without_legacy_rereads(self):
+        repo, _remote, pol = self._maintenance_repo("maintenance-context")
+        original = guard._run_primary_maintenance_git
+        with mock.patch.object(
+            guard,
+            "_run_primary_maintenance_git",
+            wraps=original,
+        ) as run_git:
+            decision = guard.decide_shell(repo, "git fetch", pol)
+        self.assertEqual(decision.permission, "allow", decision.reason)
+        calls = tuple(call.args[1:] for call in run_git.call_args_list)
+        self.assertEqual(
+            sum(
+                args[:2] == ("status", "--porcelain=v2")
+                for args in calls
+            ),
+            2,
+            calls,
+        )
+        self.assertNotIn(("symbolic-ref", "--quiet", "HEAD"), calls)
+        self.assertFalse(
+            any(args[:2] == ("config", "--get-all") for args in calls),
+            calls,
+        )
+        self.assertNotIn(
+            (
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+            ),
+            calls,
+        )
+
+    def test_primary_maintenance_status_does_not_refresh_index(self):
+        repo, _remote, _pol = self._maintenance_repo(
+            "maintenance-index-refresh"
+        )
+        tracked = Path(repo, "README.md")
+        tracked.write_bytes(tracked.read_bytes())
+        index = Path(repo, ".git", "index")
+        before = (index.read_bytes(), index.stat().st_mtime_ns)
+        shape = guard._primary_maintenance_shape("git fetch")
+        context = guard._collect_primary_maintenance_context(repo, shape)
+        after = (index.read_bytes(), index.stat().st_mtime_ns)
+        self.assertIsNotNone(context)
+        self.assertEqual(context.errors, ())
+        self.assertEqual(before, after)
+
+    def test_primary_maintenance_second_invocation_observes_dirty_state(self):
+        repo, _remote, pol = self._maintenance_repo("maintenance-live-dirty")
+        first = guard.decide_shell(repo, "git fetch", pol)
+        self.assertEqual(first.permission, "allow", first.reason)
+        Path(repo, "dirty").write_text("dirty\n", encoding="utf-8")
+        second = guard.decide_shell(repo, "git fetch", pol)
+        self.assertEqual(second.permission, "deny")
+        self.assertEqual(
+            second.reason,
+            guard._PRIMARY_MAINTENANCE_MESSAGES["dirty"],
+        )
+
+    def test_primary_maintenance_context_observes_advanced_upstream(self):
+        repo, remote, _pol = self._maintenance_repo(
+            "maintenance-live-upstream"
+        )
+        shape = guard._primary_maintenance_shape(
+            "git merge --ff-only --no-overwrite-ignore"
+        )
+        before = guard._collect_primary_maintenance_context(repo, shape)
+        self.assertIsNotNone(before)
+        self._advance_remote(remote, "maintenance-live-upstream")
+        git(repo, "fetch", "-q", "origin")
+        after = guard._collect_primary_maintenance_context(repo, shape)
+        self.assertIsNotNone(after)
+        self.assertNotEqual(
+            before.state_after.upstream_oid,
+            after.state_after.upstream_oid,
+        )
+
+    def test_ineligible_maintenance_forms_never_collect_context(self):
+        repo, _remote, pol = self._maintenance_repo("maintenance-ineligible")
+        original = guard._collect_primary_maintenance_context
+        commands = (
+            "git -C {0} fetch".format(repo),
+            "git --git-dir {0}/.git fetch".format(repo),
+            "cd {0} && git commit -m nope".format(repo),
+            "git status && git fetch",
+        )
+        with mock.patch.object(
+            guard,
+            "_collect_primary_maintenance_context",
+            wraps=original,
+        ) as collector:
+            for command in commands:
+                guard.decide_shell(repo, command, pol)
+        self.assertEqual(collector.call_count, 0)
+
+    def test_primary_maintenance_state_drift_denies_and_incomplete_falls_back(self):
+        for index, mutation in enumerate(
+            ("head", "dirty", "upstream", "config", "operation")
+        ):
+            with self.subTest(mutation=mutation):
+                repo, remote, _pol = self._maintenance_repo(
+                    "maintenance-drift-{0}".format(index)
+                )
+                target_oid = ""
+                if mutation in {"head", "upstream"}:
+                    self._advance_remote(remote, "maintenance-drift-{0}".format(index))
+                    target_oid = git(
+                        repo,
+                        "ls-remote",
+                        "origin",
+                        "refs/heads/main",
+                    ).stdout.split()[0]
+                    git(
+                        repo,
+                        "fetch",
+                        "-q",
+                        "--no-write-fetch-head",
+                        remote,
+                        target_oid,
+                    )
+                original_capture = guard._capture_primary_maintenance_state
+                capture_count = 0
+
+                def capture(*args, **kwargs):
+                    nonlocal capture_count
+                    state = original_capture(*args, **kwargs)
+                    capture_count += 1
+                    if capture_count == 1:
+                        if mutation == "head":
+                            Path(repo, ".git", "refs", "heads", "main").write_text(
+                                target_oid + "\n",
+                                encoding="ascii",
+                            )
+                        elif mutation == "dirty":
+                            Path(repo, "drift").write_text(
+                                "drift\n",
+                                encoding="utf-8",
+                            )
+                        elif mutation == "upstream":
+                            upstream = Path(
+                                repo,
+                                ".git",
+                                "refs",
+                                "remotes",
+                                "origin",
+                                "main",
+                            )
+                            upstream.parent.mkdir(parents=True, exist_ok=True)
+                            upstream.write_text(target_oid + "\n", encoding="ascii")
+                        elif mutation == "config":
+                            with Path(repo, ".git", "config").open(
+                                "a",
+                                encoding="utf-8",
+                            ) as handle:
+                                handle.write("\n# drift\n")
+                        else:
+                            Path(repo, ".git", "MERGE_HEAD").write_text(
+                                state[0].head_oid + "\n",
+                                encoding="ascii",
+                            )
+                    return state
+
+                with mock.patch.object(
+                    guard,
+                    "_capture_primary_maintenance_state",
+                    side_effect=capture,
+                ):
+                    drifted = guard.classify_primary_maintenance("git fetch", repo)
+                self.assertFalse(drifted.allowed)
+                self.assertEqual(drifted.reason_code, "inspection_failed")
+
+        fallback_repo, _remote, _pol = self._maintenance_repo(
+            "maintenance-fallback"
+        )
+        legacy = guard._classify_primary_maintenance_uncached(
+            "git fetch",
+            fallback_repo,
+        )
+        with mock.patch.object(
+            guard,
+            "_collect_primary_maintenance_context",
+            return_value=None,
+        ):
+            fallback = guard.classify_primary_maintenance(
+                "git fetch",
+                fallback_repo,
+            )
+        self.assertEqual(fallback, legacy)
+
+    def test_corrupt_maintenance_context_fails_safe(self):
+        repo, _remote, _pol = self._maintenance_repo("maintenance-corrupt")
+        shape = guard._primary_maintenance_shape("git fetch")
+        context = guard._collect_primary_maintenance_context(repo, shape)
+        self.assertIsNotNone(context)
+        corrupted = replace(
+            context,
+            repository_identity=(
+                context.repository_identity[0] + "-wrong",
+                context.repository_identity[1],
+            ),
+        )
+        decision = guard._classify_primary_maintenance_context(
+            shape,
+            corrupted,
+        )
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason_code, "inspection_failed")
 
     def test_standalone_repo_with_origin_allows_not_denies(self):
         """Regression: a standalone clone (e.g. under /tmp) with an origin remote, OUTSIDE

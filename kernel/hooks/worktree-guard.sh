@@ -53,7 +53,7 @@ maintenance_reason="unsupported_form"
 maintenance_matched="no"
 maintenance_message=""
 eval "$(HOOK_INPUT="$input" python3 - <<'PY'
-import json, os, re, sys, shlex, subprocess, selectors, time
+import hashlib, json, os, re, sys, shlex, subprocess, selectors, time
 raw = os.environ.get("HOOK_INPUT", "")
 try:
     data = json.loads(raw or "{}")
@@ -1099,6 +1099,353 @@ def _primary_maintenance_is_idle(git_dir, common_dir, branch):
         return None
 
 
+def _primary_maintenance_paths_sha256(paths_to_hash):
+    digest = hashlib.sha256()
+    try:
+        for raw_path in sorted(paths_to_hash):
+            path = os.path.abspath(raw_path)
+            digest.update(path.encode("utf-8", "surrogateescape"))
+            digest.update(b"\x00")
+            if not os.path.lexists(path):
+                digest.update(b"missing\x00")
+                continue
+            stat_result = os.lstat(path)
+            digest.update(
+                "{0}:{1}:{2}:{3}".format(
+                    stat_result.st_mode,
+                    stat_result.st_size,
+                    stat_result.st_mtime_ns,
+                    stat_result.st_ino,
+                ).encode("ascii")
+            )
+            digest.update(b"\x00")
+            if os.path.isfile(path):
+                with open(path, "rb") as handle:
+                    while True:
+                        chunk = handle.read(65536)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+            digest.update(b"\x00")
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return digest.hexdigest()
+
+
+def _primary_maintenance_operation_paths(git_dir, common_dir, branch):
+    paths_to_check = [
+        os.path.join(directory, marker)
+        for directory in {git_dir, common_dir}
+        for marker in _PRIMARY_MAINTENANCE_IN_PROGRESS
+    ]
+    paths_to_check.extend(
+        [
+            os.path.join(git_dir, "index.lock"),
+            os.path.join(git_dir, "HEAD.lock"),
+            os.path.join(common_dir, "packed-refs.lock"),
+            os.path.join(common_dir, "config.lock"),
+            os.path.join(common_dir, "shallow.lock"),
+        ]
+    )
+    if branch:
+        paths_to_check.append(
+            os.path.join(
+                common_dir,
+                "refs",
+                "heads",
+                branch + ".lock",
+            )
+        )
+    return paths_to_check
+
+
+def _primary_maintenance_repository_identity(cwd_value):
+    current = os.path.realpath(cwd_value)
+    while current and current != os.path.dirname(current):
+        dot_git = os.path.join(current, ".git")
+        if os.path.isdir(dot_git):
+            git_dir = os.path.realpath(dot_git)
+            return current, git_dir, git_dir
+        if os.path.lexists(dot_git):
+            return None
+        current = os.path.dirname(current)
+    return None
+
+
+def _primary_maintenance_status_v2(result):
+    if result is None:
+        return None
+    returncode, stdout, stderr = result
+    if returncode != 0 or stderr or not stdout or not stdout.endswith("\x00"):
+        return None
+    records = stdout[:-1].split("\x00")
+    fields = {}
+    dirty = False
+    for record in records:
+        if record.startswith("# "):
+            name, separator, value = record[2:].partition(" ")
+            if not separator or name in fields:
+                return None
+            fields[name] = value
+        else:
+            dirty = True
+    head_oid = fields.get("branch.oid", "")
+    branch = fields.get("branch.head", "")
+    upstream = fields.get("branch.upstream", "")
+    if (
+        len(head_oid) not in (40, 64)
+        or re.fullmatch(r"[0-9a-f]+", head_oid) is None
+        or not branch
+        or branch == "(detached)"
+        or not upstream
+        or upstream.startswith(".")
+        or upstream.endswith("/")
+    ):
+        return None
+    upstream_ref = "refs/remotes/" + upstream
+    if not _valid_refspec_ref(
+        "refs/heads/" + branch,
+        False,
+    ) or not _valid_refspec_ref(upstream_ref, False):
+        return None
+    return (
+        stdout.encode("utf-8", "surrogateescape"),
+        branch,
+        upstream_ref,
+        head_oid,
+        dirty,
+    )
+
+
+def _primary_maintenance_read_ref(common_dir, ref):
+    if not _valid_refspec_ref(ref, False):
+        return None
+    loose = os.path.join(common_dir, *ref.split("/"))
+    try:
+        if os.path.isfile(loose):
+            with open(loose, "r", encoding="ascii") as handle:
+                value = handle.read(129)
+            oid = value.strip()
+            if len(value) > 128:
+                return None
+            if (
+                len(oid) in (40, 64)
+                and re.fullmatch(r"[0-9a-f]+", oid) is not None
+            ):
+                return oid
+            return None
+        packed = os.path.join(common_dir, "packed-refs")
+        if not os.path.isfile(packed):
+            return None
+        with open(packed, "r", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith(("#", "^")):
+                    continue
+                oid, separator, name = line.rstrip("\n").partition(" ")
+                if separator and name == ref:
+                    if (
+                        len(oid) in (40, 64)
+                        and re.fullmatch(r"[0-9a-f]+", oid) is not None
+                    ):
+                        return oid
+                    return None
+    except (OSError, UnicodeError):
+        return None
+    return None
+
+
+def _capture_primary_maintenance_state(
+        cwd_value,
+        worktree_root,
+        git_dir,
+        common_dir,
+):
+    config_paths = [
+        os.path.join(common_dir, "config"),
+        os.path.join(git_dir, "config.worktree"),
+    ]
+    index_paths = [os.path.join(git_dir, "index")]
+    generic_operation_paths = _primary_maintenance_operation_paths(
+        git_dir,
+        common_dir,
+        "",
+    )
+    pre_config_sha256 = _primary_maintenance_paths_sha256(config_paths)
+    pre_operation_sha256 = _primary_maintenance_paths_sha256(
+        generic_operation_paths
+    )
+    pre_index_sha256 = _primary_maintenance_paths_sha256(index_paths)
+    if (
+        pre_config_sha256 is None
+        or pre_operation_sha256 is None
+        or pre_index_sha256 is None
+    ):
+        return None
+    status = _primary_maintenance_status_v2(
+        _run_primary_maintenance_git(
+            cwd_value,
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--branch",
+            "--untracked-files=all",
+        )
+    )
+    if status is None:
+        return None
+    status_bytes, branch, upstream_ref, head_oid, dirty = status
+    head_ref_oid = _primary_maintenance_read_ref(
+        common_dir,
+        "refs/heads/" + branch,
+    )
+    upstream_oid = _primary_maintenance_read_ref(common_dir, upstream_ref)
+    config_sha256 = _primary_maintenance_paths_sha256(config_paths)
+    operation_sha256 = _primary_maintenance_paths_sha256(
+        _primary_maintenance_operation_paths(git_dir, common_dir, branch)
+    )
+    generic_operation_sha256 = _primary_maintenance_paths_sha256(
+        generic_operation_paths
+    )
+    hidden_index_sha256 = _primary_maintenance_paths_sha256(index_paths)
+    if (
+        head_ref_oid is None
+        or upstream_oid is None
+        or config_sha256 is None
+        or operation_sha256 is None
+        or generic_operation_sha256 is None
+        or hidden_index_sha256 is None
+    ):
+        return None
+    token = {
+        "worktree_root": worktree_root,
+        "common_git_dir": common_dir,
+        "head_oid": head_oid,
+        "upstream_name": upstream_ref,
+        "upstream_oid": upstream_oid,
+        "maintenance_config_sha256": config_sha256,
+        "status_sha256": hashlib.sha256(status_bytes).hexdigest(),
+        "operation_markers_sha256": operation_sha256,
+        "hidden_index_sha256": hidden_index_sha256,
+    }
+    stable = (
+        head_ref_oid == head_oid
+        and pre_config_sha256 == config_sha256
+        and pre_operation_sha256 == generic_operation_sha256
+        and pre_index_sha256 == hidden_index_sha256
+    )
+    return token, status_bytes, dirty, stable
+
+
+def _primary_maintenance_config_map(cwd_value):
+    result = _run_primary_maintenance_git(cwd_value, "config", "--null", "--list")
+    if result is None:
+        return None
+    returncode, stdout, stderr = result
+    if returncode != 0 or stderr or not stdout.endswith("\x00"):
+        return None
+    values = {}
+    for record in stdout[:-1].split("\x00"):
+        key, separator, value = record.partition("\n")
+        if not separator or not key:
+            return None
+        values.setdefault(key.lower(), []).append(value)
+    return values
+
+
+def _collect_primary_maintenance_context(cwd_value, shape):
+    if not shape["valid"]:
+        return None
+    identity = _primary_maintenance_repository_identity(cwd_value)
+    if identity is None:
+        return None
+    worktree_root, git_dir, common_dir = identity
+    before_capture = _capture_primary_maintenance_state(
+        cwd_value,
+        worktree_root,
+        git_dir,
+        common_dir,
+    )
+    if before_capture is None:
+        return None
+    state_before, status_bytes, dirty, before_stable = before_capture
+    parsed_status = _primary_maintenance_status_v2(
+        (0, status_bytes.decode("utf-8", "surrogateescape"), "")
+    )
+    if parsed_status is None:
+        return None
+    _status, local_branch, upstream_ref, _head, _is_dirty = parsed_status
+    config = _primary_maintenance_config_map(cwd_value)
+    if config is None:
+        return None
+    remote_values = config.get(
+        "branch.{0}.remote".format(local_branch).lower(),
+        [],
+    )
+    merge_refs = config.get(
+        "branch.{0}.merge".format(local_branch).lower(),
+        [],
+    )
+    if len(remote_values) != 1 or len(merge_refs) != 1:
+        return None
+    remote = remote_values[0]
+    fetch_refspecs = tuple(
+        config.get("remote.{0}.fetch".format(remote).lower(), [])
+    )
+    idle = _primary_maintenance_is_idle(
+        git_dir,
+        common_dir,
+        local_branch,
+    )
+    if idle is None:
+        return None
+    if dirty or not idle:
+        hidden_index_bits = False
+    else:
+        hidden_index_bits = _primary_maintenance_has_hidden_index_bits(cwd_value)
+        if hidden_index_bits is None:
+            return None
+    ancestry = None
+    if shape["kind"] == "fast_forward":
+        result = _run_primary_maintenance_git(
+            cwd_value,
+            "merge-base",
+            "--is-ancestor",
+            "HEAD",
+            upstream_ref,
+        )
+        if result is None or result[1] or result[2] or result[0] not in (0, 1):
+            return None
+        ancestry = result[0] == 0
+    after_capture = _capture_primary_maintenance_state(
+        cwd_value,
+        worktree_root,
+        git_dir,
+        common_dir,
+    )
+    if after_capture is None:
+        return None
+    state_after, _after_status, _after_dirty, after_stable = after_capture
+    errors = ()
+    if state_before != state_after or not before_stable or not after_stable:
+        errors = ("state_changed",)
+    return {
+        "repository_identity": (worktree_root, common_dir),
+        "session_cwd": os.path.realpath(cwd_value),
+        "branch": local_branch,
+        "upstream": state_before["upstream_name"],
+        "upstream_remote": remote,
+        "status_porcelain_v2": status_bytes,
+        "operation_in_progress": not idle,
+        "hidden_index_bits": hidden_index_bits,
+        "head_is_ancestor_of_upstream": ancestry,
+        "state_before": state_before,
+        "state_after": state_after,
+        "errors": errors,
+        "merge_ref": merge_refs[0],
+        "fetch_refspecs": fetch_refspecs,
+    }
+
+
 def _maintenance_result(allowed, kind, reason_code, matched=True):
     return {
         "allowed": allowed,
@@ -1108,7 +1455,7 @@ def _maintenance_result(allowed, kind, reason_code, matched=True):
     }
 
 
-def classify_primary_maintenance(command, cwd_value):
+def _classify_primary_maintenance_uncached(command, cwd_value):
     shape = _primary_maintenance_shape(command)
     if not shape["valid"]:
         return _maintenance_result(
@@ -1303,6 +1650,107 @@ def classify_primary_maintenance(command, cwd_value):
         if ancestry[0] != 0:
             return _maintenance_result(False, shape["kind"], "inspection_failed")
     return _maintenance_result(True, shape["kind"], "allowed")
+
+
+def _classify_primary_maintenance_context(shape, context):
+    before = context["state_before"]
+    after = context["state_after"]
+    if (
+        context["errors"]
+        or before != after
+        or context["repository_identity"]
+        != (before["worktree_root"], before["common_git_dir"])
+        or context["session_cwd"] != os.path.realpath(context["session_cwd"])
+        or context["branch"] == ""
+        or context["upstream"] != before["upstream_name"]
+        or before["head_oid"] != after["head_oid"]
+        or before["upstream_oid"] != after["upstream_oid"]
+    ):
+        return _maintenance_result(False, shape["kind"], "inspection_failed")
+    remote = context["upstream_remote"]
+    merge_ref = context["merge_ref"]
+    if (
+        not remote
+        or remote == "."
+        or not _valid_refspec_ref(merge_ref, False)
+        or not merge_ref.startswith("refs/heads/")
+    ):
+        return _maintenance_result(False, shape["kind"], "missing_upstream")
+    if (
+        any(ord(char) < 32 or ord(char) == 127 for char in remote)
+        or any(token in remote for token in ("..", "@{", "\\", ":", "*", "?", "["))
+        or remote.startswith(".")
+        or remote.endswith("/")
+    ):
+        return _maintenance_result(False, shape["kind"], "missing_upstream")
+    upstream_ref = _safe_fetch_destination(
+        remote,
+        merge_ref,
+        list(context["fetch_refspecs"]),
+    )
+    if upstream_ref is None or upstream_ref != context["upstream"]:
+        return _maintenance_result(False, shape["kind"], "unsafe_fetch_config")
+    for oid, reason in (
+        (after["upstream_oid"], "unsafe_fetch_config"),
+        (after["head_oid"], "inspection_failed"),
+    ):
+        if (
+            len(oid) not in (40, 64)
+            or re.fullmatch(r"[0-9a-f]+", oid) is None
+        ):
+            return _maintenance_result(False, shape["kind"], reason)
+    short_upstream = upstream_ref[len("refs/remotes/"):]
+    if shape["kind"] == "fetch":
+        if shape["operand"] and shape["operand"] != remote:
+            return _maintenance_result(False, shape["kind"], "wrong_upstream")
+    else:
+        if shape["operand"] not in {"", "@{u}", "@{upstream}", short_upstream}:
+            return _maintenance_result(False, shape["kind"], "wrong_upstream")
+    if context["operation_in_progress"]:
+        return _maintenance_result(False, shape["kind"], "busy")
+    if context["hidden_index_bits"]:
+        return _maintenance_result(False, shape["kind"], "dirty")
+    parsed_status = _primary_maintenance_status_v2(
+        (
+            0,
+            context["status_porcelain_v2"].decode(
+                "utf-8",
+                "surrogateescape",
+            ),
+            "",
+        )
+    )
+    if parsed_status is None:
+        return _maintenance_result(False, shape["kind"], "inspection_failed")
+    if parsed_status[4]:
+        return _maintenance_result(False, shape["kind"], "dirty")
+    if shape["kind"] == "fast_forward":
+        if context["head_is_ancestor_of_upstream"] is None:
+            return _maintenance_result(False, shape["kind"], "inspection_failed")
+        if not context["head_is_ancestor_of_upstream"]:
+            return _maintenance_result(False, shape["kind"], "diverged")
+    return _maintenance_result(True, shape["kind"], "allowed")
+
+
+def classify_primary_maintenance(command, cwd_value):
+    shape = _primary_maintenance_shape(command)
+    if not shape["valid"]:
+        return _maintenance_result(
+            False,
+            shape["kind"],
+            "unsupported_form",
+            shape["matched"],
+        )
+    if any(
+        key in _PRIMARY_MAINTENANCE_RISKY_GIT_ENV
+        or key.startswith("GIT_CONFIG_")
+        for key in os.environ
+    ):
+        return _maintenance_result(False, shape["kind"], "inspection_failed")
+    context = _collect_primary_maintenance_context(cwd_value, shape)
+    if context is None:
+        return _classify_primary_maintenance_uncached(command, cwd_value)
+    return _classify_primary_maintenance_context(shape, context)
 
 
 # ---- ADR 0001: target-path-aware mutation scope (parity with engine/guard.py) ------
