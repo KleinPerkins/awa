@@ -39,6 +39,7 @@ sys.path.insert(0, str(_AWA_HOME / "kernel" / "lib"))
 import awa_policy  # noqa: E402
 
 SCHEMA = "awa-worktree/v1"
+DETAILS = ("fast", "deep")
 
 # The engine launcher lives at <AWA_HOME>/bin/awa-engine.sh. The dashboard is render-only +
 # agent-command refresh; this probe is READ-ONLY (it only reads the daemon pidfile) and additive
@@ -159,16 +160,23 @@ def parse_worktrees(porcelain: str) -> list[dict]:
     return blocks
 
 
-def worktree_role(wt_path: str, timeout: float) -> tuple[bool, bool]:
+def worktree_role_checked(wt_path: str, timeout: float) -> tuple[bool, bool, bool]:
     rc, git_dir = git(wt_path, "rev-parse", "--path-format=absolute", "--git-dir", timeout=timeout)
     if rc != 0:
-        return False, False
+        return False, False, False
     rc, common_dir = git(wt_path, "rev-parse", "--path-format=absolute", "--git-common-dir", timeout=timeout)
     if rc != 0:
-        return False, False
+        return False, False, False
     gd = git_dir.strip()
     cd = common_dir.strip()
-    return gd == cd, bool(gd and cd and gd != cd)
+    if not gd or not cd:
+        return False, False, False
+    return gd == cd, gd != cd, True
+
+
+def worktree_role(wt_path: str, timeout: float) -> tuple[bool, bool]:
+    is_primary, is_linked, _ = worktree_role_checked(wt_path, timeout)
+    return is_primary, is_linked
 
 
 def disk_usage_bytes(wt_path: str, timeout: float) -> int | None:
@@ -209,18 +217,50 @@ def format_disk_size(size_bytes: int | None) -> str:
     return f"{value:.1f}".rstrip("0").rstrip(".") + f" {unit}"
 
 
-def worktree_detail(wt_path: str, block: dict, base: str | None, timeout: float) -> dict:
+def _validate_detail(detail: str) -> None:
+    if detail not in DETAILS:
+        raise ValueError("detail must be fast or deep")
+
+
+def last_commit_detail(
+    repo: str,
+    timeout: float,
+    ref: str | None = None,
+) -> tuple[bool, str | None, str | None]:
+    args = ["log", "-1", "--format=%cI%x00%s"]
+    if ref is not None:
+        args.append(ref)
+    rc, out = git(repo, *args, timeout=timeout)
+    if rc != 0 or not out.strip():
+        return False, None, None
+    timestamp, separator, subject = out.strip().partition("\x00")
+    if not separator or not timestamp:
+        return False, None, None
+    return True, timestamp, subject or None
+
+
+def worktree_detail(
+    wt_path: str,
+    block: dict,
+    base: str | None,
+    timeout: float,
+    detail: str = "deep",
+) -> dict:
+    _validate_detail(detail)
     branch_ref = block.get("branch_ref", "")
     branch = branch_ref[len("refs/heads/"):] if branch_ref.startswith("refs/heads/") else ""
     detached = bool(block.get("detached")) or (not branch and not block.get("bare"))
 
-    is_primary, is_linked = worktree_role(wt_path, timeout)
-    size_bytes = disk_usage_bytes(wt_path, timeout)
+    is_primary, is_linked, inventory_certain = worktree_role_checked(
+        wt_path, timeout,
+    )
 
     head_short = ""
     rc, out = git(wt_path, "rev-parse", "--short", "HEAD", timeout=timeout)
     if rc == 0:
         head_short = out.strip()
+    else:
+        inventory_certain = False
 
     dirty_count = 0
     dirty = False
@@ -230,6 +270,8 @@ def worktree_detail(wt_path: str, block: dict, base: str | None, timeout: float)
         lines = [ln for ln in out.splitlines() if ln.strip()]
         dirty_count = len(lines)
         dirty = dirty_count > 0
+    else:
+        inventory_certain = False
 
     ahead = behind = 0
     if base is None:
@@ -245,20 +287,40 @@ def worktree_detail(wt_path: str, block: dict, base: str | None, timeout: float)
                 status = ab_status(ahead, behind)
             else:
                 status = "unknown"
+                inventory_certain = False
         elif rc == 124:
             status = "unknown"
+            inventory_certain = False
         else:
             status = "unknown"
+            inventory_certain = False
 
     base_branch = base == "refs/heads/main" and branch == "main"
 
+    size_bytes = None
     last_commit_ts = None
     last_commit_subject = None
-    rc, out = git(wt_path, "log", "-1", "--format=%cI%x00%s", timeout=timeout)
-    if rc == 0 and out.strip():
-        ts, _, subject = out.strip().partition("\x00")
-        last_commit_ts = ts or None
-        last_commit_subject = subject or None
+    enrichment_state = "not_checked"
+    plain_size = "not checked"
+    if detail == "deep":
+        enrichment_state = "unknown"
+        plain_size = "not available"
+        if inventory_certain:
+            try:
+                measured_size = disk_usage_bytes(wt_path, timeout)
+                commit_ok, commit_ts, commit_subject = last_commit_detail(
+                    wt_path, timeout,
+                )
+            except Exception:
+                measured_size = None
+                commit_ok = False
+                commit_ts = commit_subject = None
+            if measured_size is not None and commit_ok:
+                size_bytes = measured_size
+                plain_size = format_disk_size(measured_size)
+                last_commit_ts = commit_ts
+                last_commit_subject = commit_subject
+                enrichment_state = "checked"
 
     return {
         "path": wt_path,
@@ -278,15 +340,26 @@ def worktree_detail(wt_path: str, block: dict, base: str | None, timeout: float)
         "last_commit_ts": last_commit_ts,
         "last_commit_subject": last_commit_subject,
         "size_bytes": size_bytes,
-        "plain_size": format_disk_size(size_bytes),
+        "plain_size": plain_size,
+        "enrichment_state": enrichment_state,
     }
 
 
-def branch_detail(repo: str, branch: str, base: str | None, timeout: float) -> dict:
+def branch_detail(
+    repo: str,
+    branch: str,
+    base: str | None,
+    timeout: float,
+    detail: str = "deep",
+) -> dict:
+    _validate_detail(detail)
+    inventory_certain = True
     head_short = ""
     rc, out = git(repo, "rev-parse", "--short", f"refs/heads/{branch}", timeout=timeout)
     if rc == 0:
         head_short = out.strip()
+    else:
+        inventory_certain = False
 
     ahead = behind = 0
     if base is None:
@@ -300,18 +373,27 @@ def branch_detail(repo: str, branch: str, base: str | None, timeout: float) -> d
                 status = ab_status(ahead, behind)
             else:
                 status = "unknown"
+                inventory_certain = False
         elif rc == 124:
             status = "unknown"
+            inventory_certain = False
         else:
             status = "unknown"
+            inventory_certain = False
 
     last_commit_ts = None
     last_commit_subject = None
-    rc, out = git(repo, "log", "-1", "--format=%cI%x00%s", f"refs/heads/{branch}", timeout=timeout)
-    if rc == 0 and out.strip():
-        ts, _, subject = out.strip().partition("\x00")
-        last_commit_ts = ts or None
-        last_commit_subject = subject or None
+    enrichment_state = "not_checked"
+    if detail == "deep":
+        enrichment_state = "unknown"
+        if inventory_certain:
+            commit_ok, commit_ts, commit_subject = last_commit_detail(
+                repo, timeout, f"refs/heads/{branch}",
+            )
+            if commit_ok:
+                last_commit_ts = commit_ts
+                last_commit_subject = commit_subject
+                enrichment_state = "checked"
 
     return {
         "branch": branch,
@@ -321,6 +403,7 @@ def branch_detail(repo: str, branch: str, base: str | None, timeout: float) -> d
         "ab_status": status,
         "last_commit_ts": last_commit_ts,
         "last_commit_subject": last_commit_subject,
+        "enrichment_state": enrichment_state,
     }
 
 
@@ -566,7 +649,8 @@ def enumerate_repos(root: Path, cfg) -> list[Path]:
     return repos
 
 
-def build(root: Path, timeout: float) -> dict:
+def build(root: Path, timeout: float, detail: str = "deep") -> dict:
+    _validate_detail(detail)
     root = root.resolve()
     cfg = awa_policy.PolicyConfig.load(_policy_path())
     default_base = "main"
@@ -618,9 +702,10 @@ def build(root: Path, timeout: float) -> dict:
                 wt_path = block.get("path", "")
                 if not wt_path:
                     continue
-                wt = worktree_detail(wt_path, block, base, timeout)
+                wt = worktree_detail(wt_path, block, base, timeout, detail)
                 wt.update(_plain_worktree(wt))  # additive jargon-free PM fields
                 worktrees.append(wt)
+        worktrees.sort(key=lambda item: item["path"])
 
         branches: list[str] = []
         rc, out = git(repo_str, "for-each-ref", "--format=%(refname:short)", "refs/heads", timeout=timeout)
@@ -630,9 +715,10 @@ def build(root: Path, timeout: float) -> dict:
         orphan_branches = []
         for b in branches:
             if b.startswith("cursor/worktree/") and b not in attached_branches:
-                br = branch_detail(repo_str, b, base, timeout)
+                br = branch_detail(repo_str, b, base, timeout, detail)
                 br.update(_plain_orphan(br))  # additive jargon-free PM fields
                 orphan_branches.append(br)
+        orphan_branches.sort(key=lambda item: item["branch"])
 
         repos_out.append({
             "path": repo_str,
@@ -681,6 +767,7 @@ def build(root: Path, timeout: float) -> dict:
         "generated_at": now_iso(),
         "root": str(root),
         "default_base": default_base,
+        "detail": detail,
         "summary": summary,
         "plain": _plain_summary(summary, environment),  # PM-facing honest-confidence block
         "repos": repos_out,
@@ -723,6 +810,12 @@ def _default_root() -> Path:
 def main(argv: list[str]) -> int:
     root = _default_root()
     timeout = float(os.environ.get("AWA_DASHBOARD_GIT_TIMEOUT", "4"))
+    detail = os.environ.get("AWA_DASHBOARD_DETAIL", "deep")
+    try:
+        _validate_detail(detail)
+    except ValueError as exc:
+        print(f"emitter: {exc}", file=sys.stderr)
+        return 2
     plain = False
     i = 1
     while i < len(argv):
@@ -743,7 +836,7 @@ def main(argv: list[str]) -> int:
             return 2
         i += 1
 
-    doc = build(root, timeout)
+    doc = build(root, timeout, detail=detail)
     if plain:
         for line in render_status_lines(doc):
             print(line)

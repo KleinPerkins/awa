@@ -17,6 +17,8 @@ or via unittest discovery. Covers the per-repo MODE surface after the ASK_ON rem
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -29,11 +31,73 @@ _DASHBOARD_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_DASHBOARD_DIR))
 import emitter  # noqa: E402
 import render as dashboard_render  # noqa: E402
+import test_render as dashboard_render_tests  # noqa: E402
 
 _IDENT = (
     "-c", "user.email=awa-test@example.invalid",
     "-c", "user.name=awa-test",
 )
+
+_LEGACY_DEEP_FIXTURE = {
+    "default_base": "main",
+    "generated_at": "<TIMESTAMP>",
+    "repo": {
+        "base_ref": "refs/heads/main",
+        "branches": ["main"],
+        "classification": "include",
+        "default_base": "main",
+        "has_base": True,
+        "mode": "",
+        "mode_error": "",
+        "name": "alpha",
+        "orphan_branches": [],
+        "owner_repo": "example/awa-test",
+        "path": "<ROOT>/included/alpha",
+        "plain_next": "I set up a safe copy before any changes are made here.",
+        "reason": "included by workspace policy",
+        "rel": "included/alpha",
+    },
+    "root": "<ROOT>",
+    "schema": "awa-worktree/v1",
+    "summary": {
+        "advisory": 0,
+        "ahead_of_main": 0,
+        "behind_main": 0,
+        "dirty": 0,
+        "diverged": 0,
+        "excluded": 0,
+        "included": 1,
+        "linked": 0,
+        "no_base": 0,
+        "orphan_branches": 0,
+        "repos": 1,
+        "worktrees": 1,
+    },
+    "worktree": {
+        "ab_status": "even",
+        "ahead": 0,
+        "behind": 0,
+        "branch": "main",
+        "detached": False,
+        "dirty": False,
+        "dirty_count": 0,
+        "head": "<HEAD>",
+        "is_base_branch": True,
+        "is_linked": False,
+        "is_primary": True,
+        "last_commit_subject": "init",
+        "last_commit_ts": "<TIMESTAMP>",
+        "locked": False,
+        "path": "<ROOT>/included/alpha",
+        "plain_next": "Nothing to do — this is where finished work lands.",
+        "plain_size": "<SIZE_LABEL>",
+        "plain_status": (
+            "Your original folder. I keep new work out of here until it is in a safe copy."
+        ),
+        "prunable": False,
+        "size_bytes": "<SIZE_BYTES>",
+    },
+}
 
 
 def _git(cwd: str, *args: str) -> None:
@@ -468,6 +532,175 @@ class TestWorktreeDiskSize(unittest.TestCase):
         source = (_DASHBOARD_DIR / "seed.canvas.tsx").read_text(encoding="utf-8")
         self.assertIn('"Size on disk"', source)
         self.assertIn("wt.plain_size || PM_COPY.sizeUnavailable", source)
+
+
+class TestEmitterDetailProfiles(_EmitterModeTestBase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = Path(_make_repo(self.root, "included/alpha"))
+        self._write_policy(
+            "version: 1\n"
+            "default: advisory\n"
+            "default_mode: on\n"
+            "include:\n"
+            "  - included/*\n"
+        )
+
+    def _build(self, detail: str) -> dict:
+        return emitter.build(self.root, timeout=30.0, detail=detail)
+
+    def _legacy_projection(self, doc: dict) -> dict:
+        repo = doc["repos"][0]
+        worktree = repo["worktrees"][0]
+        return {
+            "schema": doc["schema"],
+            "generated_at": "<TIMESTAMP>",
+            "root": "<ROOT>",
+            "default_base": doc["default_base"],
+            "summary": doc["summary"],
+            "repo": {
+                key: repo[key]
+                for key in (
+                    "rel", "name", "classification", "reason", "mode", "mode_error",
+                    "owner_repo", "has_base", "base_ref", "default_base", "branches",
+                    "orphan_branches", "plain_next",
+                )
+            } | {"path": "<ROOT>/included/alpha"},
+            "worktree": {
+                key: worktree[key]
+                for key in (
+                    "branch", "detached", "is_primary", "is_linked", "locked",
+                    "prunable", "dirty", "dirty_count", "ahead", "behind",
+                    "ab_status", "is_base_branch", "last_commit_subject",
+                    "plain_status", "plain_next",
+                )
+            } | {
+                "path": "<ROOT>/included/alpha",
+                "head": "<HEAD>",
+                "last_commit_ts": "<TIMESTAMP>",
+                "size_bytes": "<SIZE_BYTES>",
+                "plain_size": "<SIZE_LABEL>",
+            },
+        }
+
+    def test_fast_never_calls_du_or_history(self) -> None:
+        _git(str(self.repo), "branch", "cursor/worktree/orphan")
+        with mock.patch.object(emitter, "disk_usage_bytes") as disk, \
+                mock.patch.object(emitter, "last_commit_detail") as history:
+            doc = self._build("fast")
+        disk.assert_not_called()
+        history.assert_not_called()
+        self.assertEqual(doc["detail"], "fast")
+        items = doc["repos"][0]["worktrees"] + doc["repos"][0]["orphan_branches"]
+        self.assertEqual(len(items), 2)
+        for item in items:
+            with self.subTest(item=item.get("path") or item.get("branch")):
+                self.assertEqual(item["enrichment_state"], "not_checked")
+                self.assertIsNone(item["last_commit_ts"])
+                self.assertIsNone(item["last_commit_subject"])
+        worktree = doc["repos"][0]["worktrees"][0]
+        self.assertIsNone(worktree["size_bytes"])
+        self.assertEqual(worktree["plain_size"], "not checked")
+
+    def test_deep_preserves_normalized_legacy_fields(self) -> None:
+        doc = self._build("deep")
+        self.assertEqual(doc["detail"], "deep")
+        self.assertEqual(
+            doc["repos"][0]["worktrees"][0]["enrichment_state"],
+            "checked",
+        )
+        self.assertEqual(self._legacy_projection(doc), _LEGACY_DEEP_FIXTURE)
+
+    def test_deep_timeout_or_exception_is_unknown_and_nulled(self) -> None:
+        for failure in (
+            mock.DEFAULT,
+            OSError("fixture disappeared"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                behavior = {"return_value": None}
+                if failure is not mock.DEFAULT:
+                    behavior = {"side_effect": failure}
+                with mock.patch.object(emitter, "disk_usage_bytes", **behavior):
+                    doc = self._build("deep")
+                item = doc["repos"][0]["worktrees"][0]
+                self.assertEqual(item["enrichment_state"], "unknown")
+                self.assertIsNone(item["size_bytes"])
+                self.assertEqual(item["plain_size"], "not available")
+                self.assertIsNone(item["last_commit_ts"])
+                self.assertIsNone(item["last_commit_subject"])
+
+    def test_deep_inventory_identity_uncertainty_skips_enrichment(self) -> None:
+        with mock.patch.object(
+            emitter, "worktree_role_checked", return_value=(False, False, False),
+        ), mock.patch.object(emitter, "disk_usage_bytes") as disk, \
+                mock.patch.object(emitter, "last_commit_detail") as history:
+            doc = self._build("deep")
+        item = doc["repos"][0]["worktrees"][0]
+        self.assertEqual(item["enrichment_state"], "unknown")
+        self.assertIsNone(item["size_bytes"])
+        self.assertIsNone(item["last_commit_ts"])
+        disk.assert_not_called()
+        history.assert_not_called()
+
+    def test_fast_and_deep_keep_required_keys_and_deterministic_order(self) -> None:
+        _make_repo(self.root, "included/zeta")
+        for detail in ("fast", "deep"):
+            with self.subTest(detail=detail):
+                doc = self._build(detail)
+                self.assertEqual(
+                    [repo["rel"] for repo in doc["repos"]],
+                    ["included/alpha", "included/zeta"],
+                )
+                worktree = doc["repos"][0]["worktrees"][0]
+                for key in (
+                    "path", "branch", "head", "dirty", "ahead", "behind",
+                    "last_commit_ts", "last_commit_subject", "size_bytes",
+                    "plain_size", "enrichment_state",
+                ):
+                    self.assertIn(key, worktree)
+
+    def test_invalid_detail_refuses(self) -> None:
+        with self.assertRaisesRegex(ValueError, "fast or deep"):
+            self._build("summary")
+
+    def test_direct_emitter_defaults_deep_and_env_can_select_fast(self) -> None:
+        self.assertEqual(self._build("deep")["detail"], "deep")
+        with mock.patch.dict(os.environ, {"AWA_DASHBOARD_DETAIL": "fast"}), \
+                mock.patch.object(sys, "argv", ["emitter.py", "--root", str(self.root)]), \
+                mock.patch.object(emitter.json, "dump") as dump:
+            self.assertEqual(emitter.main(sys.argv), 0)
+        self.assertEqual(dump.call_args.args[0]["detail"], "fast")
+
+    def test_invalid_direct_emitter_detail_is_controlled(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, {"AWA_DASHBOARD_DETAIL": "summary"}), \
+                contextlib.redirect_stderr(stderr):
+            self.assertEqual(emitter.main(["emitter.py"]), 2)
+        self.assertEqual(stderr.getvalue(), "emitter: detail must be fast or deep\n")
+
+    def test_display_enrichment_is_not_imported_by_sensitive_paths(self) -> None:
+        roots = (
+            _DASHBOARD_DIR.parent / "kernel" / "lib",
+            _DASHBOARD_DIR.parent / "engine",
+            _DASHBOARD_DIR.parent / "consumer",
+        )
+        forbidden = ("from dashboard import emitter", "import dashboard.emitter")
+        for root in roots:
+            for path in root.rglob("*.py"):
+                if "tests" in path.parts:
+                    continue
+                source = path.read_text(encoding="utf-8")
+                for needle in forbidden:
+                    self.assertNotIn(needle, source, f"{needle!r} in {path}")
+
+
+def load_tests(
+    loader: unittest.TestLoader,
+    tests: unittest.TestSuite,
+    pattern: str | None,
+) -> unittest.TestSuite:
+    tests.addTests(loader.loadTestsFromModule(dashboard_render_tests))
+    return tests
 
 
 if __name__ == "__main__":

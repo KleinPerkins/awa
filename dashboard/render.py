@@ -99,6 +99,7 @@ def publish(
     *,
     policy: Path | None = None,
     timeout: float = 4.0,
+    detail: str = "fast",
     canvas_dir: Path | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
@@ -109,7 +110,7 @@ def publish(
     if policy is not None:
         os.environ["AWA_POLICY"] = str(policy.expanduser().resolve())
     try:
-        payload = emitter.build(root, timeout)
+        payload = emitter.build(root, timeout, detail=detail)
     finally:
         if previous_policy is None:
             os.environ.pop("AWA_POLICY", None)
@@ -137,12 +138,14 @@ def main() -> int:
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--policy", type=Path)
     parser.add_argument("--timeout", type=float, default=4.0)
+    parser.add_argument("--detail", choices=emitter.DETAILS, default="fast")
     parser.add_argument("--canvas-dir", type=Path)
     args = parser.parse_args()
     result = publish(
         args.root,
         policy=args.policy,
         timeout=args.timeout,
+        detail=args.detail,
         canvas_dir=args.canvas_dir,
     )
     print(json.dumps(result, sort_keys=True))
