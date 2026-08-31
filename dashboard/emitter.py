@@ -26,8 +26,6 @@ governed root / cwd); tests point it at a throwaway tree.
 
 from __future__ import annotations
 
-import concurrent.futures
-import hashlib
 import json
 import os
 import subprocess
@@ -42,8 +40,6 @@ import awa_policy  # noqa: E402
 
 SCHEMA = "awa-worktree/v1"
 DETAILS = ("fast", "deep")
-DEEP_WORKER_CHOICES = (1, 2, 4)
-DEFAULT_DEEP_WORKERS = 1
 
 # The engine launcher lives at <AWA_HOME>/bin/awa-engine.sh. The dashboard is render-only +
 # agent-command refresh; this probe is READ-ONLY (it only reads the daemon pidfile) and additive
@@ -411,170 +407,6 @@ def branch_detail(
     }
 
 
-def display_item(
-    kind: str,
-    value: dict,
-    repo: str,
-    ref: str | None = None,
-) -> dict:
-    if kind not in ("worktree", "branch"):
-        raise ValueError("display item kind must be worktree or branch")
-    certain = bool(value.get("head")) and value.get("ab_status") != "unknown"
-    if kind == "worktree":
-        certain = certain and bool(
-            value.get("is_primary") or value.get("is_linked")
-        )
-    return {
-        "kind": kind,
-        "value": dict(value),
-        "repo": repo,
-        "ref": ref,
-        "inventory_certain": certain,
-    }
-
-
-def unknown_enrichment(item: dict) -> dict:
-    value = dict(item["value"])
-    value["last_commit_ts"] = None
-    value["last_commit_subject"] = None
-    value["enrichment_state"] = "unknown"
-    if item["kind"] == "worktree":
-        value["size_bytes"] = None
-        value["plain_size"] = "not available"
-    return value
-
-
-def read_display_identity(item: dict, timeout: float) -> dict | None:
-    repo = item["repo"]
-    try:
-        canonical_path = str(Path(repo).resolve(strict=True))
-    except (OSError, RuntimeError):
-        return None
-    rc, out = git(
-        repo, "rev-parse", "--path-format=absolute", "--git-common-dir",
-        timeout=timeout,
-    )
-    if rc != 0 or not out.strip():
-        return None
-    try:
-        common_git_dir = str(Path(out.strip()).resolve(strict=True))
-    except (OSError, RuntimeError):
-        return None
-    rc, out = git(repo, "rev-parse", item.get("ref") or "HEAD", timeout=timeout)
-    head = out.strip()
-    if rc != 0 or not head:
-        return None
-    if item["kind"] == "worktree":
-        rc, status = git(
-            repo, "status", "--porcelain=v1", "-z", "--untracked-files=all",
-            timeout=timeout,
-        )
-        if rc != 0:
-            return None
-        status_material = status
-    else:
-        value = item["value"]
-        status_material = json.dumps(
-            {
-                key: value.get(key)
-                for key in ("branch", "head", "ahead", "behind", "ab_status")
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    return {
-        "canonical_path": canonical_path,
-        "common_git_dir": common_git_dir,
-        "head": head,
-        "inventory_status_sha256": hashlib.sha256(
-            status_material.encode("utf-8"),
-        ).hexdigest(),
-    }
-
-
-def _enrich_one(item: dict, timeout: float) -> dict:
-    if item["kind"] == "branch":
-        commit_ok, commit_ts, commit_subject = last_commit_detail(
-            item["repo"], timeout, item["ref"],
-        )
-        if not commit_ok:
-            return unknown_enrichment(item)
-        value = dict(item["value"])
-        value["last_commit_ts"] = commit_ts
-        value["last_commit_subject"] = commit_subject
-        value["enrichment_state"] = "checked"
-        return value
-
-    measured_size = disk_usage_bytes(item["repo"], timeout)
-    commit_ok, commit_ts, commit_subject = last_commit_detail(
-        item["repo"], timeout,
-    )
-    if measured_size is None or not commit_ok:
-        return unknown_enrichment(item)
-    value = dict(item["value"])
-    value["size_bytes"] = measured_size
-    value["plain_size"] = format_disk_size(measured_size)
-    value["last_commit_ts"] = commit_ts
-    value["last_commit_subject"] = commit_subject
-    value["enrichment_state"] = "checked"
-    return value
-
-
-def display_future_budget(timeout: float) -> float:
-    return max(timeout, 0.0) * 2.0 + 1.0
-
-
-def enrich_many(items, timeout: float, workers: int) -> list[dict]:
-    if workers not in DEEP_WORKER_CHOICES:
-        raise ValueError("workers must be 1, 2, or 4")
-    indexed = list(enumerate(items))
-    prepared = []
-    completed = []
-    for index, item in indexed:
-        before = None
-        if item.get("inventory_certain"):
-            before = read_display_identity(item, timeout)
-        if before is None:
-            completed.append((index, unknown_enrichment(item)))
-        else:
-            prepared.append((index, item, before))
-
-    def finish(index: int, item: dict, before, value: dict) -> None:
-        after = read_display_identity(item, timeout)
-        if after != before:
-            value = unknown_enrichment(item)
-        completed.append((index, value))
-
-    if workers == 1:
-        for index, item, before in prepared:
-            try:
-                value = _enrich_one(item, timeout)
-                finish(index, item, before, value)
-            except Exception:
-                completed.append((index, unknown_enrichment(item)))
-    else:
-        pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=workers,
-            thread_name_prefix="awa-dashboard-enrich",
-        )
-        futures = {
-            pool.submit(_enrich_one, item, timeout): (index, item, before)
-            for index, item, before in prepared
-        }
-        try:
-            for future, (index, item, before) in futures.items():
-                try:
-                    value = future.result(timeout=display_future_budget(timeout))
-                    finish(index, item, before, value)
-                except Exception:
-                    completed.append((index, unknown_enrichment(item)))
-        finally:
-            for future in futures:
-                future.cancel()
-            pool.shutdown(wait=True, cancel_futures=True)
-    return [value for _, value in sorted(completed)]
-
-
 def engine_status(timeout: float) -> dict:
     """READ-ONLY probe of the AWA engine daemon (Phase-8 engine-backed dashboard).
 
@@ -817,16 +649,8 @@ def enumerate_repos(root: Path, cfg) -> list[Path]:
     return repos
 
 
-def build(
-    root: Path,
-    timeout: float,
-    detail: str = "deep",
-    workers: int | None = None,
-) -> dict:
+def build(root: Path, timeout: float, detail: str = "deep") -> dict:
     _validate_detail(detail)
-    deep_workers = DEFAULT_DEEP_WORKERS if workers is None else workers
-    if deep_workers not in DEEP_WORKER_CHOICES:
-        raise ValueError("workers must be 1, 2, or 4")
     root = root.resolve()
     cfg = awa_policy.PolicyConfig.load(_policy_path())
     default_base = "main"
@@ -878,19 +702,10 @@ def build(
                 wt_path = block.get("path", "")
                 if not wt_path:
                     continue
-                wt = worktree_detail(wt_path, block, base, timeout, "fast")
+                wt = worktree_detail(wt_path, block, base, timeout, detail)
                 wt.update(_plain_worktree(wt))  # additive jargon-free PM fields
                 worktrees.append(wt)
         worktrees.sort(key=lambda item: item["path"])
-        if detail == "deep":
-            worktrees = enrich_many(
-                [
-                    display_item("worktree", item, item["path"])
-                    for item in worktrees
-                ],
-                timeout,
-                deep_workers,
-            )
 
         branches: list[str] = []
         rc, out = git(repo_str, "for-each-ref", "--format=%(refname:short)", "refs/heads", timeout=timeout)
@@ -900,21 +715,10 @@ def build(
         orphan_branches = []
         for b in branches:
             if b.startswith("cursor/worktree/") and b not in attached_branches:
-                br = branch_detail(repo_str, b, base, timeout, "fast")
+                br = branch_detail(repo_str, b, base, timeout, detail)
                 br.update(_plain_orphan(br))  # additive jargon-free PM fields
                 orphan_branches.append(br)
         orphan_branches.sort(key=lambda item: item["branch"])
-        if detail == "deep":
-            orphan_branches = enrich_many(
-                [
-                    display_item(
-                        "branch", item, repo_str, f"refs/heads/{item['branch']}",
-                    )
-                    for item in orphan_branches
-                ],
-                timeout,
-                deep_workers,
-            )
 
         repos_out.append({
             "path": repo_str,
