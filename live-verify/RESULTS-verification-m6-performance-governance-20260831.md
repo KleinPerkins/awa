@@ -2,7 +2,11 @@
 
 ## Decision
 
-M6-A.1 is accepted for Draft-PR review as **advisory governance**.
+M6-A.1 is accepted for Draft-PR review as **advisory governance**. The local
+policy and prescribed probes passed. The existing runnerless recipe does not
+reach repository `make verify`, so that integration sub-body is an explicit
+NO-GO requiring a separate controller-owned plan; no AWA-side substitute is
+authorized.
 
 - Timing and inventory findings are warnings; they do not replace or mask an
   authoritative result.
@@ -159,9 +163,11 @@ doctor/lifecycle checks remain distinct.
 | Command | Outcome |
 |---|---|
 | Focused M6 + contract/lane/suite-runner modules | 44 passed |
+| Isolated one-record docs-only `make verify-docs VERIFY_BASE=HEAD` fixture | passed; non-authoritative copy and no advisory findings |
 | `make check` | passed; source freeze passed |
 | `bash -x -c 'make verify'` | passed; 1,148 engine IDs, 30 dashboard tests, install and live checks; one source freeze |
 | `make verify-performance` | passed; one authoritative `make verify`, 62 scoped Git processes, no advisory findings |
+| Bugbot complete branch review | no bugs |
 
 The traced `make verify` wall observation was 5,702,083 ms. The prescribed
 performance target observation was 5,174,894 ms. They ran under one extended
@@ -174,10 +180,10 @@ The live GitHub `main` recipe was read after both gates. Its sole custom job
 `test_policy`, `test_modes`, `test_recovery`, and `test_state_lock`.
 `reaches_make_verify=false`.
 
-Per the accepted boundary, this does not weaken M6 or justify an AWA-side
-workflow. A separate controller-owned plan must decide how the protected recipe
-reaches repository `make verify`. `.github/pr-automation.json` and all other
-`.github` files remain unchanged.
+Per the operator's explicit M6 instruction, only that integration stops. A
+separate controller-owned plan must decide how the protected recipe reaches
+repository `make verify`. `.github/pr-automation.json` and all other `.github`
+files remain unchanged.
 
 ## Acceptance ledger
 
@@ -206,6 +212,9 @@ reaches repository `make verify`. `.github/pr-automation.json` and all other
 - **V25:** the runbook selects filtered PM/router and complete finish/retention
   rehearsals only for affected release surfaces, plus live Desktop UAT where
   headless proof ends.
+
+The local M6 body is complete; the controller-owned integration remains outside
+this AWA-side PR as an explicit reported requirement.
 
 ## Rollback
 

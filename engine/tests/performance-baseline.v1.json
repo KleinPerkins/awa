@@ -37,6 +37,7 @@
   "machine_contexts": [],
   "evidence": [
     "live-verify/RESULTS-verification-m3-guard-boundaries-20260830.md",
+    "live-verify/RESULTS-verification-m3-maintenance-context-20260830.md",
     "live-verify/RESULTS-verification-m6-performance-governance-20260831.md"
   ]
 }
