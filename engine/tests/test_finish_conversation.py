@@ -12,6 +12,7 @@ from pathlib import Path
 from consumer import egress
 from consumer import finish_current as UX
 from consumer.operator_loop import OperatorLoop
+from .finish_case_manifest import finish_cases, production_decision_adapter
 from .helpers import EngineTestCase, commit_all, git
 
 
@@ -391,38 +392,10 @@ class HookAndDispatcherTest(Phase2Base):
         self.assertEqual(choice["state"], "awaiting_retain_selection")
 
     def test_choice_canonicalizer_casing_trimming_and_reasons(self) -> None:
-        variants = {
-            "Commit": ("Commit", "commit", "COMMIT", "CoMmIt", " \tcommit\n"),
-            "Retain": ("Retain", "retain", "RETAIN", "ReTaIn", "\nretain "),
-            "Mixed": ("Mixed", "mixed", "MIXED", "MiXeD", " mixed\t"),
-            "Cancel": ("Cancel", "cancel", "CANCEL", "CaNcEl", "\tcancel "),
-        }
-        for canonical, answers in variants.items():
-            for answer in answers:
-                with self.subTest(canonical=canonical, answer=answer):
-                    self.assertEqual(UX.canonicalize_choice(answer), (canonical, "ok"))
-                    self.assertTrue(UX.is_exact_choice(answer))
-        self.assertEqual(UX.canonicalize_choice("Close"), ("Close", "ok"))
-        for answer in ("close", "CLOSE", "cLoSe", " Close ", "\tClose\n"):
-            with self.subTest(answer=answer):
+        for case in finish_cases(layer="pure"):
+            with self.subTest(case_id=case.case_id):
                 self.assertEqual(
-                    UX.canonicalize_choice(answer), (None, "close_must_be_exact"))
-                self.assertFalse(UX.is_exact_choice(answer))
-        rejected = (
-            ("Close please", "choice_not_standalone"),
-            ("yes", "choice_not_standalone"),
-            ("", "choice_empty"),
-            (True, "boolean_not_allowed"),
-            (False, "boolean_not_allowed"),
-            (1, "choice_not_string"),
-            (None, "choice_not_string"),
-        )
-        for answer, reason in rejected:
-            with self.subTest(answer=answer):
-                self.assertEqual(UX.canonicalize_choice(answer), (None, reason))
-        self.assertEqual(
-            UX.canonicalize_choice("Cancel", [{"name": "x"}]),
-            (None, "attachments_present"))
+                    production_decision_adapter(case.input), case.expected)
 
     def test_cancel_is_literal_noop(self) -> None:
         _, wt = self.linked("cancel2")
