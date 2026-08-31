@@ -17,6 +17,8 @@ or via unittest discovery. Covers the per-repo MODE surface after the ASK_ON rem
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -668,6 +670,13 @@ class TestEmitterDetailProfiles(_EmitterModeTestBase):
                 mock.patch.object(emitter.json, "dump") as dump:
             self.assertEqual(emitter.main(sys.argv), 0)
         self.assertEqual(dump.call_args.args[0]["detail"], "fast")
+
+    def test_invalid_direct_emitter_detail_is_controlled(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, {"AWA_DASHBOARD_DETAIL": "summary"}), \
+                contextlib.redirect_stderr(stderr):
+            self.assertEqual(emitter.main(["emitter.py"]), 2)
+        self.assertEqual(stderr.getvalue(), "emitter: detail must be fast or deep\n")
 
     def test_display_enrichment_is_not_imported_by_sensitive_paths(self) -> None:
         roots = (

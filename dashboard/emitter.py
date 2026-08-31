@@ -811,6 +811,11 @@ def main(argv: list[str]) -> int:
     root = _default_root()
     timeout = float(os.environ.get("AWA_DASHBOARD_GIT_TIMEOUT", "4"))
     detail = os.environ.get("AWA_DASHBOARD_DETAIL", "deep")
+    try:
+        _validate_detail(detail)
+    except ValueError as exc:
+        print(f"emitter: {exc}", file=sys.stderr)
+        return 2
     plain = False
     i = 1
     while i < len(argv):

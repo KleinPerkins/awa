@@ -36,6 +36,7 @@ import {
 type WtStatus = "even" | "ahead" | "behind" | "diverged" | "no-base" | "unknown";
 type Classification = "include" | "exclude" | "advisory";
 type RepoMode = "on" | "off" | "invalid" | "";
+type EnrichmentState = "checked" | "not_checked" | "unknown";
 
 type Worktree = {
   path: string;
@@ -55,6 +56,7 @@ type Worktree = {
   is_base_branch: boolean;
   last_commit_ts: string | null;
   last_commit_subject: string | null;
+  enrichment_state?: EnrichmentState;
   // Additive, optional jargon-free operator fields (emitter-authored, egress-scanned in Python).
   plain_status?: string;
   plain_next?: string;
@@ -69,6 +71,7 @@ type OrphanBranch = {
   ab_status: WtStatus;
   last_commit_ts: string | null;
   last_commit_subject: string | null;
+  enrichment_state?: EnrichmentState;
   plain_status?: string;
   plain_next?: string;
 };
@@ -219,6 +222,8 @@ const PM_COPY = {
   roleSafeCopy: "safe copy",
   roleOriginal: "your original folder",
   workUnknown: "your work",
+  enrichmentNotChecked: "not checked",
+  enrichmentUnknown: "couldn't check in time",
   unsavedNone: "saved",
   unsavedSome: "unsaved",
   sizeUnavailable: "not available",
@@ -327,6 +332,18 @@ function formatTs(iso: string | null): string {
   return `${mon} ${day} ${hh}:${mm} UTC`;
 }
 
+function lastWorkLabel(item: Worktree): string {
+  if (item.enrichment_state === "not_checked") return PM_COPY.enrichmentNotChecked;
+  if (item.enrichment_state === "unknown") return PM_COPY.enrichmentUnknown;
+  return item.last_commit_subject || PM_COPY.workUnknown;
+}
+
+function lastSavedLabel(item: Worktree | OrphanBranch): string {
+  if (item.enrichment_state === "not_checked") return PM_COPY.enrichmentNotChecked;
+  if (item.enrichment_state === "unknown") return PM_COPY.enrichmentUnknown;
+  return formatTs(item.last_commit_ts);
+}
+
 function snapshotAgeHours(iso: string | null): number {
   if (!iso) return Infinity;
   const t = Date.parse(iso);
@@ -416,7 +433,7 @@ function worktreeRows(rows: WtRow[], showTech: boolean) {
       <Text size="small" tone="quaternary">{repo.owner_repo || PM_COPY.noOrigin}</Text>
     </Stack>,
     <Stack gap={2}>
-      <Text size="small" tone="secondary">{wt.last_commit_subject || PM_COPY.workUnknown}</Text>
+      <Text size="small" tone="secondary">{lastWorkLabel(wt)}</Text>
       {showTech ? <Code>{technicalWhere(wt)}</Code> : null}
     </Stack>,
     <Pill size="sm" active={wt.is_linked}>{roleLabel(wt)}</Pill>,
@@ -425,7 +442,7 @@ function worktreeRows(rows: WtRow[], showTech: boolean) {
       ? <Pill size="sm" active>{wt.dirty_count} {PM_COPY.unsavedSome}</Pill>
       : <Text size="small" tone="quaternary">{PM_COPY.unsavedNone}</Text>,
     <Text size="small" tone="secondary">{vsLabel(wt)}</Text>,
-    <Text size="small" tone="secondary">{formatTs(wt.last_commit_ts)}</Text>,
+    <Text size="small" tone="secondary">{lastSavedLabel(wt)}</Text>,
     <Stack gap={2}>
       <Text size="small" tone="secondary">{wtNext(wt)}</Text>
       {showTech ? <Code>{technicalRaw(wt)}</Code> : null}
@@ -656,7 +673,7 @@ export default function AwaWorktreeDashboard() {
             rows={orphanRows.map(({ repo, branch }) => [
               <Text weight="semibold">{repo.rel === "." ? PM_COPY.umbrella : repo.rel}</Text>,
               <Text size="small" tone="secondary">{orphanVsLabel(branch)}</Text>,
-              <Text size="small" tone="secondary">{formatTs(branch.last_commit_ts)}</Text>,
+              <Text size="small" tone="secondary">{lastSavedLabel(branch)}</Text>,
               <Text size="small" tone="secondary">{branch.plain_next || PM_COPY.nextFallback}</Text>,
             ])}
             rowTone={orphanRows.map(() => "warning" as const)}

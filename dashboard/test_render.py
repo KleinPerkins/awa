@@ -99,6 +99,17 @@ class TestRenderDetailProfile(unittest.TestCase):
         self.assertIn('"enrichment_state": "not_checked"', rendered)
         self.assertIn('"plain_size": "not checked"', rendered)
 
+    def test_seed_renders_unqueried_history_as_not_checked(self) -> None:
+        source = (_DASHBOARD_DIR / "seed.canvas.tsx").read_text(encoding="utf-8")
+        self.assertIn('enrichmentNotChecked: "not checked"', source)
+        self.assertIn(
+            'item.enrichment_state === "not_checked"',
+            source,
+        )
+        self.assertIn("{lastWorkLabel(wt)}", source)
+        self.assertIn("{lastSavedLabel(wt)}", source)
+        self.assertIn("{lastSavedLabel(branch)}", source)
+
     def test_publish_allows_explicit_deep(self) -> None:
         payload = copy.deepcopy(_VALID_DOC)
         payload["detail"] = "deep"
