@@ -19,6 +19,7 @@ Decision surface (mirrors the frozen guard permission schema: allow/ask/deny):
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import selectors
@@ -654,6 +655,37 @@ class _PrimaryMaintenanceShape:
     matched: bool
 
 
+@dataclass(frozen=True)
+class RepositoryStateToken:
+    worktree_root: str
+    common_git_dir: str
+    head_oid: str
+    upstream_name: str
+    upstream_oid: str
+    maintenance_config_sha256: str
+    status_sha256: str
+    operation_markers_sha256: str
+    hidden_index_sha256: str
+
+
+@dataclass(frozen=True)
+class PrimaryMaintenanceGitContext:
+    repository_identity: tuple[str, str]
+    session_cwd: str
+    branch: str
+    upstream: str
+    upstream_remote: str
+    status_porcelain_v2: bytes
+    operation_in_progress: bool
+    hidden_index_bits: bool
+    head_is_ancestor_of_upstream: bool | None
+    state_before: RepositoryStateToken
+    state_after: RepositoryStateToken
+    errors: tuple[str, ...]
+    merge_ref: str
+    fetch_refspecs: tuple[str, ...]
+
+
 def _primary_maintenance_related(command: str, depth: int = 0) -> bool:
     try:
         segments = _segments(command)
@@ -1036,6 +1068,412 @@ def _primary_maintenance_is_idle(
         return None
 
 
+def _primary_maintenance_paths_sha256(paths: list[str]) -> str | None:
+    digest = hashlib.sha256()
+    try:
+        for raw in sorted(paths):
+            path = os.path.abspath(raw)
+            digest.update(path.encode("utf-8", "surrogateescape"))
+            digest.update(b"\x00")
+            if not os.path.lexists(path):
+                digest.update(b"missing\x00")
+                continue
+            stat_result = os.lstat(path)
+            digest.update(
+                "{0}:{1}:{2}:{3}".format(
+                    stat_result.st_mode,
+                    stat_result.st_size,
+                    stat_result.st_mtime_ns,
+                    stat_result.st_ino,
+                ).encode("ascii")
+            )
+            digest.update(b"\x00")
+            if os.path.isfile(path):
+                with open(path, "rb") as handle:
+                    while True:
+                        chunk = handle.read(65536)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+            digest.update(b"\x00")
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return digest.hexdigest()
+
+
+def _primary_maintenance_operation_paths(
+        git_dir: str,
+        common_dir: str,
+        branch: str,
+) -> list[str]:
+    paths = [
+        os.path.join(directory, marker)
+        for directory in {git_dir, common_dir}
+        for marker in _PRIMARY_MAINTENANCE_IN_PROGRESS
+    ]
+    paths.extend(
+        [
+            os.path.join(git_dir, "index.lock"),
+            os.path.join(git_dir, "HEAD.lock"),
+            os.path.join(common_dir, "packed-refs.lock"),
+            os.path.join(common_dir, "config.lock"),
+            os.path.join(common_dir, "shallow.lock"),
+        ]
+    )
+    if branch:
+        paths.append(
+            os.path.join(
+                common_dir,
+                "refs",
+                "heads",
+                branch + ".lock",
+            )
+        )
+    return paths
+
+
+def _primary_maintenance_repository_identity(
+        cwd: str,
+) -> tuple[str, str, str] | None:
+    lines = _primary_maintenance_lines(
+        _run_primary_maintenance_git(
+            cwd,
+            "rev-parse",
+            "--show-toplevel",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        )
+    )
+    if (
+        lines is None
+        or len(lines) != 3
+        or any(not os.path.isabs(line) for line in lines)
+        or not os.path.isdir(lines[0])
+        or not os.path.isdir(lines[1])
+        or not os.path.isdir(lines[2])
+    ):
+        return None
+    return tuple(os.path.realpath(line) for line in lines)  # type: ignore[return-value]
+
+
+def _primary_maintenance_status_v2(
+        result: tuple[int, str, str] | None,
+) -> tuple[bytes, str, str, str, bool] | None:
+    if result is None:
+        return None
+    returncode, stdout, stderr = result
+    if returncode != 0 or stderr or not stdout or not stdout.endswith("\x00"):
+        return None
+    records = stdout[:-1].split("\x00")
+    fields: dict[str, str] = {}
+    dirty = False
+    for record in records:
+        if record.startswith("# "):
+            name, separator, value = record[2:].partition(" ")
+            if not separator or name in fields:
+                return None
+            fields[name] = value
+        else:
+            dirty = True
+    head_oid = fields.get("branch.oid", "")
+    branch = fields.get("branch.head", "")
+    upstream = fields.get("branch.upstream", "")
+    if (
+        len(head_oid) not in (40, 64)
+        or re.fullmatch(r"[0-9a-f]+", head_oid) is None
+        or not branch
+        or branch == "(detached)"
+        or not upstream
+        or upstream.startswith(".")
+        or upstream.endswith("/")
+    ):
+        return None
+    upstream_ref = "refs/remotes/" + upstream
+    if not _valid_refspec_ref(
+        "refs/heads/" + branch,
+        allow_wildcard=False,
+    ) or not _valid_refspec_ref(upstream_ref, allow_wildcard=False):
+        return None
+    return (
+        stdout.encode("utf-8", "surrogateescape"),
+        branch,
+        upstream_ref,
+        head_oid,
+        dirty,
+    )
+
+
+def _primary_maintenance_read_ref(
+        common_dir: str,
+        ref: str,
+) -> str | None:
+    if not _valid_refspec_ref(ref, allow_wildcard=False):
+        return None
+    loose = os.path.join(common_dir, *ref.split("/"))
+    try:
+        if os.path.isfile(loose):
+            with open(loose, "r", encoding="ascii") as handle:
+                value = handle.read(129)
+            oid = value.strip()
+            if len(value) > 128:
+                return None
+            if (
+                len(oid) in (40, 64)
+                and re.fullmatch(r"[0-9a-f]+", oid) is not None
+            ):
+                return oid
+            return None
+        packed = os.path.join(common_dir, "packed-refs")
+        if not os.path.isfile(packed):
+            return None
+        with open(packed, "r", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith(("#", "^")):
+                    continue
+                oid, separator, name = line.rstrip("\n").partition(" ")
+                if separator and name == ref:
+                    if (
+                        len(oid) in (40, 64)
+                        and re.fullmatch(r"[0-9a-f]+", oid) is not None
+                    ):
+                        return oid
+                    return None
+    except (OSError, UnicodeError):
+        return None
+    return None
+
+
+def _capture_primary_maintenance_state(
+        cwd: str,
+        worktree_root: str,
+        git_dir: str,
+        common_dir: str,
+) -> tuple[RepositoryStateToken, bytes, bool, bool] | None:
+    config_paths = [
+        os.path.join(common_dir, "config"),
+        os.path.join(git_dir, "config.worktree"),
+    ]
+    index_paths = [os.path.join(git_dir, "index")]
+    generic_operation_paths = _primary_maintenance_operation_paths(
+        git_dir,
+        common_dir,
+        "",
+    )
+    pre_config_sha256 = _primary_maintenance_paths_sha256(config_paths)
+    pre_operation_sha256 = _primary_maintenance_paths_sha256(
+        generic_operation_paths
+    )
+    pre_index_sha256 = _primary_maintenance_paths_sha256(index_paths)
+    if (
+        pre_config_sha256 is None
+        or pre_operation_sha256 is None
+        or pre_index_sha256 is None
+    ):
+        return None
+    status = _primary_maintenance_status_v2(
+        _run_primary_maintenance_git(
+            cwd,
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--branch",
+            "--untracked-files=all",
+        )
+    )
+    if status is None:
+        return None
+    status_bytes, branch, upstream_ref, head_oid, dirty = status
+    head_ref_oid = _primary_maintenance_read_ref(
+        common_dir,
+        "refs/heads/" + branch,
+    )
+    upstream_oid = _primary_maintenance_read_ref(common_dir, upstream_ref)
+    config_sha256 = _primary_maintenance_paths_sha256(config_paths)
+    operation_sha256 = _primary_maintenance_paths_sha256(
+        _primary_maintenance_operation_paths(git_dir, common_dir, branch)
+    )
+    generic_operation_sha256 = _primary_maintenance_paths_sha256(
+        generic_operation_paths
+    )
+    hidden_index_sha256 = _primary_maintenance_paths_sha256(index_paths)
+    if (
+        head_ref_oid is None
+        or upstream_oid is None
+        or config_sha256 is None
+        or operation_sha256 is None
+        or generic_operation_sha256 is None
+        or hidden_index_sha256 is None
+    ):
+        return None
+    token = RepositoryStateToken(
+        worktree_root=worktree_root,
+        common_git_dir=common_dir,
+        head_oid=head_oid,
+        upstream_name=upstream_ref,
+        upstream_oid=upstream_oid,
+        maintenance_config_sha256=config_sha256,
+        status_sha256=hashlib.sha256(status_bytes).hexdigest(),
+        operation_markers_sha256=operation_sha256,
+        hidden_index_sha256=hidden_index_sha256,
+    )
+    stable = (
+        head_ref_oid == head_oid
+        and pre_config_sha256 == config_sha256
+        and pre_operation_sha256 == generic_operation_sha256
+        and pre_index_sha256 == hidden_index_sha256
+    )
+    return token, status_bytes, dirty, stable
+
+
+def _primary_maintenance_config_map(
+        cwd: str,
+) -> dict[str, list[str]] | None:
+    result = _run_primary_maintenance_git(cwd, "config", "--null", "--list")
+    if result is None:
+        return None
+    returncode, stdout, stderr = result
+    if returncode != 0 or stderr or not stdout.endswith("\x00"):
+        return None
+    values: dict[str, list[str]] = {}
+    for record in stdout[:-1].split("\x00"):
+        key, separator, value = record.partition("\n")
+        if not separator or not key:
+            return None
+        values.setdefault(key.lower(), []).append(value)
+    return values
+
+
+def _collect_primary_maintenance_context(
+        cwd: str,
+        shape: _PrimaryMaintenanceShape,
+        repository_context: gitutil.RepoContext | None = None,
+) -> PrimaryMaintenanceGitContext | None:
+    if not shape.valid:
+        return None
+    if repository_context is None:
+        identity = _primary_maintenance_repository_identity(cwd)
+        if identity is None:
+            return None
+        seed_branch = None
+        seed_head = None
+    else:
+        if (
+            not repository_context.is_git
+            or not repository_context.toplevel
+            or not repository_context.git_dir
+            or not repository_context.common_dir
+            or not repository_context.branch
+            or not repository_context.head
+        ):
+            return None
+        identity = (
+            os.path.realpath(repository_context.toplevel),
+            os.path.realpath(repository_context.git_dir),
+            os.path.realpath(repository_context.common_dir),
+        )
+        if (
+            any(not os.path.isabs(path) for path in identity)
+            or any(not os.path.isdir(path) for path in identity)
+        ):
+            return None
+        seed_branch = repository_context.branch
+        seed_head = repository_context.head
+    worktree_root, git_dir, common_dir = identity
+    before_capture = _capture_primary_maintenance_state(
+        cwd,
+        worktree_root,
+        git_dir,
+        common_dir,
+    )
+    if before_capture is None:
+        return None
+    state_before, status_bytes, dirty, before_stable = before_capture
+    upstream = state_before.upstream_name
+    branch_name = _primary_maintenance_status_v2(
+        (0, status_bytes.decode("utf-8", "surrogateescape"), "")
+    )
+    if branch_name is None:
+        return None
+    _status, local_branch, upstream_ref, _head, _is_dirty = branch_name
+    config = _primary_maintenance_config_map(cwd)
+    if config is None:
+        return None
+    remote_values = config.get(
+        "branch.{0}.remote".format(local_branch).lower(),
+        [],
+    )
+    merge_refs = config.get(
+        "branch.{0}.merge".format(local_branch).lower(),
+        [],
+    )
+    if len(remote_values) != 1 or len(merge_refs) != 1:
+        return None
+    remote = remote_values[0]
+    fetch_refspecs = tuple(
+        config.get("remote.{0}.fetch".format(remote).lower(), [])
+    )
+    idle = _primary_maintenance_is_idle(
+        git_dir,
+        common_dir,
+        local_branch,
+    )
+    if idle is None:
+        return None
+    if dirty or not idle:
+        hidden_index_bits = False
+    else:
+        hidden_index_bits = _primary_maintenance_has_hidden_index_bits(cwd)
+        if hidden_index_bits is None:
+            return None
+    ancestry: bool | None = None
+    if shape.kind == "fast_forward":
+        result = _run_primary_maintenance_git(
+            cwd,
+            "merge-base",
+            "--is-ancestor",
+            "HEAD",
+            upstream_ref,
+        )
+        if result is None or result[1] or result[2] or result[0] not in (0, 1):
+            return None
+        ancestry = result[0] == 0
+    after_capture = _capture_primary_maintenance_state(
+        cwd,
+        worktree_root,
+        git_dir,
+        common_dir,
+    )
+    if after_capture is None:
+        return None
+    state_after, _after_status, _after_dirty, after_stable = after_capture
+    errors: tuple[str, ...] = ()
+    if (
+        state_before != state_after
+        or not before_stable
+        or not after_stable
+        or (seed_branch is not None and seed_branch != local_branch)
+        or (seed_head is not None and seed_head != state_before.head_oid)
+    ):
+        errors = ("state_changed",)
+    return PrimaryMaintenanceGitContext(
+        repository_identity=(worktree_root, common_dir),
+        session_cwd=os.path.realpath(cwd),
+        branch=local_branch,
+        upstream=upstream,
+        upstream_remote=remote,
+        status_porcelain_v2=status_bytes,
+        operation_in_progress=not idle,
+        hidden_index_bits=hidden_index_bits,
+        head_is_ancestor_of_upstream=ancestry,
+        state_before=state_before,
+        state_after=state_after,
+        errors=errors,
+        merge_ref=merge_refs[0],
+        fetch_refspecs=fetch_refspecs,
+    )
+
+
 def _maintenance_result(
         allowed: bool,
         kind: str,
@@ -1045,7 +1483,7 @@ def _maintenance_result(
     return PrimaryMaintenanceDecision(allowed, kind, reason_code, matched)
 
 
-def classify_primary_maintenance(
+def _classify_primary_maintenance_uncached(
         command: str,
         cwd: str,
 ) -> PrimaryMaintenanceDecision:
@@ -1244,6 +1682,121 @@ def classify_primary_maintenance(
         if ancestry[0] != 0:
             return _maintenance_result(False, shape.kind, "inspection_failed")
     return _maintenance_result(True, shape.kind, "allowed")
+
+
+def _classify_primary_maintenance_context(
+        shape: _PrimaryMaintenanceShape,
+        context: PrimaryMaintenanceGitContext,
+) -> PrimaryMaintenanceDecision:
+    if (
+        context.errors
+        or context.state_before != context.state_after
+        or context.repository_identity
+        != (
+            context.state_before.worktree_root,
+            context.state_before.common_git_dir,
+        )
+        or context.session_cwd != os.path.realpath(context.session_cwd)
+        or context.branch == ""
+        or context.upstream != context.state_before.upstream_name
+        or context.state_before.head_oid != context.state_after.head_oid
+        or context.state_before.upstream_oid != context.state_after.upstream_oid
+    ):
+        return _maintenance_result(False, shape.kind, "inspection_failed")
+    remote = context.upstream_remote
+    merge_ref = context.merge_ref
+    if (
+        not remote
+        or remote == "."
+        or not _valid_refspec_ref(merge_ref, allow_wildcard=False)
+        or not merge_ref.startswith("refs/heads/")
+    ):
+        return _maintenance_result(False, shape.kind, "missing_upstream")
+    if (
+        any(ord(char) < 32 or ord(char) == 127 for char in remote)
+        or any(token in remote for token in ("..", "@{", "\\", ":", "*", "?", "["))
+        or remote.startswith(".")
+        or remote.endswith("/")
+    ):
+        return _maintenance_result(False, shape.kind, "missing_upstream")
+    upstream_ref = _safe_fetch_destination(
+        remote,
+        merge_ref,
+        list(context.fetch_refspecs),
+    )
+    if upstream_ref is None or upstream_ref != context.upstream:
+        return _maintenance_result(False, shape.kind, "unsafe_fetch_config")
+    for oid, reason in (
+        (context.state_after.upstream_oid, "unsafe_fetch_config"),
+        (context.state_after.head_oid, "inspection_failed"),
+    ):
+        if (
+            len(oid) not in (40, 64)
+            or re.fullmatch(r"[0-9a-f]+", oid) is None
+        ):
+            return _maintenance_result(False, shape.kind, reason)
+    short_upstream = upstream_ref[len("refs/remotes/"):]
+    if shape.kind == "fetch":
+        if shape.operand and shape.operand != remote:
+            return _maintenance_result(False, shape.kind, "wrong_upstream")
+    else:
+        if shape.operand not in {"", "@{u}", "@{upstream}", short_upstream}:
+            return _maintenance_result(False, shape.kind, "wrong_upstream")
+    if context.operation_in_progress:
+        return _maintenance_result(False, shape.kind, "busy")
+    if context.hidden_index_bits:
+        return _maintenance_result(False, shape.kind, "dirty")
+    parsed_status = _primary_maintenance_status_v2(
+        (
+            0,
+            context.status_porcelain_v2.decode(
+                "utf-8",
+                "surrogateescape",
+            ),
+            "",
+        )
+    )
+    if parsed_status is None:
+        return _maintenance_result(False, shape.kind, "inspection_failed")
+    if parsed_status[4]:
+        return _maintenance_result(False, shape.kind, "dirty")
+    if shape.kind == "fast_forward":
+        if context.head_is_ancestor_of_upstream is None:
+            return _maintenance_result(False, shape.kind, "inspection_failed")
+        if not context.head_is_ancestor_of_upstream:
+            return _maintenance_result(False, shape.kind, "diverged")
+    return _maintenance_result(True, shape.kind, "allowed")
+
+
+def classify_primary_maintenance(
+        command: str,
+        cwd: str,
+        repository_context: gitutil.RepoContext | None = None,
+) -> PrimaryMaintenanceDecision:
+    """Use one invocation-local context or preserve the uncached decision."""
+
+    shape = _primary_maintenance_shape(command)
+    if not shape.valid:
+        return _maintenance_result(
+            False,
+            shape.kind,
+            "unsupported_form",
+            shape.matched,
+        )
+    if any(
+        key in _PRIMARY_MAINTENANCE_RISKY_GIT_ENV
+        or key.startswith("GIT_CONFIG_")
+        for key in os.environ
+    ):
+        return _maintenance_result(False, shape.kind, "inspection_failed")
+    context = _collect_primary_maintenance_context(
+        cwd,
+        shape,
+        repository_context,
+    )
+    if context is None:
+        return _classify_primary_maintenance_uncached(command, cwd)
+    return _classify_primary_maintenance_context(shape, context)
 
 
 # ---- ADR 0001: target-path-aware mutation scope -----------------------------------
@@ -1656,7 +2209,11 @@ def decide_shell(cwd: str, command: str, policy_path: str,
         # ADRs 0010/0019: fetch and merge remain mutating. Only the exact,
         # state-proven maintenance intersection converts this included-primary deny
         # to allow; every false/unknown result denies before ADR 0001 narrowing.
-        maintenance = classify_primary_maintenance(command, cwd)
+        maintenance = classify_primary_maintenance(
+            command,
+            cwd,
+            repository_context=ctx,
+        )
         if maintenance.allowed:
             return _allow(
                 _PRIMARY_MAINTENANCE_ALLOW_REASONS[maintenance.kind],
