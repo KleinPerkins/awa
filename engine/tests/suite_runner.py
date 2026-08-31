@@ -1,7 +1,8 @@
 """Measured stdlib unittest runner for AWA.
 
-The default remains serial. Opt-in module workers use isolated Python
-processes, and every receipt remains descriptive evidence only.
+The direct internal CLI defaults to serial; the ordinary ``run-tests.sh``
+entrypoint supplies the owner-approved two-worker default. Module workers use
+isolated Python processes, and every receipt remains descriptive evidence only.
 """
 
 from __future__ import annotations

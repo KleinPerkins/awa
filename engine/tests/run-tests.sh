@@ -41,10 +41,29 @@ case "${AWA_FULL_INSTALLED_GUARD_MATRIX:-0}" in
 esac
 
 rc=0
-# M2-A keeps the runner's literal jobs=1 default. Parallel verification is
-# opt-in with an explicit --jobs 2 or --jobs 4 until a later promotion decision.
+# Ordinary verification uses the operator-approved two-worker M2 path. Keep
+# AWA_TEST_JOBS=1 and explicit --jobs 1 as serial fallbacks; an explicit CLI
+# choice wins over the environment/default and remains validated by the runner.
+explicit_jobs=0
+for arg in "$@"; do
+  case "$arg" in
+    --)
+      break
+      ;;
+    --jobs|--jobs=*)
+      explicit_jobs=1
+      break
+      ;;
+  esac
+done
+if [ "$explicit_jobs" -eq 1 ]; then
+  runner_args=("$@")
+else
+  runner_args=(--jobs "${AWA_TEST_JOBS:-2}" "$@")
+fi
+
 PYTHONPATH="$AWA_PKG_PARENT${PYTHONPATH:+:$PYTHONPATH}" \
-  python3 -B -m engine.tests.suite_runner "$@" || rc=$?
+  python3 -B -m engine.tests.suite_runner "${runner_args[@]}" || rc=$?
 
 # Classify only after the engine run (including worker aggregation) succeeds.
 # Runner-only flags still execute the full inventory and must not suppress the
@@ -58,7 +77,7 @@ if [ "$rc" -eq 0 ]; then
 import sys
 from engine.tests.suite_runner import invocation_runs_full_inventory
 print("full" if invocation_runs_full_inventory(tuple(sys.argv[1:])) else "filtered")
-' "$@"
+' "${runner_args[@]}"
   )" || rc=$?
   if [ "$rc" -eq 0 ] && [ "$dashboard_scope" != "full" ] && [ "$dashboard_scope" != "filtered" ]; then
     echo "awa-engine tests: invalid dashboard scope classification" >&2
