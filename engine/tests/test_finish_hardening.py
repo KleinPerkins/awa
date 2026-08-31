@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from consumer import finish_current as UX
+from .finish_case_manifest import finish_cases
 from .helpers import EngineTestCase, commit_all, git
 
 
@@ -69,43 +70,31 @@ class HardeningBase(EngineTestCase):
 
 class CurrentEnvelopeAdversarialTest(HardeningBase):
     def test_non_destructive_casing_matrix_through_hook_envelope_and_current(self) -> None:
-        variants = {
-            "Commit": ("commit", "COMMIT", "CoMmIt", " \tcommit\n"),
-            "Retain": ("retain", "RETAIN", "ReTaIn", "\nretain "),
-            "Mixed": ("mixed", "MIXED", "MiXeD", " mixed\t"),
-            "Cancel": ("cancel", "CANCEL", "CaNcEl", "\tcancel "),
-        }
-        states = {
-            "Commit": "awaiting_commit_selection",
-            "Retain": "awaiting_retain_selection",
-            "Mixed": "awaiting_mixed_selection",
-            "Cancel": "cancelled",
-        }
-        for choice, submitted_values in variants.items():
-            for number, submitted in enumerate(submitted_values):
-                with self.subTest(choice=choice, submitted=submitted):
-                    _, wt = self.linked(
-                        f"case-{choice.lower()}-{number}")
-                    draft = Path(wt, "draft")
-                    draft.write_text("x", encoding="utf-8")
-                    before = draft.read_bytes()
-                    conv = f"conv-{choice}-{number}"
-                    self.start(wt, conv)
-                    hook = UX.handle_hook_payload(self.payload(
-                        wt, submitted, conv, event_id=f"event-{choice}-{number}"))
-                    self.assertTrue(hook["continue"])
-                    envelope_file = next(UX._envelope_dir().glob("envelope-*.json"))
-                    envelope = json.loads(envelope_file.read_text(encoding="utf-8"))
-                    self.assertEqual(envelope["exact_text"], submitted)
-                    self.assertEqual(envelope["canonical_choice"], choice)
-                    out = self.current(wt)
-                    self.assertTrue(out["ok"], out)
-                    self.assertEqual(out["state"], states[choice])
-                    if choice == "Cancel":
-                        self.assertEqual(draft.read_bytes(), before)
-                        self.assertIsNone(UX.read_dialogue(conv))
-                        self.assertEqual(
-                            UX._load_finish().read_challenge(conv)[1], "absent")
+        for number, case in enumerate(finish_cases(layer="physical")):
+            choice = case.expected["canonical_choice"]
+            submitted = case.input["answer"]
+            with self.subTest(case_id=case.case_id):
+                _, wt = self.linked(f"case-{choice.lower()}-{number}")
+                draft = Path(wt, "draft")
+                draft.write_text("x", encoding="utf-8")
+                before = draft.read_bytes()
+                conv = f"conv-{choice}-{number}"
+                self.start(wt, conv)
+                hook = UX.handle_hook_payload(self.payload(
+                    wt, submitted, conv, event_id=f"event-{choice}-{number}"))
+                self.assertTrue(hook["continue"])
+                envelope_file = next(UX._envelope_dir().glob("envelope-*.json"))
+                envelope = json.loads(envelope_file.read_text(encoding="utf-8"))
+                self.assertEqual(envelope["exact_text"], submitted)
+                self.assertEqual(envelope["canonical_choice"], choice)
+                out = self.current(wt)
+                self.assertTrue(out["ok"], out)
+                self.assertEqual(out["state"], case.expected["state"])
+                if choice == "Cancel":
+                    self.assertEqual(draft.read_bytes(), before)
+                    self.assertIsNone(UX.read_dialogue(conv))
+                    self.assertEqual(
+                        UX._load_finish().read_challenge(conv)[1], "absent")
 
     def test_exact_close_succeeds_through_current_path(self) -> None:
         _, wt = self.linked("exact-close")
