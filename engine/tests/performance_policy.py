@@ -19,6 +19,15 @@ from engine.tests import suite_runner, verification_contract
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BASELINE = Path(__file__).with_name("performance-baseline.v1.json")
 PROFILE_SOURCE = Path(__file__).with_name("guard_boundary_profile.py")
+DOCS_WORKLOAD_COMMAND = (
+    "python3",
+    "-B",
+    "-m",
+    "engine.tests.verify_lane",
+    "require-docs",
+    "--base-env",
+    "AWA_VERIFY_BASE",
+)
 
 
 def _sha256(parts: Sequence[bytes]) -> str:
@@ -58,6 +67,12 @@ def workload_sha256(
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(body).hexdigest()
+
+
+def docs_workload_sha256() -> str:
+    """Return the fixed docs-lane producer identity wired by Make."""
+
+    return workload_sha256("docs", DOCS_WORKLOAD_COMMAND, (), 1)
 
 
 def load_baseline(path: Path = DEFAULT_BASELINE) -> dict:
@@ -323,7 +338,11 @@ def main(
                     "outcome": "passed",
                     "elapsed_ms": arguments.elapsed_ms,
                     "load_note": arguments.load_note,
-                    "workload_sha256": lane["workload_sha256"],
+                    "workload_sha256": (
+                        docs_workload_sha256()
+                        if arguments.lane == "docs"
+                        else None
+                    ),
                     "module_durations_ms": {},
                     "process_measurement": process,
                 }

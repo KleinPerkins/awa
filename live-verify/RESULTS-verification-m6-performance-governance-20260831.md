@@ -74,7 +74,7 @@ rename (`test_freeze_checker_passes` removed and
 
 The fixed workload identities are:
 
-- docs: `d32fb511f0604d0d582eb18fdae4ca233454db1e812d10a375ca9572f4977836`;
+- docs: `426334de3dc54550c1e5b754748511207e8ccef9d939b9dc178d3ba1aa0f7f71`;
 - pre-PR two-worker engine:
   `d28f211aeb67b6e82a2768e54dc03ad4595f13cd4f37eab4b4b1964ca13a7c6b`.
 
@@ -93,6 +93,8 @@ Focused tests prove:
   `scoped Git process count not measured`, never zero;
 - arbitrary focused elapsed time has no lane-wide budget;
 - hypothesis lanes cannot emit timing-budget warnings;
+- docs timing compares a digest of the canonical docs producer command rather
+  than copying the committed baseline identity;
 - findings exit zero, while malformed baseline data exits nonzero and also
   fails the authoritative unit suite;
 - receipts are not read by Make, lane, install, or live checks to suppress any
@@ -167,7 +169,7 @@ doctor/lifecycle checks remain distinct.
 | `make check` | passed; source freeze passed |
 | `bash -x -c 'make verify'` | passed; 1,148 engine IDs, 30 dashboard tests, install and live checks; one source freeze |
 | `make verify-performance` | passed; one authoritative `make verify`, 62 scoped Git processes, no advisory findings |
-| Bugbot complete branch review | no bugs |
+| Bugbot complete branch review | one docs-workload identity bug found and fixed; clean re-review |
 
 The traced `make verify` wall observation was 5,702,083 ms. The prescribed
 performance target observation was 5,174,894 ms. They ran under one extended

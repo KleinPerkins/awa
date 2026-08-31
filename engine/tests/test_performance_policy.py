@@ -20,6 +20,35 @@ def baseline() -> dict:
     return json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
 
 
+def accepted_lane_baseline(lane: str) -> dict:
+    value = copy.deepcopy(baseline())
+    value["status"] = "accepted"
+    value["observation_count"] = 5
+    value["session_count"] = 2
+    value["machine_contexts"] = [
+        {
+            "platform": "fixture",
+            "architecture": "fixture",
+            "logical_cpu_count": 1,
+            "load_note": "ordinary fixture load",
+        },
+        {
+            "platform": "fixture",
+            "architecture": "fixture",
+            "logical_cpu_count": 1,
+            "load_note": "second ordinary fixture load",
+        },
+    ]
+    value["lanes"][lane].update({
+        "status": "accepted",
+        "observation_count": 5,
+        "session_count": 2,
+        "p90_ms": 100,
+        "warning_elapsed_ms": 200,
+    })
+    return value
+
+
 def observation(**updates) -> dict:
     value = {
         "head": "a" * 40,
@@ -50,6 +79,10 @@ class PerformancePolicyTest(unittest.TestCase):
         self.assertEqual(
             value["process_measurement"]["producer_sha256"],
             performance_policy.performance_producer_sha256(),
+        )
+        self.assertEqual(
+            value["lanes"]["docs"]["workload_sha256"],
+            performance_policy.docs_workload_sha256(),
         )
 
     def test_time_is_warning_only_and_context_is_required(self) -> None:
@@ -152,17 +185,44 @@ class PerformancePolicyTest(unittest.TestCase):
                 verification_contract.validate_performance_baseline(value)
 
     def test_advisory_cli_exits_zero_for_findings(self) -> None:
-        stdout = io.StringIO()
-        rc = performance_policy.main(
-            [
-                "evaluate-lane",
-                "--lane", "pre-pr",
-                "--elapsed-ms", "999999999",
-            ],
-            stdout=stdout,
-        )
+        value = accepted_lane_baseline("docs")
+        with tempfile.TemporaryDirectory(prefix="awa-performance-policy.") as tmp:
+            path = Path(tmp) / "baseline.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            stdout = io.StringIO()
+            rc = performance_policy.main(
+                [
+                    "evaluate-lane",
+                    "--lane", "docs",
+                    "--elapsed-ms", "999999999",
+                    "--load-note", "ordinary fixture load",
+                    "--baseline", str(path),
+                ],
+                stdout=stdout,
+            )
+            self.assertEqual(rc, 0)
+            self.assertIn(
+                "wall time exceeded advisory budget", stdout.getvalue()
+            )
+
+            value["lanes"]["docs"]["workload_sha256"] = "f" * 64
+            path.write_text(json.dumps(value), encoding="utf-8")
+            stdout = io.StringIO()
+            rc = performance_policy.main(
+                [
+                    "evaluate-lane",
+                    "--lane", "docs",
+                    "--elapsed-ms", "999999999",
+                    "--load-note", "ordinary fixture load",
+                    "--baseline", str(path),
+                ],
+                stdout=stdout,
+            )
         self.assertEqual(rc, 0)
-        self.assertIn("performance advisory:", stdout.getvalue())
+        self.assertIn("fixed workload not matched", stdout.getvalue())
+        self.assertNotIn(
+            "wall time exceeded advisory budget", stdout.getvalue()
+        )
 
     def test_malformed_baseline_is_cli_failure(self) -> None:
         with tempfile.TemporaryDirectory(prefix="awa-performance-policy.") as tmp:
@@ -203,6 +263,10 @@ class PerformancePolicyTest(unittest.TestCase):
         )
         self.assertIn("--boundary source --count-git", performance_body)
         self.assertIn("AWA_PERFORMANCE_WARNINGS_DISABLED=1", performance_body)
+        self.assertIn(
+            " ".join(performance_policy.DOCS_WORKLOAD_COMMAND),
+            makefile,
+        )
 
     def test_make_verify_advisory_runs_after_authoritative_result(self) -> None:
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
