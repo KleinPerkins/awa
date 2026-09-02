@@ -277,7 +277,7 @@ class PerformancePolicyTest(unittest.TestCase):
         )
         for command in (
             "engine/tests/run-tests.sh",
-            "./install.sh --check",
+            "bash ./install.sh --check",
             "live-verify/verify-live-verify.sh",
         ):
             self.assertLess(

@@ -236,7 +236,19 @@ class VerifyLaneTest(unittest.TestCase):
             "@AWA_HOME=$(CURDIR) bash kernel/checks/awa-contract-freeze.sh",
             makefile,
         )
-        self.assertIn("@./install.sh --check", makefile)
+        verify_body = makefile.split("verify:", 1)[1].split(
+            "verify-docs:", 1
+        )[0]
+        install_check_lines = [
+            line.strip()
+            for line in verify_body.splitlines()
+            if "install.sh --check" in line
+        ]
+        self.assertEqual(
+            install_check_lines,
+            ["bash ./install.sh --check; \\"],
+            "the authoritative lane must invoke install --check exactly once through Bash",
+        )
         self.assertIn(
             "awa-contract-freeze.sh",
             (ROOT / "install.sh").read_text(encoding="utf-8"),

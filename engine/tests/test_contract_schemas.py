@@ -100,7 +100,16 @@ class ContractSchemasTest(EngineTestCase):
         verify_body = makefile.split("verify:", 1)[1].split(
             "verify-docs:", 1
         )[0]
-        self.assertEqual(verify_body.count("./install.sh --check"), 1)
+        install_check_lines = [
+            line.strip()
+            for line in verify_body.splitlines()
+            if "install.sh --check" in line
+        ]
+        self.assertEqual(
+            install_check_lines,
+            ["bash ./install.sh --check; \\"],
+            "install --check must remain a single Bash-mediated pre-PR freeze owner",
+        )
 
 
 if __name__ == "__main__":
