@@ -50,7 +50,7 @@ verify: ## Full local verification: tests + freeze + zero-link + install --check
 	  if [ -z "$$receipt" ]; then receipt=$$(mktemp "$${TMPDIR:-/tmp}/awa-performance-receipt.XXXXXX"); fi; \
 	  trap 'if [ -z "$$external_receipt" ]; then rm -f "$$receipt"; fi' EXIT; \
 	  AWA_TEST_RECEIPT="$$receipt" AWA_TEST_LANE=pre-pr bash engine/tests/run-tests.sh; \
-	  ./install.sh --check; \
+	  bash ./install.sh --check; \
 	  bash live-verify/verify-live-verify.sh; \
 	  echo "verify: OK"; \
 	  if [ "$${AWA_PERFORMANCE_WARNINGS_DISABLED:-0}" != "1" ]; then \
