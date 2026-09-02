@@ -471,7 +471,7 @@ def _install_runtime(profile_root: Path, base_env: Mapping[str, str]) -> Path:
     hooks = profile_root / "selected-hooks" / "hooks.json"
     install_env["AWA_HOOKS_JSON"] = str(hooks)
     result = subprocess.run(
-        [str(INSTALL)],
+        ["bash", str(INSTALL)],
         cwd=str(REPO_ROOT),
         check=False,
         capture_output=True,

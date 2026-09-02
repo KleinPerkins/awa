@@ -109,6 +109,32 @@ class GuardBoundaryProfileTest(unittest.TestCase):
                 len(case_roots),
             )
 
+    def test_installed_runtime_uses_bash_for_non_executable_source(self):
+        with tempfile.TemporaryDirectory(prefix="awa-noexec-install.") as raw:
+            root = Path(raw)
+            installer = root / "install.sh"
+            installer.write_text(
+                "#!/bin/sh\nmkdir -p \"$XDG_DATA_HOME/awa/current\"\n",
+                encoding="utf-8",
+            )
+            installer.chmod(0o600)
+            environment = guard_boundary_profile._private_environment(
+                root / "environment"
+            )
+            with mock.patch.object(
+                guard_boundary_profile,
+                "INSTALL",
+                installer,
+            ):
+                runtime = guard_boundary_profile._install_runtime(
+                    root,
+                    environment,
+                )
+            self.assertEqual(
+                runtime,
+                Path(environment["XDG_DATA_HOME"]) / "awa" / "current",
+            )
+
     def test_profile_validator_rejects_unknown_key(self):
         report = guard_boundary_profile.run_engine_cases(
             guard_boundary_profile.GUARD_BOUNDARY_CASES
