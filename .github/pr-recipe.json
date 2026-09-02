@@ -12,14 +12,8 @@
       "id": "repo.awa.engine-tests",
       "argv": [
         "run-literal",
-        "python3",
-        "-B",
-        "-m",
-        "unittest",
-        "engine.tests.test_policy",
-        "engine.tests.test_modes",
-        "engine.tests.test_recovery",
-        "engine.tests.test_state_lock"
+        "make",
+        "verify"
       ],
       "environment": {},
       "depends_on": ["canned.repository-contract.v1"]
