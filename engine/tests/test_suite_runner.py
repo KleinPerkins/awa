@@ -194,6 +194,23 @@ class SuiteRunnerTest(unittest.TestCase):
         )
 
     def test_failure_summary_is_last_bounded_actionable_evidence(self) -> None:
+        class FailingCase(unittest.TestCase):
+            def runTest(self) -> None:
+                self.assertEqual("observed", "expected")
+
+        inner_stream = io.StringIO()
+        inner_result = unittest.TextTestRunner(
+            stream=inner_stream,
+            resultclass=suite_runner.TimingResult,
+        ).run(FailingCase())
+        details = suite_runner._format_failure_details(inner_result)
+        self.assertTrue(details.startswith("NONPASSING DETAILS\n"))
+        self.assertIn("AssertionError", details)
+        self.assertLessEqual(
+            len(details.encode("utf-8")),
+            suite_runner._MAX_FAILURE_DETAILS_BYTES,
+        )
+
         records = (
             {
                 "test_id": "z.Case.test_error",
@@ -218,12 +235,14 @@ class SuiteRunnerTest(unittest.TestCase):
             },
         )
         stream = io.StringIO()
-        suite_runner._write_failure_summary(records, stream)
-        self.assertEqual(
-            stream.getvalue(),
-            "NONPASSING TESTS\n"
-            "failure: b.Case.test_failure\n"
-            "error: z.Case.test_error\n",
+        suite_runner._write_failure_summary(records, stream, details)
+        self.assertTrue(stream.getvalue().startswith(details))
+        self.assertTrue(
+            stream.getvalue().endswith(
+                "NONPASSING TESTS\n"
+                "failure: b.Case.test_failure\n"
+                "error: z.Case.test_error\n",
+            )
         )
 
     def test_worker_count_accepts_only_one_two_or_four(self) -> None:

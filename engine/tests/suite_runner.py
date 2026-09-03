@@ -44,6 +44,9 @@ _WORKER_SELECTION_ENV = "AWA_TEST_WORKER_SELECTION"
 _WORKER_SELECTION_SCHEMA = "awa-test-worker-selection/v1"
 _WORKER_POLL_SECONDS = 0.01
 WORKER_STOP_GRACE_SECONDS = 5.0
+_FAILURE_DETAILS_HEADER = "NONPASSING DETAILS\n"
+_MAX_FAILURE_DETAIL_BLOCK_BYTES = 8 * 1024
+_MAX_FAILURE_DETAILS_BYTES = 24 * 1024
 
 
 class RunnerError(RuntimeError):
@@ -464,9 +467,57 @@ def _write_timing_summary(summary: Mapping[str, object], stream: TextIO) -> None
         flush()
 
 
+def _truncate_utf8(value: str, maximum: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= maximum:
+        return value
+    notice = "\n...[truncated]\n".encode("utf-8")
+    prefix = encoded[: max(0, maximum - len(notice))].decode(
+        "utf-8", errors="ignore"
+    )
+    return prefix + notice.decode("utf-8")
+
+
+def _format_failure_details(result: unittest.TestResult) -> str:
+    details = []
+    for outcome, entries in (
+        ("failure", result.failures),
+        ("error", result.errors),
+    ):
+        for test, traceback_text in entries:
+            block = (
+                f"{outcome}: {TimingResult._test_id(test)}\n"
+                f"{str(traceback_text).rstrip()}\n"
+            )
+            details.append(
+                (
+                    TimingResult._test_id(test),
+                    outcome,
+                    _truncate_utf8(block, _MAX_FAILURE_DETAIL_BLOCK_BYTES),
+                )
+            )
+    for test in result.unexpectedSuccesses:
+        test_id = TimingResult._test_id(test)
+        details.append(
+            (
+                test_id,
+                "unexpected_success",
+                f"unexpected_success: {test_id}\n",
+            )
+        )
+    if not details:
+        return ""
+    body = "".join(item[2] for item in sorted(details))
+    return _truncate_utf8(
+        _FAILURE_DETAILS_HEADER + body,
+        _MAX_FAILURE_DETAILS_BYTES,
+    )
+
+
 def _write_failure_summary(
     records: Sequence[Mapping[str, object]],
     stream: TextIO,
+    details: str = "",
 ) -> None:
     nonpassing = sorted(
         (
@@ -478,6 +529,10 @@ def _write_failure_summary(
     )
     if not nonpassing:
         return
+    if details:
+        stream.write(details)
+        if not details.endswith("\n"):
+            stream.write("\n")
     stream.write("NONPASSING TESTS\n")
     for record in nonpassing:
         stream.write(f"{record['outcome']}: {record['test_id']}\n")
@@ -518,8 +573,9 @@ def run_serial(
     outcome = _run_outcome(counts)
     run = {"outcome": outcome, "elapsed_ms": elapsed_ms, "counts": counts}
     summary = summarize_timings(records)
+    failure_details = _format_failure_details(result)
     _write_timing_summary(summary, stream)
-    _write_failure_summary(records, stream)
+    _write_failure_summary(records, stream, failure_details)
     outcomes = {
         record["test_id"]: {
             "module": record["module"],
@@ -536,6 +592,7 @@ def run_serial(
         "run": run,
         "summary": summary,
         "resource": resource_usage,
+        "failure_details": failure_details,
     }
 
 
@@ -749,6 +806,11 @@ def _run_worker(module: str, output: Path, stream: TextIO) -> None:
         raise RunnerError("worker module must be a dotted Python module name")
     options = _read_worker_selection(module)
     result = run_serial(options.selectors, stream, options=options)
+    failure_details = str(result["failure_details"])
+    if failure_details:
+        details_path = output.with_suffix(".failures")
+        details_path.write_text(failure_details, encoding="utf-8")
+        details_path.chmod(0o600)
     write_atomic_json(output, _worker_document(module, result))
 
 
@@ -831,6 +893,42 @@ def _emit_worker_log(state: _WorkerState, stream: TextIO) -> None:
     flush = getattr(stream, "flush", None)
     if flush is not None:
         flush()
+
+
+def _worker_failure_details(
+    records: Sequence[Mapping[str, object]],
+    states: Sequence[_WorkerState],
+) -> str:
+    failed_modules = {
+        str(record["module"])
+        for record in records
+        if record["outcome"] in ("failure", "error", "unexpected_success")
+    }
+    bodies = []
+    for state in sorted(states, key=lambda item: item.module):
+        if state.module not in failed_modules:
+            continue
+        path = state.output_path.with_suffix(".failures")
+        try:
+            metadata = path.lstat()
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_size <= 0
+                or metadata.st_size > _MAX_FAILURE_DETAILS_BYTES
+            ):
+                continue
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        if not text.startswith(_FAILURE_DETAILS_HEADER):
+            continue
+        bodies.append(text[len(_FAILURE_DETAILS_HEADER) :])
+    if not bodies:
+        return ""
+    return _truncate_utf8(
+        _FAILURE_DETAILS_HEADER + "".join(bodies),
+        _MAX_FAILURE_DETAILS_BYTES,
+    )
 
 
 def _worker_environment(root: Path, selection: Path) -> dict:
@@ -1129,8 +1227,12 @@ def run_parallel(
                 round(max(0.0, time.monotonic() - started_at) * 1000)
             )
             summary = summarize_timings(records)
+            failure_details = _worker_failure_details(
+                records,
+                started_states,
+            )
             _write_timing_summary(summary, stream)
-            _write_failure_summary(records, stream)
+            _write_failure_summary(records, stream, failure_details)
             outcomes = {
                 record["test_id"]: {
                     "module": record["module"],
