@@ -92,8 +92,13 @@ fi
 dead_json=""
 [ -f "$AWA_ROOTS_LIB" ] && dead_json="$(python3 "$AWA_ROOTS_LIB" dead-roots 2>/dev/null || true)"
 
-mkdir -p "$HOME/.cache/dev-worktree"
-DEV_WORKTREE="$DEV_WORKTREE" AWA_ROOT="$AWA_ROOT" DEAD_JSON="$dead_json" python3 - "$cwd" "$status" "$HOME/.cache/dev-worktree/session-status.json" <<'PY'
+cache_base="${XDG_CACHE_HOME:-}"
+if [ -z "$cache_base" ] && [ -n "${HOME:-}" ]; then
+  cache_base="$HOME/.cache"
+fi
+cache_path=""
+[ -n "$cache_base" ] && cache_path="$cache_base/dev-worktree/session-status.json"
+DEV_WORKTREE="$DEV_WORKTREE" AWA_ROOT="$AWA_ROOT" DEAD_JSON="$dead_json" python3 - "$cwd" "$status" "$cache_path" <<'PY'
 import datetime, json, os, pathlib, sys
 cwd, status, cache = sys.argv[1:4]
 status = sys.argv[2].strip()
@@ -114,7 +119,13 @@ payload = {
     "dead_roots": [d.get("root_path") for d in dead],
     "updated_at": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
 }
-pathlib.Path(cache).write_text(json.dumps(payload, indent=2) + "\n")
+if cache:
+    try:
+        cache_path = pathlib.Path(cache)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(payload, indent=2) + "\n")
+    except OSError:
+        pass
 
 parts = []
 if status:

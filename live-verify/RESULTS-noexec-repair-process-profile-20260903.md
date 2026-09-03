@@ -19,9 +19,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B \
   --json-out /tmp/awa-noexec-process-profile.json
 ```
 
-- Measured at: `2026-09-03T17:44:52Z`
+- Measured at: `2026-09-03T18:39:12Z`
 - Branch: `fix/awa-v4-named-hooks-noexec-20260902`
-- Base HEAD: `f0f21b7f0f19eff951689d5c58837fb82ac77dc5`
+- Base HEAD: `ddeff0f1789615e6ac18ca0c29e958e2180ca9fa`
 - Platform: `macOS-26.6.2-arm64-arm-64bit-Mach-O`
 - Python: `3.14.6`
 - Git: `git version 2.50.1 (Apple Git-155)`
@@ -33,7 +33,7 @@ big-endian bytes. It excludes only the generated baseline and this evidence
 record, so adding those two outputs cannot change the measured-subject identity.
 
 - Measured-subject files: `258`
-- Measured-subject SHA-256: `f316e6e7a7d91c19819237cce4d34e608ef1a3d698e59c56ac16a34001b99340`
+- Measured-subject SHA-256: `8d33660c80a7e032caeba1636e7839e6b0292ad66e772461defd77aae0c40119`
 - Excluded paths:
   - `engine/tests/performance-baseline.v1.json`
   - `live-verify/RESULTS-noexec-repair-process-profile-20260903.md`

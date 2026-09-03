@@ -114,6 +114,32 @@ NOEXEC_REPAIR_NORMALIZATIONS = {
             b'  status="$(cd "$cwd" 2>/dev/null && "$DEV_WORKTREE" '
             b'status 2>/dev/null || true)"\n',
         ),
+        (
+            b'cache_base="${XDG_CACHE_HOME:-}"\n'
+            b'if [ -z "$cache_base" ] && [ -n "${HOME:-}" ]; then\n'
+            b'  cache_base="$HOME/.cache"\n'
+            b'fi\n'
+            b'cache_path=""\n'
+            b'[ -n "$cache_base" ] && '
+            b'cache_path="$cache_base/dev-worktree/session-status.json"\n'
+            b'DEV_WORKTREE="$DEV_WORKTREE" AWA_ROOT="$AWA_ROOT" '
+            b'DEAD_JSON="$dead_json" python3 - "$cwd" "$status" '
+            b'"$cache_path" <<\'PY\'\n',
+            b'mkdir -p "$HOME/.cache/dev-worktree"\n'
+            b'DEV_WORKTREE="$DEV_WORKTREE" AWA_ROOT="$AWA_ROOT" '
+            b'DEAD_JSON="$dead_json" python3 - "$cwd" "$status" '
+            b'"$HOME/.cache/dev-worktree/session-status.json" <<\'PY\'\n',
+        ),
+        (
+            b'if cache:\n'
+            b'    try:\n'
+            b'        cache_path = pathlib.Path(cache)\n'
+            b'        cache_path.parent.mkdir(parents=True, exist_ok=True)\n'
+            b'        cache_path.write_text(json.dumps(payload, indent=2) + "\\n")\n'
+            b'    except OSError:\n'
+            b'        pass\n',
+            b'pathlib.Path(cache).write_text(json.dumps(payload, indent=2) + "\\n")\n',
+        ),
     ),
 }
 
