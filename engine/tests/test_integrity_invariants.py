@@ -294,24 +294,22 @@ class TestIntegrityInvariants(unittest.TestCase):
             )
             hook.parent.mkdir(parents=True)
             policy.parent.mkdir(parents=True)
-            hook.write_text("#!/bin/sh\n", encoding="utf-8")
+            hook.write_text(
+                "#!/usr/bin/env bash\n"
+                "cat >/dev/null\n"
+                "printf '%s\\n' '{\"permission\":\"allow\"}'\n",
+                encoding="utf-8",
+            )
+            hook.chmod(0o600)
             policy.write_text("version: 1\n", encoding="utf-8")
             direct = SimpleNamespace(
                 permission="allow",
                 classification="read_only",
             )
-            mirrored = SimpleNamespace(
-                returncode=0,
-                stdout='{"permission":"allow"}',
-            )
             with mock.patch.object(
                 guard,
                 "decide_shell",
                 return_value=direct,
-            ), mock.patch.object(
-                integrity.subprocess,
-                "run",
-                return_value=mirrored,
             ):
                 self.assertTrue(
                     integrity._kernel_parity(
@@ -586,7 +584,7 @@ class TestLiveHookFacts(unittest.TestCase):
         )
         self.env = env
         installed = subprocess.run(
-            [str(_INSTALL_HOOKS)],
+            ["bash", str(_INSTALL_HOOKS)],
             capture_output=True,
             text=True,
             env=env,
@@ -727,6 +725,31 @@ class TestLiveHookFacts(unittest.TestCase):
                 and invariant(status, "hooks")["severity"] == "green"
             ),
         }
+
+    def test_source_role_validation_does_not_require_mount_execute_access(self):
+        contract = json.loads(
+            (_ROOT / "contracts" / "awa-hook-owner.v2.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        real_access = os.access
+
+        def noexec_access(path, mode):
+            if mode == os.X_OK:
+                return False
+            return real_access(path, mode)
+
+        with mock.patch.object(integrity.os, "access", side_effect=noexec_access):
+            self.assertTrue(integrity._valid_v2_hook_contract(_ROOT, contract))
+
+        runtime = self.root / "runtime"
+        for role in contract["roles"]:
+            command = runtime / role["direct_command_role"]
+            command.parent.mkdir(parents=True, exist_ok=True)
+            command.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            command.chmod(0o755)
+        with mock.patch.object(integrity.os, "access", side_effect=noexec_access):
+            self.assertFalse(integrity._valid_v2_hook_contract(runtime, contract))
 
     def test_v2_validation_acceptance_parity_matrix(self):
         header_cases = {
@@ -1247,7 +1270,7 @@ class TestExternalOwnerHookFacts(unittest.TestCase):
             }
         )
         installed = subprocess.run(
-            [str(_INSTALL_HOOKS)],
+            ["bash", str(_INSTALL_HOOKS)],
             capture_output=True,
             text=True,
             env=env,

@@ -10,6 +10,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from engine import integrity_detach
 
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -25,6 +28,7 @@ _DETACHED_OBSERVER_DELAY_SECONDS = 60.0
 _DETACHED_OBSERVER_TIMEOUT_SECONDS = 30.0
 _HANG_TIMEOUT_SECONDS = 5.0
 _HOOK_RETURN_TIMEOUT_SECONDS = 3.0
+_OBSERVER_START_TIMEOUT_SECONDS = 10.0
 _IDENT = (
     "-c",
     "user.email=fixture@example.invalid",
@@ -207,9 +211,8 @@ raise SystemExit(0)
     ) -> subprocess.CompletedProcess:
         if executable == _COMPOSITE:
             self._observer_requested = True
-        argv = ["bash", str(executable)] if executable == _GUARD else [str(executable)]
         return subprocess.run(
-            argv,
+            ["bash", str(executable)],
             input=payload,
             capture_output=True,
             env=env or self.env,
@@ -235,7 +238,11 @@ raise SystemExit(0)
             if line
         ]
 
-    def _wait_for_records(self, count: int, timeout: float = 3) -> list[dict]:
+    def _wait_for_records(
+        self,
+        count: int,
+        timeout: float = _OBSERVER_START_TIMEOUT_SECONDS,
+    ) -> list[dict]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             records = self._records()
@@ -317,6 +324,38 @@ raise SystemExit(0)
             "composite payload temporary file leaked",
         )
 
+    def test_executable_non_bash_guard_override_remains_direct(self):
+        guard = self.root / "python-guard"
+        guard.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "sys.stdin.read()\n"
+            "sys.stdout.write('{\"permission\":\"deny\"}\\n')\n"
+            "sys.stderr.write('python guard diagnostic\\n')\n"
+            "raise SystemExit(23)\n",
+            encoding="utf-8",
+        )
+        guard.chmod(0o700)
+        env = dict(self.env)
+        env["AWA_INTEGRITY_GUARD"] = str(guard)
+        result = self._run(_COMPOSITE, b'{"command":"deny"}', env=env)
+        self.assertEqual(result.stdout, b'{"permission":"deny"}\n')
+        self.assertEqual(result.stderr, b"python guard diagnostic\n")
+        self.assertEqual(result.returncode, 23)
+
+    def test_non_executable_guard_override_is_not_interpreted(self):
+        guard = self.root / "non-executable-guard.sh"
+        guard.write_text(
+            "#!/usr/bin/env bash\nprintf '%s\\n' '{\"permission\":\"deny\"}'\n",
+            encoding="utf-8",
+        )
+        guard.chmod(0o600)
+        env = dict(self.env)
+        env["AWA_INTEGRITY_GUARD"] = str(guard)
+        result = self._run(_COMPOSITE, b'{"command":"deny"}', env=env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(b'"permission":"deny"', result.stdout)
+
     def test_observer_detached_nonblocking(self):
         read_fd, write_fd = os.pipe()
         self.addCleanup(os.close, read_fd)
@@ -370,6 +409,58 @@ raise SystemExit(0)
         time.sleep(0.25)
         self.assertEqual(len(self._records()), 1)
 
+    def test_observer_uses_bash_for_non_executable_source_launcher(self):
+        source_root = self.root / "source-engine"
+        (source_root / ".git").mkdir(parents=True)
+        source_launcher = source_root / "bin" / "awa-engine.sh"
+        source_launcher.parent.mkdir()
+        source_launcher.write_text(
+            "#!/usr/bin/env bash\n"
+            "exec \"$AWA_TEST_SOURCE_ENGINE_TARGET\" \"$@\"\n",
+            encoding="utf-8",
+        )
+        source_launcher.chmod(0o600)
+        env = dict(self.env)
+        env.pop("AWA_INTEGRITY_ENGINE")
+        env["AWA_HOME"] = str(source_root)
+        env["AWA_INTEGRITY_DETACHER"] = str(_DETACHER)
+        env["AWA_TEST_SOURCE_ENGINE_TARGET"] = str(self.fake_engine)
+        env["AWA_INTEGRITY_DEBOUNCE_SECONDS"] = "0"
+        result = self._run(_STOP, b'{"hook_event_name":"stop"}', env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = self._wait_for_records(1)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(
+            records[0]["argv"],
+            ["integrity", "verify", "--profile", "fast", "--trigger", "stop"],
+        )
+
+    def test_non_executable_engine_override_is_not_interpreted(self):
+        self.fake_engine.chmod(0o600)
+        env = dict(self.env)
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+            integrity_detach.subprocess,
+            "Popen",
+        ) as popen:
+            integrity_detach._run_engine("stop", 0.1)
+        popen.assert_not_called()
+
+    def test_non_executable_installed_engine_is_not_interpreted(self):
+        runtime = self.root / "installed-engine"
+        runtime_launcher = runtime / "bin" / "awa-engine.sh"
+        runtime_launcher.parent.mkdir(parents=True)
+        runtime_launcher.write_bytes(self.fake_engine.read_bytes())
+        runtime_launcher.chmod(0o600)
+        env = dict(self.env)
+        env.pop("AWA_INTEGRITY_ENGINE")
+        env["AWA_HOME"] = str(runtime)
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+            integrity_detach.subprocess,
+            "Popen",
+        ) as popen:
+            integrity_detach._run_engine("stop", 0.1)
+        popen.assert_not_called()
+
     def test_hanging_observer_does_not_hang_hook(self):
         env = dict(self.env)
         env.update(
@@ -418,9 +509,9 @@ raise SystemExit(0)
 
     def test_stop_role_refreshes_status(self):
         env = dict(self.env)
+        env.pop("AWA_INTEGRITY_ENGINE")
         env.update(
             {
-                "AWA_INTEGRITY_ENGINE": str(_ENGINE),
                 "AWA_ENGINE_TEST_ACTIVE": "1",
                 "AWA_INTEGRITY_TEST_FACTS_JSON": json.dumps(_SAFE_FACTS),
                 "AWA_INTEGRITY_DEBOUNCE_SECONDS": "0",
@@ -429,6 +520,7 @@ raise SystemExit(0)
         )
         seeded = subprocess.run(
             [
+                "bash",
                 str(_ENGINE),
                 "integrity",
                 "verify",
@@ -447,7 +539,7 @@ raise SystemExit(0)
         self.assertEqual(result.stdout, b"")
         self.assertEqual(result.stderr, b"")
         status_path = self.state_home / "awa" / "integrity" / "status.json"
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + _OBSERVER_START_TIMEOUT_SECONDS
         status = {}
         while time.monotonic() < deadline:
             try:

@@ -435,8 +435,8 @@ class TrialFixture:
             )
 
     def create(self) -> "TrialFixture":
-        if not self.awa_cli.is_file() or not os.access(str(self.awa_cli), os.X_OK):
-            raise FixtureError("AWA worktree CLI is unavailable: " + str(self.awa_cli))
+        if not self.awa_cli.is_file() or not os.access(str(self.awa_cli), os.R_OK):
+            raise FixtureError("AWA worktree CLI is unavailable or unreadable: " + str(self.awa_cli))
         if not self.personal_root.is_dir():
             raise FixtureError("personal fixture parent is unavailable: " + str(self.personal_root))
         for path in (

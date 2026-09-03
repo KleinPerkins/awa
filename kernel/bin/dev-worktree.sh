@@ -1324,6 +1324,7 @@ hook_owner_role_matrix() {
     "$AWA_HOME/contracts/awa-hook-owner.v2.json" <<'PY'
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -1428,7 +1429,19 @@ def valid_role(role, *, allow_dormant):
         command.relative_to(root)
     except ValueError:
         return False
-    if not command.is_file() or not os.access(command, os.X_OK):
+    try:
+        mode = command.lstat().st_mode
+    except OSError:
+        return False
+    if (
+        not stat.S_ISREG(mode)
+        or mode & 0o111 == 0
+    ):
+        return False
+    if source_checkout:
+        if not os.access(command, os.R_OK):
+            return False
+    elif not os.access(command, os.X_OK):
         return False
     if "dormant_until_milestone" in role and not isinstance(
         role["dormant_until_milestone"], str
@@ -1459,6 +1472,7 @@ def roles_match(roles, layout):
 v1_path = Path(sys.argv[1])
 v2_path = Path(sys.argv[2])
 root = v1_path.parent.parent.resolve()
+source_checkout = (root / ".git").exists()
 v1_doc = load(v1_path, "hook-owner v1")
 v1 = v1_doc.get("hook_ownership")
 if (

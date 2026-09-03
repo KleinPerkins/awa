@@ -42,21 +42,70 @@ ROLE_IDS = (
     "finish.prompt-recall",
 )
 
-V151_UNCHANGED_BEHAVIOR_SHA256 = {
+V151_FROZEN_BEHAVIOR_SHA256 = {
     "kernel/hooks/worktree-session.sh":
-        "314b9cc7c40cc61ae14e4c9b1e2cb1e1e4c060e5bd5d3a9d18cc9b8e62a79cb7",
+        "1ea89ba2ad486510be7976d55771e09f7e9201119c4eed38a354ade6eed77938",
     "kernel/hooks/awa-recovery-maintenance.sh":
         "a49911ad61da905a384e5251cc4af1ad6beacc8243aa30b15c63b19f6998ef6c",
     "kernel/hooks/before-submit-prompt.sh":
         "d594519c8962a8cdb8d5adc8262a09a61c00ec074317b3d07be144823220da5a",
     "consumer/finish_current.py":
-        "4120d3a45abaf59aceb352c3c0e529addc5af114e2b5ac9cae3a15bb94e30354",
+        "0e8b097a7f118ad71b8889de3cad4d04009fc3db2413bd122f4f4803cea4e26f",
 }
-V160_PRIMARY_MAINTENANCE_SHA256 = {
+V160_FROZEN_PRIMARY_MAINTENANCE_SHA256 = {
     "kernel/hooks/worktree-guard.sh":
-        "bc69fa094da67d5edef4fa4b812e9865d409e02df51ac89322704bf1d8940305",
+        "e79d650d71769998dc02d71129312eee7c3a974bb877ca641cedaf7f9661803e",
     "engine/tests/git_guard_command_corpus.py":
         "0ba21e1c7d2e8702a4b963ed8d08b8c90e993645200e7eaff23c867e7a2e36b5",
+}
+NOEXEC_REPAIR_NORMALIZATIONS = {
+    "consumer/finish_current.py": (
+        (
+            b'                "bash", str(tool), "clean", "--finish-current", '
+            b'"--authorization", "Close",\n',
+            b'                str(tool), "clean", "--finish-current", '
+            b'"--authorization", "Close",\n',
+        ),
+    ),
+    "kernel/hooks/awa-recovery-maintenance.sh": (
+        (
+            b'if [ -f "$ENGINE" ] && [ -r "$ENGINE" ]; then\n',
+            b'if [ -x "$ENGINE" ]; then\n',
+        ),
+        (
+            b'    status_json="$(bash "$ENGINE" recover status 2>/dev/null || true)"\n',
+            b'    status_json="$("$ENGINE" recover status 2>/dev/null || true)"\n',
+        ),
+        (
+            b'    ( bash "$ENGINE" recover prune --maintenance --opportunistic '
+            b'</dev/null >/dev/null 2>&1 & ) \\\n',
+            b'    ( "$ENGINE" recover prune --maintenance --opportunistic '
+            b'</dev/null >/dev/null 2>&1 & ) \\\n',
+        ),
+    ),
+    "kernel/hooks/worktree-guard.sh": (
+        (
+            b'  [ -f "$DEV_WORKTREE" ] && [ -r "$DEV_WORKTREE" ] || return 1\n',
+            b'  [ -x "$DEV_WORKTREE" ] || return 1\n',
+        ),
+        (
+            b'  (cd "$dir" 2>/dev/null && AWA_STATUS_NO_MODE=1 bash '
+            b'"$DEV_WORKTREE" status 2>/dev/null) || return 1\n',
+            b'  (cd "$dir" 2>/dev/null && AWA_STATUS_NO_MODE=1 '
+            b'"$DEV_WORKTREE" status 2>/dev/null) || return 1\n',
+        ),
+    ),
+    "kernel/hooks/worktree-session.sh": (
+        (
+            b'if [ -f "$DEV_WORKTREE" ] && [ -r "$DEV_WORKTREE" ] '
+            b'&& [ -d "$cwd" ]; then\n'
+            b'  status="$(cd "$cwd" 2>/dev/null && bash "$DEV_WORKTREE" '
+            b'status 2>/dev/null || true)"\n',
+            b'if [ -x "$DEV_WORKTREE" ] && [ -d "$cwd" ]; then\n'
+            b'  status="$(cd "$cwd" 2>/dev/null && "$DEV_WORKTREE" '
+            b'status 2>/dev/null || true)"\n',
+        ),
+    ),
 }
 
 _UNSET = object()
@@ -64,6 +113,18 @@ _UNSET = object()
 
 def _sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _historical_sha256(relative):
+    data = (REPO / relative).read_bytes()
+    for repaired, historical in NOEXEC_REPAIR_NORMALIZATIONS.get(relative, ()):
+        count = data.count(repaired)
+        if count != 1:
+            raise AssertionError(
+                f"authorized noexec normalization count for {relative}: {count}"
+            )
+        data = data.replace(repaired, historical, 1)
+    return hashlib.sha256(data).hexdigest()
 
 
 def _mode(path):
@@ -193,7 +254,7 @@ class HookOwnerSandbox(unittest.TestCase):
         if env_updates:
             env.update(env_updates)
         return subprocess.run(
-            [str(INSTALL), *args], env=env, capture_output=True, text=True,
+            ["bash", str(INSTALL), *args], env=env, capture_output=True, text=True,
             timeout=timeout)
 
     def run_hook_installer(
@@ -205,8 +266,13 @@ class HookOwnerSandbox(unittest.TestCase):
             env.pop("AWA_HOOK_OWNER", None)
         else:
             env["AWA_HOOK_OWNER"] = owner
+        argv = (
+            ["bash", str(script), *args]
+            if Path(script).resolve() == INSTALL_HOOKS.resolve()
+            else [str(script), *args]
+        )
         return subprocess.run(
-            [str(script), *args], env=env, capture_output=True,
+            argv, env=env, capture_output=True,
             text=True, timeout=timeout)
 
     def seed_fixture(self, name, path=None):
@@ -649,7 +715,7 @@ class TestHookOwnerParity(unittest.TestCase):
             "AWA_HOOK_OWNER": "direct",
         })
         result = subprocess.run(
-            [str(INSTALL)],
+            ["bash", str(INSTALL)],
             cwd=str(REPO),
             capture_output=True,
             text=True,
@@ -784,15 +850,15 @@ class TestHookOwnerParity(unittest.TestCase):
         self.assertNotIn(
             "failClosed", roles["worktree.file-observer"]["entry"])
 
-    def test_v151_unrelated_behavior_files_remain_byte_identical(self):
-        for relative, expected in V151_UNCHANGED_BEHAVIOR_SHA256.items():
+    def test_v151_frozen_behavior_allows_only_named_noexec_delta(self):
+        for relative, expected in V151_FROZEN_BEHAVIOR_SHA256.items():
             with self.subTest(path=relative):
-                self.assertEqual(_sha256(REPO / relative), expected)
+                self.assertEqual(_historical_sha256(relative), expected)
 
-    def test_v160_primary_maintenance_behavior_files_are_byte_identical(self):
-        for relative, expected in V160_PRIMARY_MAINTENANCE_SHA256.items():
+    def test_v160_frozen_behavior_allows_only_named_noexec_delta(self):
+        for relative, expected in V160_FROZEN_PRIMARY_MAINTENANCE_SHA256.items():
             with self.subTest(path=relative):
-                self.assertEqual(_sha256(REPO / relative), expected)
+                self.assertEqual(_historical_sha256(relative), expected)
 
 
 if __name__ == "__main__":

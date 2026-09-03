@@ -9,4 +9,7 @@ DETACHER="${AWA_INTEGRITY_DETACHER:-$AWA_HOME/engine/integrity_detach.py}"
 python3 "$DETACHER" --trigger beforeShell \
   </dev/null >/dev/null 2>&1 || :
 
-exec bash "$GUARD"
+if [[ -z "${AWA_INTEGRITY_GUARD:-}" && -e "$AWA_HOME/.git" ]]; then
+  exec bash "$GUARD"
+fi
+exec "$GUARD"

@@ -4,7 +4,7 @@
 # Run from a checkout (it just installs), or standalone (it clones KleinPerkins/awa to a durable
 # location first, then installs). Idempotent: an existing clone is fast-forwarded, not re-cloned.
 #
-# Both paths below `exec` install.sh, so the clone+install flow carries through install.sh's
+# Both paths below hand off to install.sh through Bash, so the clone+install flow carries through its
 # modes-file ensure step (schema awa-modes/v1 + default_mode from the host policy's modes_file
 # pointer) with NO duplicated logic here.
 #
@@ -16,7 +16,7 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 # Running from a checkout — install in place.
 if [ -f "$SELF_DIR/install.sh" ] && [ -d "$SELF_DIR/kernel" ]; then
-  exec "$SELF_DIR/install.sh" "$@"
+  exec bash "$SELF_DIR/install.sh" "$@"
 fi
 
 CLONE_DIR="${AWA_CLONE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/awa/checkout}"
@@ -30,4 +30,4 @@ else
   git clone --quiet "$REPO" "$CLONE_DIR"
 fi
 
-exec "$CLONE_DIR/install.sh" "$@"
+exec bash "$CLONE_DIR/install.sh" "$@"

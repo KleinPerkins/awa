@@ -417,11 +417,11 @@ def engine_status(timeout: float) -> dict:
     _PLAIN_OFF = "I step in the moment you try to change something. The always-watching-in-the-background part isn't switched on here."
     _PLAIN_ON = "I'm watching continuously in the background, on top of stepping in at each change."
     off = lambda reason: {"engine": {"running": False, "mode": "off", "reason": reason, "plain": _PLAIN_OFF}}
-    if not ENGINE_LAUNCHER.exists():
-        return off("engine launcher not present")
+    if not ENGINE_LAUNCHER.is_file() or not os.access(ENGINE_LAUNCHER, os.R_OK):
+        return off("engine launcher not present or unreadable")
     try:
         proc = subprocess.run(
-            [str(ENGINE_LAUNCHER), "daemon", "status"],
+            ["bash", str(ENGINE_LAUNCHER), "daemon", "status"],
             text=True, capture_output=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -452,15 +452,15 @@ def recovery_status(timeout: float) -> dict:
     """
     def unavailable(reason: str) -> dict:
         return {"recovery": {"available": False, "reason": reason}}
-    if not ENGINE_LAUNCHER.exists():
-        return unavailable("engine launcher not present")
+    if not ENGINE_LAUNCHER.is_file() or not os.access(ENGINE_LAUNCHER, os.R_OK):
+        return unavailable("engine launcher not present or unreadable")
     # Do not create engine state from a read-only dashboard render — probe only if it already exists.
     base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
     if not (Path(base) / "awa" / "state.db").exists():
         return unavailable("no engine recovery state yet")
     try:
         proc = subprocess.run(
-            [str(ENGINE_LAUNCHER), "recover", "status"],
+            ["bash", str(ENGINE_LAUNCHER), "recover", "status"],
             text=True, capture_output=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:

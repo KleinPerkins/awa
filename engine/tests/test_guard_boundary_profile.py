@@ -159,8 +159,8 @@ class GuardBoundaryProfileTest(unittest.TestCase):
             self.assertIsNotNone(real_git)
             case = guard_boundary_profile.GuardCase(
                 "noexec_named_hooks",
-                "git status",
-                "allow",
+                "git commit --allow-empty -m blocked",
+                "deny",
                 "clean",
             )
             fixture = guard_boundary_profile._make_case_fixture(
@@ -183,6 +183,20 @@ class GuardBoundaryProfileTest(unittest.TestCase):
                 )
             self.assertEqual(permission, case.expected_permission)
 
+            linked = fixture.root / "linked"
+            guard_boundary_profile._run_git(
+                real_git,
+                environment,
+                "-C",
+                str(fixture.repo),
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feat/noexec",
+                str(linked),
+            )
+
             checked = subprocess.run(
                 ["bash", str(checker), "policy-check"],
                 capture_output=True,
@@ -193,7 +207,7 @@ class GuardBoundaryProfileTest(unittest.TestCase):
 
             payload = json.dumps(
                 {
-                    "workspace_roots": [str(fixture.repo)],
+                    "workspace_roots": [str(linked)],
                     "conversation_id": "noexec-conversation",
                     "session_id": "noexec-session",
                 }
@@ -201,7 +215,7 @@ class GuardBoundaryProfileTest(unittest.TestCase):
             session_result = subprocess.run(
                 ["bash", str(session)],
                 input=payload,
-                cwd=str(fixture.repo),
+                cwd=str(linked),
                 capture_output=True,
                 text=True,
                 env=environment,
@@ -211,9 +225,38 @@ class GuardBoundaryProfileTest(unittest.TestCase):
                 0,
                 session_result.stdout + session_result.stderr,
             )
-            self.assertIn(
-                "additional_context",
-                json.loads(session_result.stdout),
+            session_output = json.loads(session_result.stdout)
+            self.assertIn("linked-worktree: yes", session_output["additional_context"])
+
+            roots = source / "kernel" / "lib" / "awa_roots.py"
+            disposition = subprocess.run(
+                ["python3", str(roots), "disposition", "--root", str(linked)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(
+                disposition.returncode,
+                0,
+                disposition.stdout + disposition.stderr,
+            )
+            self.assertEqual(
+                json.loads(disposition.stdout)["disposition"],
+                "active",
+            )
+
+            current = subprocess.run(
+                ["python3", str(roots), "current-session-read", "--root", str(linked)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(current.returncode, 0, current.stdout + current.stderr)
+            current_session = json.loads(current.stdout)
+            self.assertEqual(current_session["status"], "ok")
+            self.assertEqual(
+                current_session["current_session"]["session_id"],
+                "noexec-session",
             )
 
     def test_profile_validator_rejects_unknown_key(self):

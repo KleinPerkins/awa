@@ -328,7 +328,7 @@ class TestIntegrityConsole(EngineTestCase):
             }
         )
         result = subprocess.run(
-            [str(_INSTALL)],
+            ["bash", str(_INSTALL)],
             env=env,
             capture_output=True,
             text=True,

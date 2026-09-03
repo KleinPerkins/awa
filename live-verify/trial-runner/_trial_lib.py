@@ -319,7 +319,7 @@ class Sandbox:
     # -- shell hook + arbitrary subprocess (sandbox env by default) --
     def run_hook(self, script, stdin: str,
                  env: dict | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run([str(script)], input=stdin, env=env or os.environ.copy(),
+        return subprocess.run(["bash", str(script)], input=stdin, env=env or os.environ.copy(),
                               capture_output=True, text=True)
 
     @staticmethod

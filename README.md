@@ -24,8 +24,8 @@ host/org-specific fact lives only in a machine-local **policy overlay** (`AWA_PO
 ```bash
 git clone git@github.com:KleinPerkins/awa.git
 cd awa
-./install.sh            # idempotent, backup-before-write; installs into your XDG dirs
-./install.sh --doctor   # read-only health check of the install
+bash ./install.sh            # idempotent, backup-before-write; installs into your XDG dirs
+bash ./install.sh --doctor   # read-only health check of the install
 make verify             # tests + contract freeze + zero-link + install --check
 ```
 
@@ -65,7 +65,7 @@ An external host can stage the complete direct rollback projection without chang
 ```bash
 AWA_HOOK_OWNER=direct \
 AWA_HOOKS_JSON="$staging_hooks_json" \
-"$AWA_HOME/kernel/hooks/install-hooks.sh"
+bash "$AWA_HOME/kernel/hooks/install-hooks.sh"
 ```
 
 Validate that staging file with the same command plus `--check`; make the complete owner live
@@ -94,11 +94,11 @@ register it with:
 
 ```bash
 AWA_GOVERNED_ROOT=/path/to/root AWA_POLICY=/path/to/policy \
-  dashboard/install_actions.sh --enable-bridge
+  bash dashboard/install_actions.sh --enable-bridge
 ```
 
 Without that optional bridge, refresh from the CLI with
-`dashboard/render.py --root /path/to/root --policy /path/to/policy`.
+`python3 dashboard/render.py --root /path/to/root --policy /path/to/policy`.
 
 Every worktree row includes its allocated on-disk size in adaptive KB, MB, or GB units. The
 read-only measurement uses the same bounded timeout posture as repo inspection and reports
@@ -225,11 +225,11 @@ the referenced file forward to `on`.
 
 | Command | Effect |
 |---|---|
-| `./install.sh` | Install / reconcile (idempotent) |
-| `./install.sh --repair` | Force re-copy the runtime + reconcile the selected hook-owner mode and MCP |
-| `./install.sh --doctor` | Read-only health check of the install |
-| `./install.sh --check` | CI-safe static preflight (writes nothing to `$HOME`) |
-| `./install.sh --uninstall [--keep-state]` | Remove the install (`--keep-state` preserves recovery state) |
+| `bash ./install.sh` | Install / reconcile (idempotent) |
+| `bash ./install.sh --repair` | Force re-copy the runtime + reconcile the selected hook-owner mode and MCP |
+| `bash ./install.sh --doctor` | Read-only health check of the install |
+| `bash ./install.sh --check` | CI-safe static preflight (writes nothing to `$HOME`) |
+| `bash ./install.sh --uninstall [--keep-state]` | Remove the install (`--keep-state` preserves recovery state) |
 
 Equivalent `make` targets exist (`make install|repair|doctor|check|uninstall`); `make help` lists
 them. `make verify-install` exercises the whole install lifecycle in a throwaway `HOME`.

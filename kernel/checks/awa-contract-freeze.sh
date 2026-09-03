@@ -26,6 +26,31 @@ EMITTER="$AWA_HOME/dashboard/emitter.py"
 fail=0
 pass() { printf '  PASS  %s\n' "$1"; }
 bad()  { printf '  FAIL  %s\n' "$1"; fail=1; }
+has_executable_mode() {
+  python3 - "$@" <<'PY'
+import os
+import stat
+import sys
+
+for raw in sys.argv[1:]:
+    try:
+        mode = os.lstat(raw).st_mode
+    except OSError:
+        raise SystemExit(1)
+    if not stat.S_ISREG(mode) or not os.access(raw, os.R_OK) or mode & 0o111 == 0:
+        raise SystemExit(1)
+PY
+}
+source_or_runtime_scripts_ready() {
+  if [ -e "$AWA_HOME/.git" ]; then
+    has_executable_mode "$@"
+    return
+  fi
+  local script
+  for script in "$@"; do
+    [ -x "$script" ] || return 1
+  done
+}
 
 echo "== AWA kernel contract freeze (v1, behavior-only, role-resolved) =="
 echo "   AWA_HOME=$AWA_HOME"
@@ -58,13 +83,13 @@ owner_check_rc=0
 owner_external_install_rc=0
 owner_external_check_rc=0
 AWA_HOOK_OWNER=direct AWA_HOOKS_JSON="$owner_direct" \
-  "$INSTALL_HOOKS" >/dev/null 2>&1 || owner_install_rc=$?
+  bash "$INSTALL_HOOKS" >/dev/null 2>&1 || owner_install_rc=$?
 AWA_HOOK_OWNER=direct AWA_HOOKS_JSON="$owner_direct" \
-  "$INSTALL_HOOKS" --check >/dev/null 2>&1 || owner_check_rc=$?
+  bash "$INSTALL_HOOKS" --check >/dev/null 2>&1 || owner_check_rc=$?
 AWA_HOOK_OWNER=external AWA_HOOKS_JSON="$owner_external" \
-  "$INSTALL_HOOKS" >/dev/null 2>&1 || owner_external_install_rc=$?
+  bash "$INSTALL_HOOKS" >/dev/null 2>&1 || owner_external_install_rc=$?
 AWA_HOOK_OWNER=external AWA_HOOKS_JSON="$owner_external" \
-  "$INSTALL_HOOKS" --check >/dev/null 2>&1 || owner_external_check_rc=$?
+  bash "$INSTALL_HOOKS" --check >/dev/null 2>&1 || owner_external_check_rc=$?
 if [ "$owner_install_rc" -eq 0 ] && [ "$owner_check_rc" -eq 0 ] && \
    [ "$owner_external_install_rc" -eq 0 ] && [ "$owner_external_check_rc" -eq 0 ] && \
    [ ! -e "$owner_tmp/external-parent" ] && \
@@ -237,9 +262,12 @@ rm -rf "$owner_tmp" 2>/dev/null || true
 
 # 0a) M1-C hook mechanics: the composite delegates guard output through exec,
 # both observers use the detached fast verifier, and handoff remains dormant.
-if [ -x "$COMPOSITE_GUARD" ] && [ -x "$INTEGRITY_OBSERVER" ] && \
-   [ -x "$SESSION_HANDOFF" ] && [ -x "$INTEGRITY_DETACHER" ] && \
+if source_or_runtime_scripts_ready "$COMPOSITE_GUARD" "$INTEGRITY_OBSERVER" \
+     "$SESSION_HANDOFF" "$INTEGRITY_DETACHER" && \
+   grep -Fq '[[ -z "${AWA_INTEGRITY_GUARD:-}" && -e "$AWA_HOME/.git" ]]' \
+     "$COMPOSITE_GUARD" && \
    grep -Fq 'exec bash "$GUARD"' "$COMPOSITE_GUARD" && \
+   grep -Fq 'exec "$GUARD"' "$COMPOSITE_GUARD" && \
    grep -Fq -- '--trigger beforeShell' "$COMPOSITE_GUARD" && \
    grep -Fq -- '--trigger stop' "$INTEGRITY_OBSERVER" && \
    ! grep -Eq 'integrity[[:space:]]+verify|status\.json|handoff_required' "$SESSION_HANDOFF" && \

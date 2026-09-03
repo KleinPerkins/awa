@@ -17,6 +17,24 @@ remove_job=0
 die() { printf 'awa-dashboard-actions: %s\n' "$*" >&2; exit 1; }
 note() { printf 'awa-dashboard-actions: %s\n' "$*"; }
 
+source_script_ready() {
+  python3 - "$1" <<'PY'
+import os
+import stat
+import sys
+
+try:
+    mode = os.lstat(sys.argv[1]).st_mode
+except OSError:
+    raise SystemExit(1)
+raise SystemExit(
+    0
+    if stat.S_ISREG(mode) and os.access(sys.argv[1], os.R_OK) and mode & 0o111
+    else 1
+)
+PY
+}
+
 find_local_jobs() {
   if [[ -n "${AWA_LOCAL_JOBS_CLI:-}" && -x "$AWA_LOCAL_JOBS_CLI" ]]; then
     printf '%s\n' "$AWA_LOCAL_JOBS_CLI"
@@ -113,12 +131,24 @@ elif ! bridge_enabled "$local_jobs"; then
   exit 3
 fi
 
-program="$AWA_HOME/dashboard/render.py"
-[[ -x "$program" ]] || die "dashboard renderer is not executable: $program"
+renderer="$AWA_HOME/dashboard/render.py"
+program="$renderer"
+program_args=()
+if [[ -e "$AWA_HOME/.git" ]]; then
+  source_script_ready "$renderer" ||
+    die "source dashboard renderer is not a readable regular executable-mode file: $renderer"
+  program="$(command -v python3 2>/dev/null || true)"
+  [[ -n "$program" && -x "$program" ]] ||
+    die "python3 is unavailable for the source dashboard renderer"
+  program_args=(--arg "$renderer")
+else
+  [[ -x "$renderer" ]] || die "dashboard renderer is not executable: $renderer"
+fi
 args=(
   --type command
   --id "$JOB_ID"
   --program "$program"
+  "${program_args[@]}"
   --arg=--root
   --arg "$root"
   --arg=--policy

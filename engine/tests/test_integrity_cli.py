@@ -56,7 +56,7 @@ class TestIntegrityCli(EngineTestCase):
         if state_home is not None:
             env["XDG_STATE_HOME"] = str(state_home)
         return subprocess.run(
-            [_CLI, *args],
+            ["bash", _CLI, *args],
             capture_output=True,
             text=True,
             env=env,

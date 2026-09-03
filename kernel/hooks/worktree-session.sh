@@ -59,7 +59,7 @@ print("identity_ok=" + ("yes" if ok else "no"))
 PY
 )"
 
-if [ -x "$DEV_WORKTREE" ] && [ -d "$cwd" ]; then
+if [ -f "$DEV_WORKTREE" ] && [ -r "$DEV_WORKTREE" ] && [ -d "$cwd" ]; then
   status="$(cd "$cwd" 2>/dev/null && bash "$DEV_WORKTREE" status 2>/dev/null || true)"
 else
   status=""

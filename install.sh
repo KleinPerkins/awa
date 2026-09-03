@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # install.sh — AWA Standalone System Package (SSP) installer.
 #
-# Clone KleinPerkins/awa and run ./install.sh: it installs a self-contained AWA (generic kernel +
+# Clone KleinPerkins/awa and run bash ./install.sh: it installs a self-contained AWA (generic kernel +
 # engine + dashboard + frozen contract) into your XDG dirs with NO sibling-repo dependency, then
 # reconciles the selected Cursor hook owner + an add-only MCP server. Idempotent,
 # backup-before-write.
 #
-#   ./install.sh                 install/reconcile (idempotent)
-#   ./install.sh --repair        force re-copy the runtime + re-wire hooks/mcp
-#   ./install.sh --doctor        read-only health check of the install
-#   ./install.sh --check         CI-safe static preflight (no writes to $HOME)
-#   ./install.sh --uninstall [--keep-state]   remove the install (‑‑keep-state preserves recovery state)
+#   bash ./install.sh                 install/reconcile (idempotent)
+#   bash ./install.sh --repair        force re-copy the runtime + re-wire hooks/mcp
+#   bash ./install.sh --doctor        read-only health check of the install
+#   bash ./install.sh --check         CI-safe static preflight (no writes to $HOME)
+#   bash ./install.sh --uninstall [--keep-state]   remove the install (--keep-state preserves recovery state)
 #
 # Layout (all HOME/XDG-relative — honors a HOME override):
 #   runtime  $XDG_DATA_HOME/awa/current/           kernel + engine + dashboard + contracts + bin
@@ -155,21 +155,45 @@ configure_dashboard_refresh() {
 
 validate_integrity_product_assets() {
   local root="$1"
-  [ -x "$root/kernel/bin/awa-integrity-sweep.sh" ] || return 1
-  [ -x "$root/kernel/hooks/worktree-guard-with-integrity.sh" ] || return 1
-  [ -x "$root/kernel/hooks/awa-integrity-observer.sh" ] || return 1
-  [ -x "$root/kernel/hooks/awa-session-handoff.sh" ] || return 1
-  [ -x "$root/engine/integrity_detach.py" ] || return 1
+  local access_mode="${2:-runtime}"
+  case "$access_mode" in
+    source|runtime) ;;
+    *) return 1 ;;
+  esac
   [ -f "$root/contracts/awa-integrity-schedule.v1.json" ] || return 1
   [ -f "$root/contracts/awa-hook-owner.v2.json" ] || return 1
   [ -f "$root/engine/integrity_console.py" ] || return 1
   [ -f "$root/engine/integrity_alert.py" ] || return 1
-  python3 - "$root" <<'PY'
+  python3 - "$root" "$access_mode" <<'PY'
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
+access_mode = sys.argv[2]
+scripts = (
+    root / "kernel" / "bin" / "awa-integrity-sweep.sh",
+    root / "kernel" / "hooks" / "worktree-guard-with-integrity.sh",
+    root / "kernel" / "hooks" / "awa-integrity-observer.sh",
+    root / "kernel" / "hooks" / "awa-session-handoff.sh",
+    root / "engine" / "integrity_detach.py",
+)
+
+
+def valid_script(path):
+    if not path.is_file():
+        return False
+    if access_mode == "runtime":
+        return os.access(path, os.X_OK)
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return False
+    return stat.S_ISREG(mode) and os.access(path, os.R_OK) and mode & 0o111 != 0
+
+
 contract = json.loads(
     (root / "contracts" / "awa-integrity-schedule.v1.json").read_text(
         encoding="utf-8"
@@ -184,7 +208,8 @@ minimum = contract.get("minimum_interval_seconds")
 interval = contract.get("interval_seconds")
 maximum = contract.get("maximum_interval_seconds")
 valid = (
-    contract.get("schema") == "awa-integrity-schedule/v1"
+    all(valid_script(path) for path in scripts)
+    and contract.get("schema") == "awa-integrity-schedule/v1"
     and contract.get("label") == "com.kleinperkins.awa-integrity"
     and type(minimum) is int
     and type(interval) is int
@@ -553,7 +578,7 @@ do_doctor() {
     echo "awa doctor: FAILED"
     return "$resolve_rc"
   fi
-  if [ -d "$RUNTIME" ]; then echo "  PASS  runtime present"; else echo "  FAIL  runtime missing (run ./install.sh)"; rc=1; fi
+  if [ -d "$RUNTIME" ]; then echo "  PASS  runtime present"; else echo "  FAIL  runtime missing (run bash ./install.sh)"; rc=1; fi
   if [ -f "$ENV_FILE" ]; then echo "  PASS  config env present"; else echo "  FAIL  config env missing"; rc=1; fi
   if [ -f "$POINTER" ] && python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$POINTER" 2>/dev/null; then
     echo "  PASS  release pointer present + valid"
@@ -736,7 +761,7 @@ PY
   if [ -f "$SRC_ROOT/consumer/operator-skill.md" ] && [ -f "$SRC_ROOT/consumer/finish_current.py" ]; then
     echo "  PASS  finish operator entrypoint sources present"
   else echo "  FAIL  finish operator entrypoint sources missing"; rc=1; fi
-  if validate_integrity_product_assets "$SRC_ROOT"; then
+  if validate_integrity_product_assets "$SRC_ROOT" source; then
     echo "  PASS  integrity product + awa-hook-owner/v2 assets valid (no plist; host activation external)"
   else echo "  FAIL  integrity product assets invalid"; rc=1; fi
   if [ -f "$SRC_ROOT/dashboard/seed.canvas.tsx" ] && \

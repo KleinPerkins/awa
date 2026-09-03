@@ -868,13 +868,17 @@ def republish_second_close(sb: Sandbox) -> str:
 def hook_install(sb: Sandbox) -> str:
     hooks = sb.data / "hooks.json"
     env = {**os.environ, "AWA_HOOKS_JSON": str(hooks), "AWA_HOOK_OWNER": "direct"}
-    first = sb.run_raw([str(INSTALL_HOOKS)], env=env)
+    first = sb.run_raw(["bash", str(INSTALL_HOOKS)], env=env)
     check_eq(first.returncode, 0, f"install rc ({first.stderr})")
     one = hooks.read_bytes()
-    second = sb.run_raw([str(INSTALL_HOOKS)], env=env)
+    second = sb.run_raw(["bash", str(INSTALL_HOOKS)], env=env)
     check_eq(second.returncode, 0, "second install rc")
     check_eq(hooks.read_bytes(), one, "idempotent bytes")
-    check_eq(sb.run_raw([str(INSTALL_HOOKS), "--check"], env=env).returncode, 0, "--check ok")
+    check_eq(
+        sb.run_raw(["bash", str(INSTALL_HOOKS), "--check"], env=env).returncode,
+        0,
+        "--check ok",
+    )
     entry = json.loads(one)["hooks"]["beforeSubmitPrompt"][0]
     check_eq(entry["matcher"], "UserPromptSubmit", "matcher")
     check_eq(entry["failClosed"], False, "failClosed=false (advisory; Layer B caveat)")
@@ -912,19 +916,19 @@ def hook_install(sb: Sandbox) -> str:
         "AWA_HOOKS_JSON": str(external_hooks),
         "AWA_HOOK_OWNER": "external",
     }
-    install = sb.run_raw([str(REPO / "install.sh")], env=external_env)
+    install = sb.run_raw(["bash", str(REPO / "install.sh")], env=external_env)
     check_eq(install.returncode, 0, f"external install rc ({install.stderr})")
     persisted_env = dict(external_env)
     persisted_env.pop("AWA_HOOK_OWNER")
-    repair = sb.run_raw([str(REPO / "install.sh"), "--repair"], env=persisted_env)
+    repair = sb.run_raw(["bash", str(REPO / "install.sh"), "--repair"], env=persisted_env)
     check_eq(repair.returncode, 0, f"external repair rc ({repair.stderr})")
-    doctor = sb.run_raw([str(REPO / "install.sh"), "--doctor"], env=persisted_env)
+    doctor = sb.run_raw(["bash", str(REPO / "install.sh"), "--doctor"], env=persisted_env)
     check_eq(doctor.returncode, 0, f"external doctor rc ({doctor.stderr})")
     check(
         "hook owner selected: external (host-managed; hook file not inspected by AWA)"
         in doctor.stdout,
         "external doctor owner report")
-    uninstall = sb.run_raw([str(REPO / "install.sh"), "--uninstall"], env=persisted_env)
+    uninstall = sb.run_raw(["bash", str(REPO / "install.sh"), "--uninstall"], env=persisted_env)
     check_eq(uninstall.returncode, 0, f"external uninstall rc ({uninstall.stderr})")
     check_eq(snapshot(), external_before, "external hook inode/mode/mtime/bytes/backups")
     return (

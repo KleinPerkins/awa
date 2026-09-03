@@ -18,7 +18,7 @@ This session bootstraps its OWN fresh fixtures — it does **not** reference any
 ```bash
 rm -f "${HOME}/.local/state/awa/hook-probe/events.jsonl"
 cd ~/dev/capabilities/awa && AWA_POLICY=~/dev/_ops/policy/worktree-policy.yml \
-  AWA_GOVERNED_ROOT=~/dev ./install.sh --repair
+  AWA_GOVERNED_ROOT=~/dev bash ./install.sh --repair
 bash ~/dev/capabilities/awa/live-verify/bootstrap-eligible-uat.sh          # prints <FIXTURE> + <FIXTURE_REL>
 bash ~/dev/capabilities/awa/live-verify/bootstrap-hook-probe-uat.sh ~/awa-mcp-uat
 ```

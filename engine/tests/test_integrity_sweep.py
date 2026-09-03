@@ -39,9 +39,18 @@ _SAFE_FACTS = {
 
 
 class TestIntegritySweep(EngineTestCase):
-    def _fake_root(self) -> Path:
-        root = Path(self._tmp.name) / "fake-runtime"
+    def _fake_root(
+        self,
+        *,
+        source: bool = False,
+        executable: bool = True,
+    ) -> Path:
+        root = Path(self._tmp.name) / (
+            "fake-source" if source else "fake-runtime"
+        )
         (root / "bin").mkdir(parents=True)
+        if source:
+            (root / ".git").mkdir()
         engine = root / "bin" / "awa-engine.sh"
         engine.write_text(
             """#!/usr/bin/env bash
@@ -54,7 +63,7 @@ exit "${FAKE_EXIT:-0}"
 """,
             encoding="utf-8",
         )
-        engine.chmod(0o755)
+        engine.chmod(0o755 if executable else 0o600)
         return root
 
     def _run(self, *, root: Path | None = None, **extra_env: str):
@@ -71,7 +80,7 @@ exit "${FAKE_EXIT:-0}"
         ):
             env.pop(name, None)
         return subprocess.run(
-            [str(_SWEEP)],
+            ["bash", str(_SWEEP)],
             capture_output=True,
             text=True,
             env=env,
@@ -105,6 +114,17 @@ exit "${FAKE_EXIT:-0}"
                 self.assertEqual(result.returncode, code, result.stderr)
         crashed = self._run(root=root, FAKE_SIGNAL="1")
         self.assertEqual(crashed.returncode, -signal.SIGTERM)
+
+    def test_source_sweep_uses_bash_for_non_executable_engine(self):
+        root = self._fake_root(source=True, executable=False)
+        result = self._run(root=root, FAKE_EXIT="47")
+        self.assertEqual(result.returncode, 47, result.stderr)
+
+    def test_non_executable_runtime_engine_is_not_interpreted(self):
+        root = self._fake_root(executable=False)
+        result = self._run(root=root, FAKE_EXIT="47")
+        self.assertNotEqual(result.returncode, 47)
+        self.assertNotEqual(result.returncode, 0)
 
     def test_sweep_updates_launchd_trigger(self):
         result = self._run(

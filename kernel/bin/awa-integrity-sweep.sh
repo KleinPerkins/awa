@@ -10,4 +10,7 @@ ROOT="${AWA_HOME:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 ENGINE="$ROOT/bin/awa-engine.sh"
 
 # exec preserves evaluator severities (0/1/2), unexpected exits, and signals.
+if [[ -e "$ROOT/.git" ]]; then
+  exec bash "$ENGINE" integrity verify --profile deep --trigger launchd
+fi
 exec "$ENGINE" integrity verify --profile deep --trigger launchd

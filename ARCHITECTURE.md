@@ -9,7 +9,7 @@
 **AWA ships as ONE self-contained product — a generic KERNEL and a generic ENGINE, BOTH in
 `KleinPerkins/awa`, BOTH zero-link.** Every org/host-specific literal (which repos are governed,
 which paths are read-only, where worktrees live) lives ONLY in a host-supplied **policy overlay**
-(`AWA_POLICY`), never in the product. A host adopts AWA by cloning + `./install.sh`, then pointing
+(`AWA_POLICY`), never in the product. A host adopts AWA by cloning + `bash ./install.sh`, then pointing
 `AWA_POLICY` / `AWA_GOVERNED_ROOT` at its own machine-local policy. The product itself names no
 organization, ever.
 

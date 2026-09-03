@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -605,6 +606,10 @@ class TestRealFixture(unittest.TestCase):
             root = Path(td)
             personal = root / "personal"
             personal.mkdir()
+            fixture_kernel = root / "kernel"
+            shutil.copytree(REPO_ROOT / "kernel", fixture_kernel)
+            awa_cli = fixture_kernel / "bin" / "dev-worktree.sh"
+            awa_cli.chmod(0o600)
             hostile_hooks = root / "hostile-hooks"
             hostile_hooks.mkdir()
             pre_commit = hostile_hooks / "pre-commit"
@@ -630,7 +635,7 @@ class TestRealFixture(unittest.TestCase):
                 awa_repo_root=REPO_ROOT,
                 governed_root=root,
                 personal_root=personal,
-                awa_cli=REPO_ROOT / "kernel" / "bin" / "dev-worktree.sh",
+                awa_cli=awa_cli,
                 managed_root=root / "managed",
                 nonce="bounded-fixture",
                 env=env,
@@ -666,7 +671,10 @@ class TestRealFixture(unittest.TestCase):
                 "_write_existing_regular",
                 side_effect=AssertionError("teardown must never rewrite possible concurrent work"),
             ):
-                self.assertTrue(fixture.teardown())
+                self.assertTrue(
+                    fixture.teardown(),
+                    f"{fixture.preserved_reason}; commands={fixture.commands[-3:]}",
+                )
             self.assertFalse(fixture.worktree.exists())
             self.assertFalse(fixture.primary.exists())
             self.assertFalse(fixture.origin.exists())

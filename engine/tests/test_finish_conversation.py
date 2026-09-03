@@ -589,7 +589,7 @@ class HookAndDispatcherTest(Phase2Base):
         self.assertIsNone(UX._read_dialogue_raw(conversation))
 
     def test_hook_script_fail_open_on_malformed_input(self) -> None:
-        proc = subprocess.run([str(_HOOK)], input="{bad", capture_output=True, text=True,
+        proc = subprocess.run(["bash", str(_HOOK)], input="{bad", capture_output=True, text=True,
                               env={**os.environ, "XDG_STATE_HOME": str(self.state_home)})
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(json.loads(proc.stdout), {"continue": True})
@@ -599,7 +599,7 @@ class HookAndDispatcherTest(Phase2Base):
         Path(wt, "draft.txt").write_text("x", encoding="utf-8")
         payload = self.payload(wt, conv="hook-script")
         proc = subprocess.run(
-            [str(_HOOK)], input=json.dumps(payload), capture_output=True, text=True,
+            ["bash", str(_HOOK)], input=json.dumps(payload), capture_output=True, text=True,
             env={**os.environ, "XDG_STATE_HOME": str(self.state_home)})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         out = json.loads(proc.stdout)
@@ -659,13 +659,17 @@ class HookAndDispatcherTest(Phase2Base):
     def test_hook_install_check_and_idempotency(self) -> None:
         hooks = self.data_home / "hooks.json"
         env = {**os.environ, "AWA_HOOKS_JSON": str(hooks)}
-        first = subprocess.run([str(_INSTALL_HOOKS)], env=env, capture_output=True, text=True)
+        first = subprocess.run(
+            ["bash", str(_INSTALL_HOOKS)], env=env, capture_output=True, text=True
+        )
         self.assertEqual(first.returncode, 0, first.stderr)
         one = hooks.read_bytes()
-        second = subprocess.run([str(_INSTALL_HOOKS)], env=env, capture_output=True, text=True)
+        second = subprocess.run(
+            ["bash", str(_INSTALL_HOOKS)], env=env, capture_output=True, text=True
+        )
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(hooks.read_bytes(), one)
-        check = subprocess.run([str(_INSTALL_HOOKS), "--check"], env=env,
+        check = subprocess.run(["bash", str(_INSTALL_HOOKS), "--check"], env=env,
                                capture_output=True, text=True)
         self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
         entry = json.loads(one)["hooks"]["beforeSubmitPrompt"][0]
@@ -683,7 +687,7 @@ class HookAndDispatcherTest(Phase2Base):
             "XDG_STATE_HOME": str(home / ".local" / "state"),
         }
         install = _REPO / "install.sh"
-        first = subprocess.run([str(install)], env=env, capture_output=True, text=True)
+        first = subprocess.run(["bash", str(install)], env=env, capture_output=True, text=True)
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         retained = Path(env["XDG_STATE_HOME"]) / "awa" / "protected-retain" / (
             "retain-" + "a" * 32)
@@ -691,7 +695,7 @@ class HookAndDispatcherTest(Phase2Base):
         (retained / "manifest.json").write_text('{"protected":true}\n', encoding="utf-8")
         ordinary = Path(env["XDG_STATE_HOME"]) / "awa" / "ordinary"
         ordinary.write_text("remove", encoding="utf-8")
-        removed = subprocess.run([str(install), "--uninstall"], env=env,
+        removed = subprocess.run(["bash", str(install), "--uninstall"], env=env,
                                  capture_output=True, text=True)
         self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
         self.assertTrue((retained / "manifest.json").exists())
