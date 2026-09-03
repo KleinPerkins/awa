@@ -533,6 +533,9 @@ class ActiveRootTest(EngineTestCase):
         })
         env = os.environ.copy()
         env["AWA_HOME"] = str(_REPO_ROOT)
+        home = self.data_home / "home"
+        home.mkdir(mode=0o700, exist_ok=True)
+        env["HOME"] = str(home)
         r = subprocess.run(["bash", self.session_hook], input=payload, cwd=cwd,
                            env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

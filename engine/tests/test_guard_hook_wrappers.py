@@ -344,7 +344,7 @@ class TestBashGuardWrapperParity(unittest.TestCase):
             }
         )
         subprocess.run(
-            [str(_REPO / "install.sh")],
+            ["bash", str(_REPO / "install.sh")],
             cwd=str(_REPO),
             check=True,
             capture_output=True,

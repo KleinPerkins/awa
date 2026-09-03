@@ -1231,7 +1231,7 @@ clean_worktree() {
   # ADDITIVE-WITHIN-v1 (Fix 3): hold the SHARED per-common-dir advisory lock across the ORDINARY
   # destructive section (TOCTOU disposition re-read + `git worktree remove` + branch-delete), the
   # SAME lock ABI kernel finish + engine maintenance use, so an ordinary clean serializes against a
-  # concurrent finish/engine mutation on this git_common_dir. The lock is held on fd 200 (opened
+  # concurrent finish/engine mutation on this git_common_dir. The lock is held on fd 9 (opened
   # here, kept open across the section; the flock persists because THIS shell keeps the fd open —
   # the standard flock(1) <fd> pattern) and released when this single-invocation process exits.
   # Uncontended acquisition is transparent (instant). On contention within the bounded timeout we
@@ -1258,13 +1258,13 @@ clean_worktree() {
     clean_set_disposition refused clean_lock_busy "per-common-dir lock path unusable — worktree preserved"
     die "refusing to remove worktree — per-common-dir lock path unusable"
   fi
-  if ! { exec 200<>"$_lockfile"; } 2>/dev/null; then
+  if ! { exec 9<>"$_lockfile"; } 2>/dev/null; then
     clean_set_disposition refused clean_lock_busy "cannot open per-common-dir lockfile — worktree preserved"
     die "refusing to remove worktree — cannot open per-common-dir lockfile"
   fi
-  if ! python3 "$AWA_FINISH_LIB" flock-fd --fd 200 \
+  if ! python3 "$AWA_FINISH_LIB" flock-fd --fd 9 \
       --timeout "${AWA_CLEAN_LOCK_TIMEOUT:-30}"; then
-    exec 200>&-
+    exec 9>&-
     clean_set_disposition refused clean_lock_busy "per-common-dir lock busy or unavailable — worktree preserved"
     die "refusing to remove worktree — the per-common-dir lock is busy or unavailable"
   fi
