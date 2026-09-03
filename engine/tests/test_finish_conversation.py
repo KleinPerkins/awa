@@ -167,7 +167,7 @@ class HookAndDispatcherTest(Phase2Base):
         env = {**os.environ, "XDG_STATE_HOME": str(self.state_home)}
         env.pop("DEV_SESSION_ID", None)
         proc = subprocess.run(
-            [str(_REPO / "kernel" / "hooks" / "worktree-session.sh")],
+            ["bash", str(_REPO / "kernel" / "hooks" / "worktree-session.sh")],
             input=json.dumps(payload), capture_output=True, text=True, env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         return json.loads(proc.stdout)

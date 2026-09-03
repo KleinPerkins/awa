@@ -443,8 +443,9 @@ class ShellMachineTrustTest(FinalHardeningBase):
         real_run = subprocess.run
 
         def run(command, *args, **kwargs):
-            if (isinstance(command, list) and command
-                    and str(command[0]).endswith("kernel/bin/dev-worktree.sh")):
+            if (isinstance(command, list) and len(command) > 1
+                    and command[0] == "bash"
+                    and str(command[1]).endswith("kernel/bin/dev-worktree.sh")):
                 return subprocess.CompletedProcess(
                     command, returncode, stdout=stdout, stderr="hostile stderr")
             return real_run(command, *args, **kwargs)

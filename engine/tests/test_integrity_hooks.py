@@ -207,8 +207,9 @@ raise SystemExit(0)
     ) -> subprocess.CompletedProcess:
         if executable == _COMPOSITE:
             self._observer_requested = True
+        argv = ["bash", str(executable)] if executable == _GUARD else [str(executable)]
         return subprocess.run(
-            [str(executable)],
+            argv,
             input=payload,
             capture_output=True,
             env=env or self.env,

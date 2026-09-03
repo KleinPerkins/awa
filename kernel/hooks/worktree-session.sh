@@ -60,7 +60,7 @@ PY
 )"
 
 if [ -x "$DEV_WORKTREE" ] && [ -d "$cwd" ]; then
-  status="$(cd "$cwd" 2>/dev/null && "$DEV_WORKTREE" status 2>/dev/null || true)"
+  status="$(cd "$cwd" 2>/dev/null && bash "$DEV_WORKTREE" status 2>/dev/null || true)"
 else
   status=""
 fi

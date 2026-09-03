@@ -30,7 +30,7 @@
   "process_measurement": {
     "status": "measured",
     "counter_scope": "PATH-resolved git children only",
-    "producer_sha256": "5475ffc4a3f86cf3387517fe4416590bf5e5b46c42bed53afceb652249e339de",
+    "producer_sha256": "da65feeb123cc1e8164d73009abc65a94202c50298b085eb29b88a49be3a5a7b",
     "case_manifest_sha256": "eb4e7662f096cecc6d0a99717d71e1868552596f22abe1db61536e61d4476435",
     "git_processes": 62
   },

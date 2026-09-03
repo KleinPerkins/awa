@@ -481,6 +481,7 @@ class TrialFixture:
 
         ensure = self._run(
             [
+                "bash",
                 str(self.awa_cli),
                 "ensure",
                 "--base",
@@ -631,7 +632,7 @@ class TrialFixture:
         ):
             raise FixtureError("live kernel probe did not see the known unsaved edit")
         self.status_output = self._run(
-            [str(self.awa_cli), "status"], cwd=self.worktree
+            ["bash", str(self.awa_cli), "status"], cwd=self.worktree
         ).stdout
         if "linked-worktree: yes" not in self.status_output:
             raise FixtureError("AWA status did not recognize the generated linked worktree")
@@ -764,7 +765,8 @@ class TrialFixture:
                 self._assert_directory(path)
             self._assert_root_not_active()
             self._run(
-                [str(self.awa_cli), "clean", "--path", str(self.worktree), "--delete-branch"],
+                ["bash", str(self.awa_cli), "clean",
+                 "--path", str(self.worktree), "--delete-branch"],
                 cwd=self.primary,
             )
             if self.worktree.exists():

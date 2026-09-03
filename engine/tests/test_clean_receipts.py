@@ -68,7 +68,7 @@ class CleanReceiptsTest(EngineTestCase):
         clean_env["AWA_HOME"] = str(self.repo_root)
         if env:
             clean_env.update(env)
-        return subprocess.run([self.dev_worktree, "clean", *args], cwd=str(self.repo_root),
+        return subprocess.run(["bash", self.dev_worktree, "clean", *args], cwd=str(self.repo_root),
                               env=clean_env, capture_output=True, text=True)
 
     def heartbeat(self, path: str) -> None:

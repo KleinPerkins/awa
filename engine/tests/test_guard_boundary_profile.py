@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -133,6 +135,85 @@ class GuardBoundaryProfileTest(unittest.TestCase):
             self.assertEqual(
                 runtime,
                 Path(environment["XDG_DATA_HOME"]) / "awa" / "current",
+            )
+
+    def test_named_source_hooks_work_when_execute_bits_are_unusable(self):
+        with tempfile.TemporaryDirectory(prefix="awa-noexec-named-hooks.") as raw:
+            root = Path(raw)
+            source = root / "source"
+            shutil.copytree(
+                guard_boundary_profile.REPO_ROOT / "kernel",
+                source / "kernel",
+            )
+            guard = source / "kernel" / "hooks" / "worktree-guard.sh"
+            session = source / "kernel" / "hooks" / "worktree-session.sh"
+            checker = source / "kernel" / "bin" / "dev-worktree.sh"
+            for script in (guard, session, checker):
+                script.chmod(0o600)
+
+            environment = guard_boundary_profile._private_environment(
+                root / "environment"
+            )
+            environment["AWA_HOME"] = str(source)
+            real_git = shutil.which("git", path=environment["PATH"])
+            self.assertIsNotNone(real_git)
+            case = guard_boundary_profile.GuardCase(
+                "noexec_named_hooks",
+                "git status",
+                "allow",
+                "clean",
+            )
+            fixture = guard_boundary_profile._make_case_fixture(
+                root,
+                case,
+                real_git,
+                environment,
+            )
+
+            with mock.patch.object(
+                guard_boundary_profile,
+                "SOURCE_GUARD",
+                guard,
+            ):
+                permission = guard_boundary_profile._hook_permission(
+                    guard,
+                    fixture,
+                    case.command,
+                    environment,
+                )
+            self.assertEqual(permission, case.expected_permission)
+
+            checked = subprocess.run(
+                ["bash", str(checker), "policy-check"],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+
+            payload = json.dumps(
+                {
+                    "workspace_roots": [str(fixture.repo)],
+                    "conversation_id": "noexec-conversation",
+                    "session_id": "noexec-session",
+                }
+            )
+            session_result = subprocess.run(
+                ["bash", str(session)],
+                input=payload,
+                cwd=str(fixture.repo),
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(
+                session_result.returncode,
+                0,
+                session_result.stdout + session_result.stderr,
+            )
+            self.assertIn(
+                "additional_context",
+                json.loads(session_result.stdout),
             )
 
     def test_profile_validator_rejects_unknown_key(self):

@@ -44,17 +44,17 @@ ROLE_IDS = (
 
 V151_UNCHANGED_BEHAVIOR_SHA256 = {
     "kernel/hooks/worktree-session.sh":
-        "1ea89ba2ad486510be7976d55771e09f7e9201119c4eed38a354ade6eed77938",
+        "314b9cc7c40cc61ae14e4c9b1e2cb1e1e4c060e5bd5d3a9d18cc9b8e62a79cb7",
     "kernel/hooks/awa-recovery-maintenance.sh":
         "a49911ad61da905a384e5251cc4af1ad6beacc8243aa30b15c63b19f6998ef6c",
     "kernel/hooks/before-submit-prompt.sh":
         "d594519c8962a8cdb8d5adc8262a09a61c00ec074317b3d07be144823220da5a",
     "consumer/finish_current.py":
-        "0e8b097a7f118ad71b8889de3cad4d04009fc3db2413bd122f4f4803cea4e26f",
+        "4120d3a45abaf59aceb352c3c0e529addc5af114e2b5ac9cae3a15bb94e30354",
 }
 V160_PRIMARY_MAINTENANCE_SHA256 = {
     "kernel/hooks/worktree-guard.sh":
-        "e79d650d71769998dc02d71129312eee7c3a974bb877ca641cedaf7f9661803e",
+        "bc69fa094da67d5edef4fa4b812e9865d409e02df51ac89322704bf1d8940305",
     "engine/tests/git_guard_command_corpus.py":
         "0ba21e1c7d2e8702a4b963ed8d08b8c90e993645200e7eaff23c867e7a2e36b5",
 }
@@ -613,13 +613,13 @@ class TestHookOwnerParity(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "set -u\n"
             "target=\"${AWA_DELEGATE_TARGET:-}\"\n"
-            "if [ ! -x \"$target\" ]; then\n"
+            "if [ ! -f \"$target\" ] || [ ! -r \"$target\" ]; then\n"
             "  printf '%s\\n' '{\"permission\":\"allow\"}'\n"
             "  exit 0\n"
             "fi\n"
             "export AWA_POLICY=\"${AWA_EXTERNAL_POLICY:?}\"\n"
             "export AWA_GOVERNED_ROOT=\"${AWA_EXTERNAL_ROOT:?}\"\n"
-            "exec \"$target\"\n",
+            "exec bash \"$target\"\n",
             encoding="utf-8")
         self.delegator.chmod(0o755)
 
@@ -685,8 +685,13 @@ class TestHookOwnerParity(unittest.TestCase):
             "file_path": str(self.repo / "file"),
         }
         executable = self.delegator if delegated else guard_path
+        argv = (
+            [str(executable)]
+            if delegated or guard_path != GUARD
+            else ["bash", str(executable)]
+        )
         result = subprocess.run(
-            [str(executable)], input=json.dumps(payload), capture_output=True,
+            argv, input=json.dumps(payload), capture_output=True,
             text=True, env=env, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return json.loads(result.stdout)

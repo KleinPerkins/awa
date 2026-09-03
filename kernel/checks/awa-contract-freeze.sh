@@ -239,7 +239,7 @@ rm -rf "$owner_tmp" 2>/dev/null || true
 # both observers use the detached fast verifier, and handoff remains dormant.
 if [ -x "$COMPOSITE_GUARD" ] && [ -x "$INTEGRITY_OBSERVER" ] && \
    [ -x "$SESSION_HANDOFF" ] && [ -x "$INTEGRITY_DETACHER" ] && \
-   grep -Fq 'exec "$GUARD"' "$COMPOSITE_GUARD" && \
+   grep -Fq 'exec bash "$GUARD"' "$COMPOSITE_GUARD" && \
    grep -Fq -- '--trigger beforeShell' "$COMPOSITE_GUARD" && \
    grep -Fq -- '--trigger stop' "$INTEGRITY_OBSERVER" && \
    ! grep -Eq 'integrity[[:space:]]+verify|status\.json|handoff_required' "$SESSION_HANDOFF" && \
@@ -307,7 +307,7 @@ fi
 # 2) awa-worktree/v1 JSON shape: run the emitter on an empty tmp root, assert schema+top+summary
 #    keys live and the emitter SOURCE declares each frozen repo/worktree/orphan key.
 awa_tmp="$(mktemp -d)"
-emit="$("$DEV_WORKTREE" dashboard-data --root "$awa_tmp" 2>/dev/null || true)"
+emit="$(bash "$DEV_WORKTREE" dashboard-data --root "$awa_tmp" 2>/dev/null || true)"
 rmdir "$awa_tmp" 2>/dev/null || true
 if CONTRACT="$CONTRACT" EMIT="$emit" EMITTER_SRC="$(cat "$EMITTER" 2>/dev/null || true)" python3 - <<'PY'
 import json, os, sys
@@ -357,13 +357,13 @@ if mkdir -p "$repo"; then
     git -C "$repo" remote add origin "git@github.com:KleinPerkins/awa-contract-temp.git" ) >/dev/null 2>&1
   # Non-mutating command -> fast-path allow (validates allow shape).
   allow_json="$(printf '{"cwd":"%s","command":"git status"}' "$repo" | \
-    AWA_GOVERNED_ROOT="$guat" "$GUARD" 2>/dev/null || true)"
+    AWA_GOVERNED_ROOT="$guat" bash "$GUARD" 2>/dev/null || true)"
   # Mutating command on an included primary checkout -> enforced deny (validates deny shape).
   deny_json="$(printf '{"cwd":"%s","command":"git add f"}' "$repo" | \
-    AWA_GOVERNED_ROOT="$guat" "$GUARD" 2>/dev/null || true)"
+    AWA_GOVERNED_ROOT="$guat" bash "$GUARD" 2>/dev/null || true)"
   # afterFileEdit (filePath, no command) -> observation-only allow (X2), never a no-op ask/deny.
   fileedit_json="$(printf '{"cwd":"%s","filePath":"%s"}' "$repo" "$repo/f" | \
-    XDG_STATE_HOME="$guat/state" AWA_GOVERNED_ROOT="$guat" "$GUARD" 2>/dev/null || true)"
+    XDG_STATE_HOME="$guat/state" AWA_GOVERNED_ROOT="$guat" bash "$GUARD" 2>/dev/null || true)"
 fi
 rm -rf "$guat" 2>/dev/null || true
 if CONTRACT="$CONTRACT" ALLOW="$allow_json" DENY="$deny_json" FILEEDIT="$fileedit_json" python3 - <<'PY'
@@ -455,7 +455,7 @@ out = []
 for cmd, expected in cases:
     payload = json.dumps({"cwd": repo, "command": cmd})
     proc = subprocess.run(
-        [guard],
+        ["bash", guard],
         input=payload,
         capture_output=True,
         text=True,
@@ -601,7 +601,7 @@ for label, command, expected, dirty in cases:
         dirty_path.write_text("local\n", encoding="utf-8")
     payload = json.dumps({"cwd": str(repo), "command": command})
     proc = subprocess.run(
-        [guard],
+        ["bash", guard],
         input=payload,
         capture_output=True,
         text=True,
@@ -707,7 +707,7 @@ if mkdir -p "$morepo"; then
   # A mutating command on a repo whose explicit mode value is an unknown/legacy token must still
   # DENY (fail-safe: any non-`off` value -> include/protected).
   failsafe_json="$(printf '{"cwd":"%s","command":"git add f"}' "$morepo" | \
-    AWA_GOVERNED_ROOT="$mouat" AWA_POLICY="$mouat/policy.yml" "$GUARD" 2>/dev/null || true)"
+    AWA_GOVERNED_ROOT="$mouat" AWA_POLICY="$mouat/policy.yml" bash "$GUARD" 2>/dev/null || true)"
 fi
 rm -rf "$mouat" 2>/dev/null || true
 if CONTRACT="$CONTRACT" FS="$failsafe_json" python3 - <<'PY'
@@ -739,7 +739,7 @@ crat="$(mktemp -d)"
 receipt_ls=""
 if [ -f "$ROOTS_LIB" ]; then
   # not_a_directory refusal -> a terminal clean path that emits a receipt with no git needed.
-  XDG_STATE_HOME="$crat/state" "$DEV_WORKTREE" clean --path "$crat/nope" >/dev/null 2>&1 || true
+  XDG_STATE_HOME="$crat/state" bash "$DEV_WORKTREE" clean --path "$crat/nope" >/dev/null 2>&1 || true
   receipt_ls="$(XDG_STATE_HOME="$crat/state" python3 "$ROOTS_LIB" list-receipts --limit 5 2>/dev/null || true)"
 fi
 if CONTRACT="$CONTRACT" DEV_SRC="$(cat "$DEV_WORKTREE" 2>/dev/null || true)" RECEIPTS="$receipt_ls" \

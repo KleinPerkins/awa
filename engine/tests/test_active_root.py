@@ -519,7 +519,7 @@ class ActiveRootTest(EngineTestCase):
         self.assertEqual(AR.disposition(wt)["disposition"], "stale")
         env = os.environ.copy()
         env["AWA_HOME"] = str(_REPO_ROOT)
-        r = subprocess.run([self.dev_worktree, "clean", "--path", wt, "--delete-branch"],
+        r = subprocess.run(["bash", self.dev_worktree, "clean", "--path", wt, "--delete-branch"],
                            cwd=str(_REPO_ROOT), env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertFalse(Path(wt).exists())
@@ -533,7 +533,7 @@ class ActiveRootTest(EngineTestCase):
         })
         env = os.environ.copy()
         env["AWA_HOME"] = str(_REPO_ROOT)
-        r = subprocess.run([self.session_hook], input=payload, cwd=cwd,
+        r = subprocess.run(["bash", self.session_hook], input=payload, cwd=cwd,
                            env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return json.loads(r.stdout)
@@ -576,7 +576,7 @@ class ActiveRootTest(EngineTestCase):
         env.pop("DEV_SESSION_ID", None)
         env["AWA_HEARTBEAT_REFRESH_THROTTLE"] = "0"
         result = subprocess.run(
-            [self.guard_hook], input=payload, cwd=wt, env=env,
+            ["bash", self.guard_hook], input=payload, cwd=wt, env=env,
             capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         record, corrupt = AR.read_record(wt)
@@ -732,7 +732,7 @@ class ActiveRootTest(EngineTestCase):
         for k in ("CURSOR_BACKGROUND_AGENT", "CURSOR_CLOUD_AGENT", "IS_BACKGROUND_AGENT",
                   "AWA_FORCE_CLOUD"):
             env.pop(k, None)
-        return subprocess.run([self.guard_hook], input=payload, cwd=cwd, env=env,
+        return subprocess.run(["bash", self.guard_hook], input=payload, cwd=cwd, env=env,
                               capture_output=True, text=True)
 
     def _age_heartbeat(self, root: str, seconds_ago: int = 100000) -> None:

@@ -120,7 +120,8 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         env["AWA_POLICY"] = str(self.policy)
         if env_updates:
             env.update(env_updates)
-        proc = subprocess.run([str(guard_path)], input=json.dumps(payload), capture_output=True,
+        argv = ["bash", str(guard_path)] if guard_path == _GUARD else [str(guard_path)]
+        proc = subprocess.run(argv, input=json.dumps(payload), capture_output=True,
                               text=True, env=env)
         return json.loads(proc.stdout)
 
@@ -839,7 +840,7 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         env["AWA_GOVERNED_ROOT"] = str(self.root)
         env["AWA_POLICY"] = str(self.policy)
         env["cloud_agent_identity_broker"] = "false"
-        proc = subprocess.run([str(_GUARD)],
+        proc = subprocess.run(["bash", str(_GUARD)],
                               input=json.dumps({"command": "git commit -am x", "cwd": str(self.repo)}),
                               capture_output=True, text=True, env=env)
         self.assertEqual(json.loads(proc.stdout).get("permission"), "deny")
@@ -918,7 +919,7 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         env["AWA_GOVERNED_ROOT"] = str(self.root)
         env["AWA_POLICY"] = str(self.policy)
         env["AWA_FORCE_CLOUD"] = "1"
-        proc = subprocess.run([str(_GUARD)],
+        proc = subprocess.run(["bash", str(_GUARD)],
                               input=json.dumps({"command": "git commit -am x", "cwd": str(self.repo)}),
                               capture_output=True, text=True, env=env)
         self.assertEqual(json.loads(proc.stdout).get("permission"), "allow")
@@ -944,8 +945,9 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         installed = self._install_guard()
         for label, guard in (("source", _GUARD), ("installed", installed)):
             with self.subTest(boundary=label):
+                argv = ["bash", str(guard)] if guard == _GUARD else [str(guard)]
                 proc = subprocess.run(
-                    [str(guard)],
+                    argv,
                     input="{not valid json",
                     capture_output=True,
                     text=True,

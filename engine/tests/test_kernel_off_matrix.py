@@ -136,7 +136,7 @@ class KernelOffMatrixTest(EngineTestCase):
 
         def guard(command: str) -> dict:
             result = subprocess.run(
-                [str(_GUARD)],
+                ["bash", str(_GUARD)],
                 input=json.dumps({"cwd": repo, "command": command}),
                 env=env,
                 capture_output=True,
@@ -172,7 +172,7 @@ class KernelOffMatrixTest(EngineTestCase):
         # mark ACTIVE via the kernel lib subprocess (also engine-off)
         subprocess.run(["python3", str(_ROOTS_PY), "heartbeat", "--root", wt],
                        env=env, capture_output=True, text=True, check=True)
-        r = subprocess.run([str(_DEV_WORKTREE), "clean", "--path", wt],
+        r = subprocess.run(["bash", str(_DEV_WORKTREE), "clean", "--path", wt],
                            env=env, cwd=str(_REPO_ROOT), capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0, "an active root must block even engine-off")
         self.assertTrue(Path(wt).exists())
@@ -183,7 +183,8 @@ class KernelOffMatrixTest(EngineTestCase):
 
     def test_refusal_writes_receipt_with_engine_off(self) -> None:
         env = self._engine_off_env()
-        subprocess.run([str(_DEV_WORKTREE), "clean", "--path", str(self.data_home / "nope")],
+        subprocess.run(["bash", str(_DEV_WORKTREE), "clean",
+                        "--path", str(self.data_home / "nope")],
                        env=env, cwd=str(_REPO_ROOT), capture_output=True, text=True)
         r = subprocess.run(["python3", str(_ROOTS_PY), "list-receipts", "--limit", "1"],
                            env=env, capture_output=True, text=True)

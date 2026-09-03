@@ -2169,7 +2169,7 @@ def dispatch_choice(conversation_id: str, answer: Any = None, *, attachments: An
             env["DEV_SESSION_ID"] = dialogue["session_id"]
             env[FINISH_PUBLIC_PROJECTION_ENV] = "1"
             command = [
-                str(tool), "clean", "--finish-current", "--authorization", "Close",
+                "bash", str(tool), "clean", "--finish-current", "--authorization", "Close",
                 "--conversation-id", conversation_id,
             ]
             if dialogue.get("hook_mode") is True:

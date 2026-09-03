@@ -262,7 +262,7 @@ class Sandbox:
 
     def run_dev_finish(self, *args: str, cwd: str,
                        env: dict | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run([str(DEV_WORKTREE), "clean", "--finish-current", *args],
+        return subprocess.run(["bash", str(DEV_WORKTREE), "clean", "--finish-current", *args],
                               cwd=cwd, env=env or self.kernel_env(),
                               capture_output=True, text=True)
 

@@ -96,7 +96,7 @@ class FailClosedGateTest(EngineTestCase):
         e["AWA_HOME"] = str(_REPO_ROOT)
         if env:
             e.update(env)
-        return subprocess.run([self.dev_worktree, "clean", *args], cwd=str(_REPO_ROOT),
+        return subprocess.run(["bash", self.dev_worktree, "clean", *args], cwd=str(_REPO_ROOT),
                               env=e, capture_output=True, text=True)
 
     def safe_worktree(self, name: str, branch: str = "feat/x") -> tuple[str, str]:

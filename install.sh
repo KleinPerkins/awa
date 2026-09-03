@@ -727,7 +727,7 @@ ok = (set(c["cli"]["verbs"]) >= need_cli and c["dashboard_data"]["schema"] == "a
 sys.exit(0 if ok else 1)
 PY
   then echo "  PASS  frozen behavior floor present (verbs, schemas, hook owner, version=1)"; else echo "  FAIL  frozen behavior floor drifted"; rc=1; fi
-  if "$SRC_ROOT/kernel/bin/dev-worktree.sh" policy-check >/dev/null 2>&1; then
+  if bash "$SRC_ROOT/kernel/bin/dev-worktree.sh" policy-check >/dev/null 2>&1; then
     echo "  PASS  default policy valid"
   else echo "  FAIL  default policy invalid"; rc=1; fi
   if python3 "$SRC_ROOT/kernel/lib/awa_policy.py" dump --policy "$SRC_ROOT/kernel/policy/default-worktree-policy.yml" >/dev/null 2>&1; then
