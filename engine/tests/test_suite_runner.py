@@ -193,6 +193,39 @@ class SuiteRunnerTest(unittest.TestCase):
             ],
         )
 
+    def test_failure_summary_is_last_bounded_actionable_evidence(self) -> None:
+        records = (
+            {
+                "test_id": "z.Case.test_error",
+                "module": "z",
+                "outcome": "error",
+                "skip_reason": None,
+                "elapsed_ms": 2,
+            },
+            {
+                "test_id": "a.Case.test_pass",
+                "module": "a",
+                "outcome": "passed",
+                "skip_reason": None,
+                "elapsed_ms": 1,
+            },
+            {
+                "test_id": "b.Case.test_failure",
+                "module": "b",
+                "outcome": "failure",
+                "skip_reason": None,
+                "elapsed_ms": 3,
+            },
+        )
+        stream = io.StringIO()
+        suite_runner._write_failure_summary(records, stream)
+        self.assertEqual(
+            stream.getvalue(),
+            "NONPASSING TESTS\n"
+            "failure: b.Case.test_failure\n"
+            "error: z.Case.test_error\n",
+        )
+
     def test_worker_count_accepts_only_one_two_or_four(self) -> None:
         for value in (1, 2, 4):
             with self.subTest(value=value):

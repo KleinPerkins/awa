@@ -464,6 +464,28 @@ def _write_timing_summary(summary: Mapping[str, object], stream: TextIO) -> None
         flush()
 
 
+def _write_failure_summary(
+    records: Sequence[Mapping[str, object]],
+    stream: TextIO,
+) -> None:
+    nonpassing = sorted(
+        (
+            record
+            for record in records
+            if record["outcome"] in ("failure", "error", "unexpected_success")
+        ),
+        key=lambda record: str(record["test_id"]),
+    )
+    if not nonpassing:
+        return
+    stream.write("NONPASSING TESTS\n")
+    for record in nonpassing:
+        stream.write(f"{record['outcome']}: {record['test_id']}\n")
+    flush = getattr(stream, "flush", None)
+    if flush is not None:
+        flush()
+
+
 def run_serial(
     selectors: Sequence[str],
     stream: TextIO,
@@ -497,6 +519,7 @@ def run_serial(
     run = {"outcome": outcome, "elapsed_ms": elapsed_ms, "counts": counts}
     summary = summarize_timings(records)
     _write_timing_summary(summary, stream)
+    _write_failure_summary(records, stream)
     outcomes = {
         record["test_id"]: {
             "module": record["module"],
@@ -1107,6 +1130,7 @@ def run_parallel(
             )
             summary = summarize_timings(records)
             _write_timing_summary(summary, stream)
+            _write_failure_summary(records, stream)
             outcomes = {
                 record["test_id"]: {
                     "module": record["module"],
