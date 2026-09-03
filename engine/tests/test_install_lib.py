@@ -61,7 +61,7 @@ def _has_uchg(path: Path) -> bool:
 
 
 class TestBootstrapNoexec(unittest.TestCase):
-    def test_checkout_bootstrap_uses_bash_for_non_executable_installer(self):
+    def test_checkout_bootstrap_uses_bash_without_relying_on_installer_shebang(self):
         with tempfile.TemporaryDirectory(prefix="awa-bootstrap-noexec.") as raw:
             root = Path(raw)
             bootstrap = root / "bootstrap.sh"
@@ -70,10 +70,10 @@ class TestBootstrapNoexec(unittest.TestCase):
             shutil.copy2(BOOTSTRAP_SH, bootstrap)
             (root / "kernel").mkdir()
             installer.write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > \"$BOOTSTRAP_MARKER\"\n",
+                "#!/definitely/missing\nprintf '%s\\n' \"$*\" > \"$BOOTSTRAP_MARKER\"\n",
                 encoding="utf-8",
             )
-            installer.chmod(0o600)
+            installer.chmod(0o700)
             env = {**os.environ, "BOOTSTRAP_MARKER": str(marker)}
 
             result = subprocess.run(
@@ -86,7 +86,7 @@ class TestBootstrapNoexec(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(marker.read_text(encoding="utf-8"), "--check\n")
 
-    def test_standalone_bootstrap_uses_bash_for_non_executable_clone_installer(
+    def test_standalone_bootstrap_uses_bash_without_relying_on_clone_shebang(
         self,
     ):
         with tempfile.TemporaryDirectory(
@@ -103,11 +103,11 @@ class TestBootstrapNoexec(unittest.TestCase):
             installer = clone / "install.sh"
             marker = root / "invocation.txt"
             installer.write_text(
-                "#!/usr/bin/env bash\n"
+                "#!/definitely/missing\n"
                 "printf '%s\\n' \"$*\" > \"$BOOTSTRAP_MARKER\"\n",
                 encoding="utf-8",
             )
-            installer.chmod(0o600)
+            installer.chmod(0o700)
 
             fake_bin = root / "bin"
             fake_bin.mkdir()
@@ -131,6 +131,28 @@ class TestBootstrapNoexec(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(marker.read_text(encoding="utf-8"), "--repair\n")
 
+    def test_checkout_bootstrap_rejects_installer_without_executable_mode(self):
+        with tempfile.TemporaryDirectory(prefix="awa-bootstrap-mode.") as raw:
+            root = Path(raw)
+            bootstrap = root / "bootstrap.sh"
+            installer = root / "install.sh"
+            marker = root / "invocation.txt"
+            shutil.copy2(BOOTSTRAP_SH, bootstrap)
+            (root / "kernel").mkdir()
+            installer.write_text(
+                "#!/usr/bin/env bash\nprintf reached > \"$BOOTSTRAP_MARKER\"\n",
+                encoding="utf-8",
+            )
+            installer.chmod(0o600)
+            result = subprocess.run(
+                ["bash", str(bootstrap)],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "BOOTSTRAP_MARKER": str(marker)},
+            )
+            self.assertEqual(result.returncode, 126)
+            self.assertFalse(marker.exists())
+
     def test_make_source_targets_launch_installer_with_bash(self):
         expected = {
             "install": "bash ./install.sh",
@@ -142,7 +164,7 @@ class TestBootstrapNoexec(unittest.TestCase):
         for target, command in expected.items():
             with self.subTest(target=target):
                 result = subprocess.run(
-                    ["make", "-n", target],
+                    ["make", "--no-print-directory", "-n", target],
                     cwd=REPO_ROOT,
                     capture_output=True,
                     text=True,
@@ -152,7 +174,7 @@ class TestBootstrapNoexec(unittest.TestCase):
 
     def test_verify_install_lifecycle_launches_installer_with_bash(self):
         result = subprocess.run(
-            ["make", "-n", "verify-install"],
+            ["make", "--no-print-directory", "-n", "verify-install"],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,

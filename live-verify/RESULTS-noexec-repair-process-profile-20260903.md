@@ -19,9 +19,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B \
   --json-out /tmp/awa-noexec-process-profile.json
 ```
 
-- Measured at: `2026-09-03T14:47:10Z`
+- Measured at: `2026-09-03T16:21:34Z`
 - Branch: `fix/awa-v4-named-hooks-noexec-20260902`
-- Base HEAD: `5081846247685f8490166bf63a1f8a40df6aedd4`
+- Base HEAD: `802c889dc9618478488d4476ca7677c15824f4cb`
 - Platform: `macOS-26.6.2-arm64-arm-64bit-Mach-O`
 - Python: `3.14.6`
 - Git: `git version 2.50.1 (Apple Git-155)`
@@ -33,7 +33,7 @@ big-endian bytes. It excludes only the generated baseline and this evidence
 record, so adding those two outputs cannot change the measured-subject identity.
 
 - Measured-subject files: `258`
-- Measured-subject SHA-256: `6c1940b7b40e6d3fb784415a710eb676e965330fcdd7b00eea9e58fb21faafea`
+- Measured-subject SHA-256: `48a154d4c59d59416b4dec3097fec8cce735ff262c56a499b75386301b436a43`
 - Excluded paths:
   - `engine/tests/performance-baseline.v1.json`
   - `live-verify/RESULTS-noexec-repair-process-profile-20260903.md`
@@ -45,7 +45,7 @@ record, so adding those two outputs cannot change the measured-subject identity.
 - Combined performance producer: `da65feeb123cc1e8164d73009abc65a94202c50298b085eb29b88a49be3a5a7b`
 - Case manifest: `eb4e7662f096cecc6d0a99717d71e1868552596f22abe1db61536e61d4476435`
 - Source guard: `aeee0c147f08976f20ea600d6fd3c891030346554871bdf7f39b6bf1e42baedf`
-- Source checker: `70b801ab802d829aa6af601365b7934abd0ba4056245fe6692e571b2b83bf3c9`
+- Source checker: `d8fa3055714d785e84b5650b9a10fdfec4e467b0454074ccc76ff64b3231315e`
 - Default policy: `dbc06510525f69a5cd51d6f7c8e9a0c9ea6d888e35a854f45a06bc4168337870`
 
 ## Result

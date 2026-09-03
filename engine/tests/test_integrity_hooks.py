@@ -343,6 +343,30 @@ raise SystemExit(0)
         self.assertEqual(result.stderr, b"python guard diagnostic\n")
         self.assertEqual(result.returncode, 23)
 
+    def test_product_guard_uses_bash_without_git_metadata(self):
+        root = self.root / "archive-root"
+        guard = root / "kernel" / "hooks" / "worktree-guard.sh"
+        guard.parent.mkdir(parents=True)
+        composite = guard.with_name("worktree-guard-with-integrity.sh")
+        composite.write_bytes(_COMPOSITE.read_bytes())
+        composite.chmod(0o700)
+        detacher = root / "engine" / "integrity_detach.py"
+        detacher.parent.mkdir(parents=True)
+        detacher.write_text("", encoding="utf-8")
+        guard.write_text(
+            "#!/definitely/missing\n"
+            "cat >/dev/null\n"
+            "printf '%s\\n' '{\"permission\":\"deny\"}'\n",
+            encoding="utf-8",
+        )
+        guard.chmod(0o700)
+        env = dict(self.env)
+        env.pop("AWA_INTEGRITY_GUARD", None)
+        env["AWA_HOME"] = str(root)
+        result = self._run(composite, b'{"command":"deny"}', env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, b'{"permission":"deny"}\n')
+
     def test_non_executable_guard_override_is_not_interpreted(self):
         guard = self.root / "non-executable-guard.sh"
         guard.write_text(
@@ -409,17 +433,16 @@ raise SystemExit(0)
         time.sleep(0.25)
         self.assertEqual(len(self._records()), 1)
 
-    def test_observer_uses_bash_for_non_executable_source_launcher(self):
+    def test_observer_uses_bash_for_product_launcher_without_git_metadata(self):
         source_root = self.root / "source-engine"
-        (source_root / ".git").mkdir(parents=True)
         source_launcher = source_root / "bin" / "awa-engine.sh"
-        source_launcher.parent.mkdir()
+        source_launcher.parent.mkdir(parents=True)
         source_launcher.write_text(
-            "#!/usr/bin/env bash\n"
+            "#!/definitely/missing\n"
             "exec \"$AWA_TEST_SOURCE_ENGINE_TARGET\" \"$@\"\n",
             encoding="utf-8",
         )
-        source_launcher.chmod(0o600)
+        source_launcher.chmod(0o700)
         env = dict(self.env)
         env.pop("AWA_INTEGRITY_ENGINE")
         env["AWA_HOME"] = str(source_root)

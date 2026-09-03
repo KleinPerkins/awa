@@ -41,16 +41,6 @@ for raw in sys.argv[1:]:
         raise SystemExit(1)
 PY
 }
-source_or_runtime_scripts_ready() {
-  if [ -e "$AWA_HOME/.git" ]; then
-    has_executable_mode "$@"
-    return
-  fi
-  local script
-  for script in "$@"; do
-    [ -x "$script" ] || return 1
-  done
-}
 
 echo "== AWA kernel contract freeze (v1, behavior-only, role-resolved) =="
 echo "   AWA_HOME=$AWA_HOME"
@@ -262,9 +252,9 @@ rm -rf "$owner_tmp" 2>/dev/null || true
 
 # 0a) M1-C hook mechanics: the composite delegates guard output through exec,
 # both observers use the detached fast verifier, and handoff remains dormant.
-if source_or_runtime_scripts_ready "$COMPOSITE_GUARD" "$INTEGRITY_OBSERVER" \
+if has_executable_mode "$COMPOSITE_GUARD" "$INTEGRITY_OBSERVER" \
      "$SESSION_HANDOFF" "$INTEGRITY_DETACHER" && \
-   grep -Fq '[[ -z "${AWA_INTEGRITY_GUARD:-}" && -e "$AWA_HOME/.git" ]]' \
+   grep -Fq '[[ -z "${AWA_INTEGRITY_GUARD:-}" ]]' \
      "$COMPOSITE_GUARD" && \
    grep -Fq 'exec bash "$GUARD"' "$COMPOSITE_GUARD" && \
    grep -Fq 'exec "$GUARD"' "$COMPOSITE_GUARD" && \

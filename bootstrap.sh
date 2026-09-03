@@ -14,8 +14,30 @@ set -euo pipefail
 REPO="${AWA_REPO_URL:-git@github.com:KleinPerkins/awa.git}"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
+product_script_ready() {
+  python3 - "$1" <<'PY'
+import os
+import stat
+import sys
+
+try:
+    mode = os.stat(sys.argv[1]).st_mode
+except OSError:
+    raise SystemExit(1)
+raise SystemExit(
+    0
+    if stat.S_ISREG(mode) and mode & 0o111 and os.access(sys.argv[1], os.R_OK)
+    else 1
+)
+PY
+}
+
 # Running from a checkout — install in place.
 if [ -f "$SELF_DIR/install.sh" ] && [ -d "$SELF_DIR/kernel" ]; then
+  product_script_ready "$SELF_DIR/install.sh" || {
+    echo "bootstrap: install.sh is not a readable regular executable-mode file" >&2
+    exit 126
+  }
   exec bash "$SELF_DIR/install.sh" "$@"
 fi
 
@@ -30,4 +52,8 @@ else
   git clone --quiet "$REPO" "$CLONE_DIR"
 fi
 
+product_script_ready "$CLONE_DIR/install.sh" || {
+  echo "bootstrap: cloned install.sh is not a readable regular executable-mode file" >&2
+  exit 126
+}
 exec bash "$CLONE_DIR/install.sh" "$@"

@@ -128,12 +128,19 @@ def _write_last(fd: int, value: int) -> None:
 def _run_engine(trigger: str, timeout_seconds: float) -> None:
     engine = _engine_path()
     configured = bool(os.environ.get("AWA_INTEGRITY_ENGINE", "").strip())
-    source_owned = not configured and (_runtime_root() / ".git").exists()
-    required_access = os.R_OK if source_owned else os.X_OK
-    if not engine.is_file() or not os.access(str(engine), required_access):
+    try:
+        mode = engine.stat().st_mode
+    except OSError:
         return
-    command = [str(engine)]
-    if source_owned:
+    if not stat.S_ISREG(mode) or mode & 0o111 == 0:
+        return
+    if configured:
+        if not os.access(str(engine), os.X_OK):
+            return
+        command = [str(engine)]
+    else:
+        if not os.access(str(engine), os.R_OK):
+            return
         command = ["bash", str(engine)]
     process = subprocess.Popen(
         command

@@ -111,15 +111,15 @@ class GuardBoundaryProfileTest(unittest.TestCase):
                 len(case_roots),
             )
 
-    def test_installed_runtime_uses_bash_for_non_executable_source(self):
+    def test_installed_runtime_uses_bash_without_relying_on_installer_shebang(self):
         with tempfile.TemporaryDirectory(prefix="awa-noexec-install.") as raw:
             root = Path(raw)
             installer = root / "install.sh"
             installer.write_text(
-                "#!/bin/sh\nmkdir -p \"$XDG_DATA_HOME/awa/current\"\n",
+                "#!/definitely/missing\nmkdir -p \"$XDG_DATA_HOME/awa/current\"\n",
                 encoding="utf-8",
             )
-            installer.chmod(0o600)
+            installer.chmod(0o700)
             environment = guard_boundary_profile._private_environment(
                 root / "environment"
             )
@@ -137,7 +137,7 @@ class GuardBoundaryProfileTest(unittest.TestCase):
                 Path(environment["XDG_DATA_HOME"]) / "awa" / "current",
             )
 
-    def test_named_source_hooks_work_when_execute_bits_are_unusable(self):
+    def test_named_product_hooks_use_bash_without_relying_on_shebangs(self):
         with tempfile.TemporaryDirectory(prefix="awa-noexec-named-hooks.") as raw:
             root = Path(raw)
             source = root / "source"
@@ -149,7 +149,10 @@ class GuardBoundaryProfileTest(unittest.TestCase):
             session = source / "kernel" / "hooks" / "worktree-session.sh"
             checker = source / "kernel" / "bin" / "dev-worktree.sh"
             for script in (guard, session, checker):
-                script.chmod(0o600)
+                lines = script.read_text(encoding="utf-8").splitlines(keepends=True)
+                lines[0] = "#!/definitely/missing\n"
+                script.write_text("".join(lines), encoding="utf-8")
+                script.chmod(0o700)
 
             environment = guard_boundary_profile._private_environment(
                 root / "environment"

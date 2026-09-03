@@ -111,6 +111,26 @@ class RepoSeedTest(EngineTestCase):
         ordinary = self.make_repo("ordinary")
         self.assertIn("origin", git(ordinary, "remote").stdout.split())
 
+    def test_repositories_are_independent_of_global_identity_and_default_branch(self) -> None:
+        repo = self.make_seeded_repo("sterile-git")
+        self.assertEqual(
+            git(repo, "config", "--local", "--get", "user.email").stdout.strip(),
+            helpers._TEST_EMAIL,
+        )
+        self.assertEqual(
+            git(repo, "config", "--local", "--get", "user.name").stdout.strip(),
+            helpers._TEST_NAME,
+        )
+        git(repo, "notes", "add", "-m", "identity is local")
+        remote = self.add_bare_remote(repo, "sterile-origin.git")
+        git(repo, "push", "-q", "-u", "origin", "main")
+        clone = str(Path(self._tmp.name) / "sterile-clone")
+        git(self._tmp.name, "clone", "-q", remote, clone)
+        self.assertEqual(
+            git(clone, "branch", "--show-current").stdout.strip(),
+            "main",
+        )
+
     def test_separate_cases_keep_independent_private_xdg_state(self) -> None:
         roots = []
         for name in ("first", "second"):

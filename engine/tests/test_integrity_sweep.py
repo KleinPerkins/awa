@@ -42,18 +42,16 @@ class TestIntegritySweep(EngineTestCase):
     def _fake_root(
         self,
         *,
-        source: bool = False,
         executable: bool = True,
+        broken_shebang: bool = False,
     ) -> Path:
-        root = Path(self._tmp.name) / (
-            "fake-source" if source else "fake-runtime"
-        )
+        root = Path(self._tmp.name) / "fake-runtime"
         (root / "bin").mkdir(parents=True)
-        if source:
-            (root / ".git").mkdir()
         engine = root / "bin" / "awa-engine.sh"
         engine.write_text(
-            """#!/usr/bin/env bash
+            ("""#!/definitely/missing
+""" if broken_shebang else """#!/usr/bin/env bash
+""") + """
 test "$1 $2 $3 $4 $5 $6" = \
 "integrity verify --profile deep --trigger launchd" || exit 91
 if [ "${FAKE_SIGNAL:-0}" = "1" ]; then
@@ -115,8 +113,8 @@ exit "${FAKE_EXIT:-0}"
         crashed = self._run(root=root, FAKE_SIGNAL="1")
         self.assertEqual(crashed.returncode, -signal.SIGTERM)
 
-    def test_source_sweep_uses_bash_for_non_executable_engine(self):
-        root = self._fake_root(source=True, executable=False)
+    def test_product_sweep_uses_bash_without_git_metadata(self):
+        root = self._fake_root(broken_shebang=True)
         result = self._run(root=root, FAKE_EXIT="47")
         self.assertEqual(result.returncode, 47, result.stderr)
 

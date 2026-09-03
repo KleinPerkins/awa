@@ -66,6 +66,15 @@ NOEXEC_REPAIR_NORMALIZATIONS = {
             b'                str(tool), "clean", "--finish-current", '
             b'"--authorization", "Close",\n',
         ),
+        (
+            b'        cwd=destination,\n',
+            b'',
+        ),
+        (
+            b'            "-c", "user.name=AWA Retain Restore",\n'
+            b'            "-c", "user.email=awa-retain@example.invalid",\n',
+            b'',
+        ),
     ),
     "kernel/hooks/awa-recovery-maintenance.sh": (
         (

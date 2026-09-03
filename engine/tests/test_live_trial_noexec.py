@@ -27,26 +27,26 @@ def _function(path: Path, name: str) -> ast.FunctionDef:
 
 
 class TestLiveTrialNoexec(unittest.TestCase):
-    def test_runtime_shell_helpers_interpret_non_executable_scripts(self) -> None:
+    def test_runtime_shell_helpers_do_not_rely_on_script_shebangs(self) -> None:
         with trial_lib.Sandbox() as sandbox:
             hook = sandbox.tmp / "hook.sh"
             hook.write_text(
-                "#!/usr/bin/env bash\n"
+                "#!/definitely/missing\n"
                 "input=\"$(cat)\"\n"
                 "printf 'hook:%s\\n' \"$input\"\n",
                 encoding="utf-8",
             )
-            hook.chmod(0o600)
+            hook.chmod(0o700)
             hooked = sandbox.run_hook(hook, "payload")
             self.assertEqual(hooked.returncode, 0, hooked.stderr)
             self.assertEqual(hooked.stdout, "hook:payload\n")
 
             dev_worktree = sandbox.tmp / "dev-worktree.sh"
             dev_worktree.write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\"\n",
+                "#!/definitely/missing\nprintf '%s\\n' \"$*\"\n",
                 encoding="utf-8",
             )
-            dev_worktree.chmod(0o600)
+            dev_worktree.chmod(0o700)
             original = trial_lib.DEV_WORKTREE
             trial_lib.DEV_WORKTREE = dev_worktree
             try:

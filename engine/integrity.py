@@ -1810,12 +1810,8 @@ def _valid_hook_role(
     if (
         not stat.S_ISREG(command_mode)
         or command_mode & 0o111 == 0
+        or not os.access(command, os.R_OK)
     ):
-        return False
-    if (source.resolve() / ".git").exists():
-        if not os.access(command, os.R_OK):
-            return False
-    elif not os.access(command, os.X_OK):
         return False
     return _valid_hook_entry(role["entry"])
 

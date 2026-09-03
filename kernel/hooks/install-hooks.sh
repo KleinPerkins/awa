@@ -54,7 +54,6 @@ def refuse(message: str, *, check: bool = False) -> None:
 mode = os.environ["MODE"]
 checking = mode == "check"
 root = pathlib.Path(os.environ["AWA_HOME"]).resolve()
-source_checkout = (root / ".git").exists()
 destination = pathlib.Path(os.environ["HOOKS_JSON"]).expanduser()
 v1_path = pathlib.Path(os.environ["V1_CONTRACT"])
 v2_path = pathlib.Path(os.environ["V2_CONTRACT"])
@@ -125,12 +124,8 @@ def valid_role(role: object, *, allow_dormant: bool) -> bool:
     if (
         not stat.S_ISREG(command_mode)
         or command_mode & 0o111 == 0
+        or not os.access(command, os.R_OK)
     ):
-        return False
-    if source_checkout:
-        if not os.access(command, os.R_OK):
-            return False
-    elif not os.access(command, os.X_OK):
         return False
     return valid_entry(role["entry"])
 

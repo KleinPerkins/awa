@@ -295,12 +295,12 @@ class TestIntegrityInvariants(unittest.TestCase):
             hook.parent.mkdir(parents=True)
             policy.parent.mkdir(parents=True)
             hook.write_text(
-                "#!/usr/bin/env bash\n"
+                "#!/definitely/missing\n"
                 "cat >/dev/null\n"
                 "printf '%s\\n' '{\"permission\":\"allow\"}'\n",
                 encoding="utf-8",
             )
-            hook.chmod(0o600)
+            hook.chmod(0o700)
             policy.write_text("version: 1\n", encoding="utf-8")
             direct = SimpleNamespace(
                 permission="allow",
@@ -726,7 +726,7 @@ class TestLiveHookFacts(unittest.TestCase):
             ),
         }
 
-    def test_source_role_validation_does_not_require_mount_execute_access(self):
+    def test_product_role_validation_is_mount_independent_without_git_metadata(self):
         contract = json.loads(
             (_ROOT / "contracts" / "awa-hook-owner.v2.json").read_text(
                 encoding="utf-8"
@@ -739,17 +739,18 @@ class TestLiveHookFacts(unittest.TestCase):
                 return False
             return real_access(path, mode)
 
-        with mock.patch.object(integrity.os, "access", side_effect=noexec_access):
-            self.assertTrue(integrity._valid_v2_hook_contract(_ROOT, contract))
-
-        runtime = self.root / "runtime"
+        runtime = self.root / "archive"
         for role in contract["roles"]:
             command = runtime / role["direct_command_role"]
             command.parent.mkdir(parents=True, exist_ok=True)
             command.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
             command.chmod(0o755)
         with mock.patch.object(integrity.os, "access", side_effect=noexec_access):
-            self.assertFalse(integrity._valid_v2_hook_contract(runtime, contract))
+            self.assertTrue(integrity._valid_v2_hook_contract(runtime, contract))
+
+        first = runtime / contract["roles"][0]["direct_command_role"]
+        first.chmod(0o600)
+        self.assertFalse(integrity._valid_v2_hook_contract(runtime, contract))
 
     def test_v2_validation_acceptance_parity_matrix(self):
         header_cases = {

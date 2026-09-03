@@ -27,6 +27,13 @@ class GitOperationInventoryTest(FinishBase):
         if initialized.returncode != 0:
             self.skipTest(
                 f"Git does not support {object_format}/{ref_format or 'files'}")
+        git(
+            repo,
+            "config",
+            "user.email",
+            "49759187+KleinPerkins@users.noreply.github.com",
+        )
+        git(repo, "config", "user.name", "KleinPerkins")
         Path(repo, "file.txt").write_text("base\n", encoding="utf-8")
         commit_all(repo, "base")
         wt = repo + ".wt"
@@ -83,6 +90,14 @@ class GitOperationInventoryTest(FinishBase):
         self.assertTrue(manifest["restore_proven"])
         self.assertTrue(manifest["operation_abort_proven"])
         return manifest
+
+    def test_restore_git_anchors_porcelain_at_restored_worktree(self) -> None:
+        destination = Path(self._tmp.name) / "restored"
+        (destination / ".git").mkdir(parents=True)
+        completed = subprocess.CompletedProcess(["git"], 0, b"", b"")
+        with mock.patch.object(UX.subprocess, "run", return_value=completed) as run:
+            UX._restore_git(destination, "status")
+        self.assertEqual(run.call_args.kwargs["cwd"], destination)
 
     def test_merge_manifest_binds_admin_content_raw_index_and_safe_row(self) -> None:
         _repo, wt, target = self.merge_conflict("operation-merge")
@@ -341,7 +356,10 @@ class GitOperationInventoryTest(FinishBase):
                     self.assertNotEqual(
                         git(wt, "notes", "--ref=left", "merge",
                             "refs/notes/right", check=False).returncode, 0)
-                manifest = self.retain_operation(wt, "retain-proof-" + group)
+                proof_home = Path(self._tmp.name) / ("home-" + group)
+                proof_home.mkdir()
+                with mock.patch.dict(os.environ, {"HOME": str(proof_home)}):
+                    manifest = self.retain_operation(wt, "retain-proof-" + group)
                 self.assertEqual(
                     manifest["operation_state"]["selected_groups"], [group])
 

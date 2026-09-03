@@ -270,9 +270,11 @@ class DestructiveDurabilityOrderingTest(FinishBase):
             with self.subTest(ref_format=ref_format):
                 repo = Path(self._tmp.name, "refs-" + ref_format)
                 repo.mkdir()
+                command = ["git", "-C", str(repo), "init", "-q", "-b", "main"]
+                if ref_format != "files":
+                    command.append("--ref-format=" + ref_format)
                 initialized = subprocess.run(
-                    ["git", "-C", str(repo), "init", "-q", "-b", "main",
-                     "--ref-format=" + ref_format],
+                    command,
                     capture_output=True, text=True)
                 if initialized.returncode != 0:
                     if ref_format == "reftable":

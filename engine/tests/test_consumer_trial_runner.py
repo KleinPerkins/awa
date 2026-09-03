@@ -609,7 +609,10 @@ class TestRealFixture(unittest.TestCase):
             fixture_kernel = root / "kernel"
             shutil.copytree(REPO_ROOT / "kernel", fixture_kernel)
             awa_cli = fixture_kernel / "bin" / "dev-worktree.sh"
-            awa_cli.chmod(0o600)
+            lines = awa_cli.read_text(encoding="utf-8").splitlines(keepends=True)
+            lines[0] = "#!/definitely/missing\n"
+            awa_cli.write_text("".join(lines), encoding="utf-8")
+            awa_cli.chmod(0o700)
             hostile_hooks = root / "hostile-hooks"
             hostile_hooks.mkdir()
             pre_commit = hostile_hooks / "pre-commit"

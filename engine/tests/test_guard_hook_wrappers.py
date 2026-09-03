@@ -78,6 +78,9 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         self._git("-C", str(self.repo), "branch", "-M", "main")
         self.remote = self.root / "origin.git"
         self._git("init", "-q", "--bare", str(self.remote))
+        self._git(
+            "-C", str(self.remote), "symbolic-ref", "HEAD", "refs/heads/main"
+        )
         self._git("-C", str(self.repo), "remote", "add", "origin", str(self.remote))
         self._git("-C", str(self.repo), "push", "-q", "-u", "origin", "main")
         self.policy = self.root / "policy.yml"
@@ -135,6 +138,7 @@ class TestBashGuardWrapperParity(unittest.TestCase):
         self._git("-C", str(repo), *_IDENT, "commit", "-qm", "init")
         self._git("-C", str(repo), "branch", "-M", "main")
         self._git("init", "-q", "--bare", str(remote))
+        self._git("-C", str(remote), "symbolic-ref", "HEAD", "refs/heads/main")
         self._git("-C", str(repo), "remote", "add", "origin", str(remote))
         self._git("-C", str(repo), "push", "-q", "-u", "origin", "main")
         return repo, remote

@@ -152,12 +152,12 @@ class _EmitterModeTestBase(unittest.TestCase):
 
 
 class TestEngineLauncherNoexec(unittest.TestCase):
-    def test_status_probes_use_bash_when_launcher_execute_bit_is_unusable(self) -> None:
+    def test_status_probes_use_bash_without_relying_on_launcher_shebang(self) -> None:
         with tempfile.TemporaryDirectory(prefix="awa-dashboard-noexec.") as raw:
             root = Path(raw)
             launcher = root / "awa-engine.sh"
             launcher.write_text(
-                "#!/usr/bin/env bash\n"
+                "#!/definitely/missing\n"
                 "if [[ \"$1 $2\" == 'daemon status' ]]; then\n"
                 "  printf '%s\\n' '{\"daemon\":{\"running\":true}}'\n"
                 "elif [[ \"$1 $2\" == 'recover status' ]]; then\n"
@@ -167,7 +167,7 @@ class TestEngineLauncherNoexec(unittest.TestCase):
                 "fi\n",
                 encoding="utf-8",
             )
-            launcher.chmod(0o600)
+            launcher.chmod(0o700)
             state_home = root / "state"
             state_db = state_home / "awa" / "state.db"
             state_db.parent.mkdir(parents=True)
@@ -187,6 +187,20 @@ class TestEngineLauncherNoexec(unittest.TestCase):
             self.assertTrue(engine["engine"]["running"])
             self.assertTrue(recovery["recovery"]["available"])
             self.assertEqual(recovery["recovery"]["protected_bytes"], 7)
+
+    def test_status_probes_reject_launcher_without_executable_mode(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="awa-dashboard-mode.") as raw:
+            launcher = Path(raw) / "awa-engine.sh"
+            launcher.write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' '{\"daemon\":{\"running\":true}}'\n",
+                encoding="utf-8",
+            )
+            launcher.chmod(0o600)
+            with mock.patch.object(emitter, "ENGINE_LAUNCHER", launcher):
+                engine = emitter.engine_status(2)
+                recovery = emitter.recovery_status(2)
+            self.assertFalse(engine["engine"]["running"])
+            self.assertFalse(recovery["recovery"]["available"])
 
 
 class TestEmitterModeSurface(_EmitterModeTestBase):
@@ -454,7 +468,10 @@ class TestCanvasRefreshBridge(_EmitterModeTestBase):
             },
         )
         self.assertEqual(proc.returncode, 1, proc.stderr)
-        self.assertIn("dashboard renderer is not executable", proc.stderr)
+        self.assertIn(
+            "dashboard renderer is not a readable regular executable-mode file",
+            proc.stderr,
+        )
         self.assertNotIn("add-job ", log.read_text(encoding="utf-8"))
 
     def test_action_installer_preserves_existing_schedule_and_enabled_state(self) -> None:
