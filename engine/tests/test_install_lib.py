@@ -27,6 +27,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALL_LIB = REPO_ROOT / "kernel" / "lib" / "install-lib.sh"
 INSTALL_SH = REPO_ROOT / "install.sh"
+BOOTSTRAP_SH = REPO_ROOT / "bootstrap.sh"
 
 _HAS_CHFLAGS = shutil.which("chflags") is not None
 
@@ -57,6 +58,136 @@ def _run_bash(script: str, *, input_text: str = "",
 def _has_uchg(path: Path) -> bool:
     out = subprocess.run(["stat", "-f", "%Sf", str(path)], capture_output=True, text=True)
     return "uchg" in out.stdout
+
+
+class TestBootstrapNoexec(unittest.TestCase):
+    def test_checkout_bootstrap_uses_bash_without_relying_on_installer_shebang(self):
+        with tempfile.TemporaryDirectory(prefix="awa-bootstrap-noexec.") as raw:
+            root = Path(raw)
+            bootstrap = root / "bootstrap.sh"
+            installer = root / "install.sh"
+            marker = root / "invocation.txt"
+            shutil.copy2(BOOTSTRAP_SH, bootstrap)
+            (root / "kernel").mkdir()
+            installer.write_text(
+                "#!/definitely/missing\nprintf '%s\\n' \"$*\" > \"$BOOTSTRAP_MARKER\"\n",
+                encoding="utf-8",
+            )
+            installer.chmod(0o700)
+            env = {**os.environ, "BOOTSTRAP_MARKER": str(marker)}
+
+            result = subprocess.run(
+                ["bash", str(bootstrap), "--check"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "--check\n")
+
+    def test_standalone_bootstrap_uses_bash_without_relying_on_clone_shebang(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(
+            prefix="awa-bootstrap-clone-noexec."
+        ) as raw:
+            root = Path(raw)
+            standalone = root / "standalone"
+            standalone.mkdir()
+            bootstrap = standalone / "bootstrap.sh"
+            shutil.copy2(BOOTSTRAP_SH, bootstrap)
+
+            clone = root / "clone"
+            (clone / ".git").mkdir(parents=True)
+            installer = clone / "install.sh"
+            marker = root / "invocation.txt"
+            installer.write_text(
+                "#!/definitely/missing\n"
+                "printf '%s\\n' \"$*\" > \"$BOOTSTRAP_MARKER\"\n",
+                encoding="utf-8",
+            )
+            installer.chmod(0o700)
+
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_git = fake_bin / "git"
+            fake_git.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            fake_git.chmod(0o700)
+            env = {
+                **os.environ,
+                "AWA_CLONE_DIR": str(clone),
+                "BOOTSTRAP_MARKER": str(marker),
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+
+            result = subprocess.run(
+                ["bash", str(bootstrap), "--repair"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "--repair\n")
+
+    def test_checkout_bootstrap_rejects_installer_without_executable_mode(self):
+        with tempfile.TemporaryDirectory(prefix="awa-bootstrap-mode.") as raw:
+            root = Path(raw)
+            bootstrap = root / "bootstrap.sh"
+            installer = root / "install.sh"
+            marker = root / "invocation.txt"
+            shutil.copy2(BOOTSTRAP_SH, bootstrap)
+            (root / "kernel").mkdir()
+            installer.write_text(
+                "#!/usr/bin/env bash\nprintf reached > \"$BOOTSTRAP_MARKER\"\n",
+                encoding="utf-8",
+            )
+            installer.chmod(0o600)
+            result = subprocess.run(
+                ["bash", str(bootstrap)],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "BOOTSTRAP_MARKER": str(marker)},
+            )
+            self.assertEqual(result.returncode, 126)
+            self.assertFalse(marker.exists())
+
+    def test_make_source_targets_launch_installer_with_bash(self):
+        expected = {
+            "install": "bash ./install.sh",
+            "repair": "bash ./install.sh --repair",
+            "doctor": "bash ./install.sh --doctor",
+            "check": "bash ./install.sh --check",
+            "uninstall": "bash ./install.sh --uninstall",
+        }
+        for target, command in expected.items():
+            with self.subTest(target=target):
+                result = subprocess.run(
+                    ["make", "--no-print-directory", "-n", target],
+                    cwd=REPO_ROOT,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), command)
+
+    def test_verify_install_lifecycle_launches_installer_with_bash(self):
+        result = subprocess.run(
+            ["make", "--no-print-directory", "-n", "verify-install"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installer_lines = [
+            line for line in result.stdout.splitlines() if "./install.sh" in line
+        ]
+        self.assertGreaterEqual(len(installer_lines), 9)
+        self.assertTrue(
+            all("bash ./install.sh" in line for line in installer_lines),
+            installer_lines,
+        )
 
 
 @unittest.skipUnless(_HAS_CHFLAGS, "chflags is macOS/BSD-only; the guarded no-op path is "
@@ -260,7 +391,9 @@ class TestInstallPolicyPreservation(unittest.TestCase):
             env.pop("AWA_POLICY", None)
         else:
             env["AWA_POLICY"] = awa_policy
-        return subprocess.run([str(INSTALL_SH)], capture_output=True, text=True, env=env)
+        return subprocess.run(
+            ["bash", str(INSTALL_SH)], capture_output=True, text=True, env=env
+        )
 
     def _read_policy(self) -> str:
         data = json.loads(self.mcp_json.read_text())
@@ -329,7 +462,9 @@ class TestInstallPolicyAppliesToModesFileSync(unittest.TestCase):
             env.pop("AWA_POLICY", None)
         else:
             env["AWA_POLICY"] = awa_policy
-        return subprocess.run([str(INSTALL_SH)], capture_output=True, text=True, env=env)
+        return subprocess.run(
+            ["bash", str(INSTALL_SH)], capture_output=True, text=True, env=env
+        )
 
     def test_reconcile_without_env_still_syncs_the_overlays_modes_file(self) -> None:
         first = self._install(awa_policy=str(self.overlay_policy))

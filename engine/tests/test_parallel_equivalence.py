@@ -186,17 +186,31 @@ def _fault_factory(mode, processes):
     return factory
 
 
-def _document_factory(documents, processes, delays=None):
+def _document_factory(documents, processes, delays=None, details=None):
     delays = delays or {}
+    details = details or {}
 
     def factory(command, **kwargs):
         output = Path(command[command.index("--worker-json") + 1])
         module = command[command.index("--worker-module") + 1]
-        replacement = _write_process(
-            output,
-            json.dumps(documents[module]),
-            delay=delays.get(module, 0.0),
-        )
+        detail = details.get(module)
+        if detail is None:
+            replacement = _write_process(
+                output,
+                json.dumps(documents[module]),
+                delay=delays.get(module, 0.0),
+            )
+        else:
+            code = (
+                "import time\n"
+                "from pathlib import Path\n"
+                f"time.sleep({delays.get(module, 0.0)!r})\n"
+                f"Path({str(output.with_suffix('.failures'))!r}).write_text("
+                f"{detail!r}, encoding='utf-8')\n"
+                f"Path({str(output)!r}).write_text("
+                f"{json.dumps(documents[module])!r}, encoding='utf-8')\n"
+            )
+            replacement = (sys.executable, "-c", code)
         process = subprocess.Popen(replacement, **kwargs)
         processes.append(process)
         return process
@@ -349,18 +363,33 @@ class ParallelEquivalenceTest(unittest.TestCase):
         document["outcome"] = "failure"
         processes = []
         self.addCleanup(self._ensure_reaped, processes)
+        details = (
+            "NONPASSING DETAILS\n"
+            f"failure: {_TEST_A}\n"
+            "AssertionError: controller-only failure\n"
+        )
+        stream = io.StringIO()
         result = suite_runner.run_parallel(
             (_TEST_A,),
             2,
             None,
-            io.StringIO(),
+            stream,
             worker_factory=_document_factory(
-                {_MODULE_A: document}, processes
+                {_MODULE_A: document},
+                processes,
+                details={_MODULE_A: details},
             ),
         )
         self.assertEqual(result["outcome"], "failure")
         self.assertNotIn("runner_error", result)
         self.assertEqual(len(processes), 1)
+        self.assertIn(details, stream.getvalue())
+        self.assertTrue(
+            stream.getvalue().endswith(
+                "NONPASSING TESTS\n"
+                f"failure: {_TEST_A}\n"
+            )
+        )
 
     def test_valid_json_with_partial_default_inventory_is_rejected(self) -> None:
         inventory = suite_runner.discover_test_ids((_MODULE_A,))

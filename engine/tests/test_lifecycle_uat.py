@@ -23,7 +23,12 @@ _CLI = str(Path(__file__).resolve().parents[2] / "bin" / "awa-engine.sh")
 
 class TestLifecycleUAT(EngineTestCase):
     def _cli(self, *args: str) -> dict:
-        proc = subprocess.run([_CLI, *args], capture_output=True, text=True, env=os.environ.copy())
+        proc = subprocess.run(
+            ["bash", _CLI, *args],
+            capture_output=True,
+            text=True,
+            env=os.environ.copy(),
+        )
         self.assertTrue(proc.stdout.strip(), f"no stdout for {args}: {proc.stderr}")
         return json.loads(proc.stdout)
 
@@ -147,7 +152,8 @@ class TestLifecycleUAT(EngineTestCase):
         # (S3: a write op never falls back to a read token).
         env = os.environ.copy()
         env.pop("AWA_GITHUB_WRITE_TOKEN", None)
-        proc = subprocess.run([_CLI, "apply-back", "--worktree", wt, "--execute", "--confirm"],
+        proc = subprocess.run(["bash", _CLI, "apply-back", "--worktree", wt,
+                               "--execute", "--confirm"],
                               capture_output=True, text=True, env=env)
         exec_res = json.loads(proc.stdout)
         self.assertFalse(exec_res["ok"])

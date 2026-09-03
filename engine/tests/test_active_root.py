@@ -519,13 +519,19 @@ class ActiveRootTest(EngineTestCase):
         self.assertEqual(AR.disposition(wt)["disposition"], "stale")
         env = os.environ.copy()
         env["AWA_HOME"] = str(_REPO_ROOT)
-        r = subprocess.run([self.dev_worktree, "clean", "--path", wt, "--delete-branch"],
+        r = subprocess.run(["bash", self.dev_worktree, "clean", "--path", wt, "--delete-branch"],
                            cwd=str(_REPO_ROOT), env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertFalse(Path(wt).exists())
 
     # ---- sessionStart hook: heartbeat refresh + dead-root guidance ----------
-    def _run_session_hook(self, cwd: str) -> dict:
+    def _run_session_hook(
+        self,
+        cwd: str,
+        *,
+        home: Path | None = None,
+        cache_home: Path | None = None,
+    ) -> dict:
         payload = json.dumps({
             "workspace_roots": [cwd],
             "conversation_id": "conversation-realistic",
@@ -533,7 +539,17 @@ class ActiveRootTest(EngineTestCase):
         })
         env = os.environ.copy()
         env["AWA_HOME"] = str(_REPO_ROOT)
-        r = subprocess.run([self.session_hook], input=payload, cwd=cwd,
+        home_path = home if home is not None else self.data_home / "home"
+        if home is None:
+            home_path.mkdir(mode=0o700, exist_ok=True)
+        env["HOME"] = str(home_path)
+        cache_path = (
+            cache_home if cache_home is not None else self.data_home / "cache"
+        )
+        if cache_home is None:
+            cache_path.mkdir(mode=0o700, exist_ok=True)
+        env["XDG_CACHE_HOME"] = str(cache_path)
+        r = subprocess.run(["bash", self.session_hook], input=payload, cwd=cwd,
                            env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return json.loads(r.stdout)
@@ -576,7 +592,7 @@ class ActiveRootTest(EngineTestCase):
         env.pop("DEV_SESSION_ID", None)
         env["AWA_HEARTBEAT_REFRESH_THROTTLE"] = "0"
         result = subprocess.run(
-            [self.guard_hook], input=payload, cwd=wt, env=env,
+            ["bash", self.guard_hook], input=payload, cwd=wt, env=env,
             capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         record, corrupt = AR.read_record(wt)
@@ -714,7 +730,15 @@ class ActiveRootTest(EngineTestCase):
         self.assertIn(str(Path(wt).resolve()), out["additional_context"])
 
     def test_session_hook_is_failsafe_json_even_outside_worktree(self) -> None:
-        out = self._run_session_hook(str(self.data_home))
+        home = self.data_home / "home-is-a-file"
+        cache_home = self.data_home / "cache-is-a-file"
+        home.write_text("not a directory", encoding="utf-8")
+        cache_home.write_text("not a directory", encoding="utf-8")
+        out = self._run_session_hook(
+            str(self.data_home),
+            home=home,
+            cache_home=cache_home,
+        )
         self.assertIn("additional_context", out)
 
     # ---- MAJOR #3: the guard hot-path keeps an actively-used session alive past the raw TTL ----
@@ -732,7 +756,7 @@ class ActiveRootTest(EngineTestCase):
         for k in ("CURSOR_BACKGROUND_AGENT", "CURSOR_CLOUD_AGENT", "IS_BACKGROUND_AGENT",
                   "AWA_FORCE_CLOUD"):
             env.pop(k, None)
-        return subprocess.run([self.guard_hook], input=payload, cwd=cwd, env=env,
+        return subprocess.run(["bash", self.guard_hook], input=payload, cwd=cwd, env=env,
                               capture_output=True, text=True)
 
     def _age_heartbeat(self, root: str, seconds_ago: int = 100000) -> None:

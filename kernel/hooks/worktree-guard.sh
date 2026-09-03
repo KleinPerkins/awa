@@ -2110,12 +2110,12 @@ PY
 
 classify_dir() {
   local dir="$1"
-  [ -x "$DEV_WORKTREE" ] || return 1
+  [ -f "$DEV_WORKTREE" ] && [ -r "$DEV_WORKTREE" ] || return 1
   [ -d "$dir" ] || return 1
   # HOT PATH: the guard reads only `classification`/`linked-worktree`, never `explicit-mode`.
   # Export AWA_STATUS_NO_MODE=1 so `status` skips the second python3 (`mode-for`) spawn — the
   # pre-mutation gate stays single-spawn (one classify), avoiding a latency regression.
-  (cd "$dir" 2>/dev/null && AWA_STATUS_NO_MODE=1 "$DEV_WORKTREE" status 2>/dev/null) || return 1
+  (cd "$dir" 2>/dev/null && AWA_STATUS_NO_MODE=1 bash "$DEV_WORKTREE" status 2>/dev/null) || return 1
 }
 
 # ADR 0001: is $1 (an already-resolved absolute path -- a candidate mutation target,

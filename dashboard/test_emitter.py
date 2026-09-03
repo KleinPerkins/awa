@@ -151,6 +151,58 @@ class _EmitterModeTestBase(unittest.TestCase):
         return {r["rel"]: r for r in doc["repos"]}
 
 
+class TestEngineLauncherNoexec(unittest.TestCase):
+    def test_status_probes_use_bash_without_relying_on_launcher_shebang(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="awa-dashboard-noexec.") as raw:
+            root = Path(raw)
+            launcher = root / "awa-engine.sh"
+            launcher.write_text(
+                "#!/definitely/missing\n"
+                "if [[ \"$1 $2\" == 'daemon status' ]]; then\n"
+                "  printf '%s\\n' '{\"daemon\":{\"running\":true}}'\n"
+                "elif [[ \"$1 $2\" == 'recover status' ]]; then\n"
+                "  printf '%s\\n' '{\"protected_bytes\":7,\"needs_repair\":[]}'\n"
+                "else\n"
+                "  exit 2\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            launcher.chmod(0o700)
+            state_home = root / "state"
+            state_db = state_home / "awa" / "state.db"
+            state_db.parent.mkdir(parents=True)
+            state_db.touch()
+
+            with (
+                mock.patch.object(emitter, "ENGINE_LAUNCHER", launcher),
+                mock.patch.dict(
+                    os.environ,
+                    {"XDG_STATE_HOME": str(state_home)},
+                    clear=False,
+                ),
+            ):
+                engine = emitter.engine_status(2)
+                recovery = emitter.recovery_status(2)
+
+            self.assertTrue(engine["engine"]["running"])
+            self.assertTrue(recovery["recovery"]["available"])
+            self.assertEqual(recovery["recovery"]["protected_bytes"], 7)
+
+    def test_status_probes_reject_launcher_without_executable_mode(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="awa-dashboard-mode.") as raw:
+            launcher = Path(raw) / "awa-engine.sh"
+            launcher.write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' '{\"daemon\":{\"running\":true}}'\n",
+                encoding="utf-8",
+            )
+            launcher.chmod(0o600)
+            with mock.patch.object(emitter, "ENGINE_LAUNCHER", launcher):
+                engine = emitter.engine_status(2)
+                recovery = emitter.recovery_status(2)
+            self.assertFalse(engine["engine"]["running"])
+            self.assertFalse(recovery["recovery"]["available"])
+
+
 class TestEmitterModeSurface(_EmitterModeTestBase):
     def setUp(self) -> None:
         super().setUp()
@@ -371,7 +423,16 @@ class TestCanvasRefreshBridge(_EmitterModeTestBase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         calls = log.read_text(encoding="utf-8")
-        self.assertIn("add-job --type command --id awa-dashboard-refresh", calls)
+        add = next(line for line in calls.splitlines() if line.startswith("add-job "))
+        self.assertIn("add-job --type command --id awa-dashboard-refresh", add)
+        self.assertNotIn(
+            f"--program {_DASHBOARD_DIR / 'render.py'}",
+            add,
+        )
+        self.assertIn(
+            f"--arg {_DASHBOARD_DIR / 'render.py'} --arg=--root",
+            add,
+        )
         self.assertIn("--interval-seconds 2147483647", calls)
         self.assertIn("--enabled false", calls)
         self.assertIn(
@@ -380,6 +441,38 @@ class TestCanvasRefreshBridge(_EmitterModeTestBase):
         )
         self.assertIn("run-job --id awa-dashboard-refresh", calls)
         self.assertNotIn("enable-canvas-runs", calls)
+
+    def test_action_installer_rejects_non_executable_runtime_renderer(self) -> None:
+        fake, log = self._fake_local_jobs(True)
+        runtime = Path(self._tmp.name) / "runtime"
+        renderer = runtime / "dashboard" / "render.py"
+        renderer.parent.mkdir(parents=True)
+        renderer.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        renderer.chmod(0o600)
+        proc = subprocess.run(
+            [
+                "bash",
+                str(_DASHBOARD_DIR / "install_actions.sh"),
+                "--root",
+                str(self.root),
+                "--policy",
+                os.environ["AWA_POLICY"],
+            ],
+            text=True,
+            capture_output=True,
+            env={
+                **os.environ,
+                "AWA_HOME": str(runtime),
+                "AWA_LOCAL_JOBS_CLI": str(fake),
+                "FAKE_LOCAL_JOBS_LOG": str(log),
+            },
+        )
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn(
+            "dashboard renderer is not a readable regular executable-mode file",
+            proc.stderr,
+        )
+        self.assertNotIn("add-job ", log.read_text(encoding="utf-8"))
 
     def test_action_installer_preserves_existing_schedule_and_enabled_state(self) -> None:
         fake, log = self._fake_local_jobs(True)

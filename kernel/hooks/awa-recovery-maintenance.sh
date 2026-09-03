@@ -24,12 +24,12 @@ AWA_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"                       # install root
 ENGINE="$AWA_ROOT/bin/awa-engine.sh"
 
 context=""
-if [ -x "$ENGINE" ]; then
+if [ -f "$ENGINE" ] && [ -r "$ENGINE" ]; then
   # (2) Bounded, read-only prior-status surface. Only probe when engine state ALREADY exists so this
   # hook never CREATES state; parse it into a short warning ONLY on error/overage/needs-repair.
   state_base="${XDG_STATE_HOME:-$HOME/.local/state}"
   if [ -f "$state_base/awa/state.db" ]; then
-    status_json="$("$ENGINE" recover status 2>/dev/null || true)"
+    status_json="$(bash "$ENGINE" recover status 2>/dev/null || true)"
     context="$(STATUS_JSON="$status_json" python3 - <<'PY' 2>/dev/null || true
 import json, os
 try:
@@ -62,7 +62,7 @@ PY
     # session start never CREATES engine state — prune-on-creation is the deterministic PRIMARY
     # trigger that first materializes it; once artifacts exist this ages them. Engine throttles +
     # serializes; all output discarded.
-    ( "$ENGINE" recover prune --maintenance --opportunistic </dev/null >/dev/null 2>&1 & ) \
+    ( bash "$ENGINE" recover prune --maintenance --opportunistic </dev/null >/dev/null 2>&1 & ) \
       >/dev/null 2>&1 || true
   fi
 fi

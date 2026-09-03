@@ -2169,7 +2169,7 @@ def dispatch_choice(conversation_id: str, answer: Any = None, *, attachments: An
             env["DEV_SESSION_ID"] = dialogue["session_id"]
             env[FINISH_PUBLIC_PROJECTION_ENV] = "1"
             command = [
-                str(tool), "clean", "--finish-current", "--authorization", "Close",
+                "bash", str(tool), "clean", "--finish-current", "--authorization", "Close",
                 "--conversation-id", conversation_id,
             ]
             if dialogue.get("hook_mode") is True:
@@ -2675,6 +2675,7 @@ def _restore_git(destination: Path, *args: str, input_data: bytes | str | None =
     ]
     return subprocess.run(
         command, input=input_data, capture_output=True, text=text, check=check,
+        cwd=destination,
         env=_finish_git_env(index_file=str(index_file)))
 
 
@@ -3128,6 +3129,8 @@ def _verify_operation_abort(operation: dict, destination: Path) -> None:
             "-c", "core.fsmonitor=false",
             "-c", "core.untrackedCache=false",
             "-c", "merge.renormalize=false",
+            "-c", "user.name=AWA Retain Restore",
+            "-c", "user.email=awa-retain@example.invalid",
             *command)
         if result.returncode != 0:
             raise FinishUXError("restore_proof_operation_abort_failed")

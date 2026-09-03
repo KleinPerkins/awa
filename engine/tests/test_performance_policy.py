@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import json
+import re
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from engine.tests import performance_policy, suite_runner, verification_contract
+from engine.tests import (
+    guard_boundary_profile,
+    performance_policy,
+    suite_runner,
+    verification_contract,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -76,6 +84,9 @@ class PerformancePolicyTest(unittest.TestCase):
     def test_committed_baseline_is_closed_and_valid(self) -> None:
         value = baseline()
         verification_contract.validate_performance_baseline(value)
+        for relative in value["evidence"]:
+            with self.subTest(evidence=relative):
+                self.assertTrue((ROOT / relative).is_file())
         self.assertEqual(
             value["process_measurement"]["producer_sha256"],
             performance_policy.performance_producer_sha256(),
@@ -83,6 +94,91 @@ class PerformancePolicyTest(unittest.TestCase):
         self.assertEqual(
             value["lanes"]["docs"]["workload_sha256"],
             performance_policy.docs_workload_sha256(),
+        )
+
+    def test_noexec_process_evidence_matches_current_subject_and_producers(
+        self,
+    ) -> None:
+        relative = (
+            "live-verify/RESULTS-noexec-repair-process-profile-20260903.md"
+        )
+        self.assertIn(relative, baseline()["evidence"])
+        evidence = (ROOT / relative).read_text(encoding="utf-8")
+
+        def digest(label: str) -> str:
+            match = re.search(
+                rf"^- {re.escape(label)}: `([0-9a-f]{{64}})`$",
+                evidence,
+                flags=re.MULTILINE,
+            )
+            self.assertIsNotNone(match, label)
+            return match.group(1)
+
+        expected_identities = {
+            "Raw profile producer": hashlib.sha256(
+                performance_policy.PROFILE_SOURCE.read_bytes()
+            ).hexdigest(),
+            "Validator": hashlib.sha256(
+                Path(verification_contract.__file__).read_bytes()
+            ).hexdigest(),
+            "Combined performance producer":
+                performance_policy.performance_producer_sha256(),
+            "Case manifest": guard_boundary_profile._case_manifest_sha256(
+                guard_boundary_profile.GUARD_BOUNDARY_CASES
+            ),
+            "Source guard": hashlib.sha256(
+                (ROOT / "kernel/hooks/worktree-guard.sh").read_bytes()
+            ).hexdigest(),
+            "Source checker": hashlib.sha256(
+                (ROOT / "kernel/bin/dev-worktree.sh").read_bytes()
+            ).hexdigest(),
+            "Default policy": hashlib.sha256(
+                (
+                    ROOT
+                    / "kernel/policy/default-worktree-policy.yml"
+                ).read_bytes()
+            ).hexdigest(),
+        }
+        for label, expected in expected_identities.items():
+            with self.subTest(identity=label):
+                self.assertEqual(digest(label), expected)
+
+        excluded = {
+            "engine/tests/performance-baseline.v1.json",
+            relative,
+        }
+        paths = sorted(
+            path
+            for path in subprocess.run(
+                ["git", "ls-files", "-z"],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+            ).stdout.decode().split("\0")
+            if path and path not in excluded
+        )
+        subject = hashlib.sha256()
+        for path in paths:
+            for raw in (path.encode(), (ROOT / path).read_bytes()):
+                subject.update(len(raw).to_bytes(8, "big"))
+                subject.update(raw)
+        count_match = re.search(
+            r"^- Measured-subject files: `([0-9]+)`$",
+            evidence,
+            flags=re.MULTILINE,
+        )
+        self.assertIsNotNone(count_match)
+        self.assertEqual(int(count_match.group(1)), len(paths))
+        self.assertEqual(digest("Measured-subject SHA-256"), subject.hexdigest())
+        self.assertEqual(
+            int(
+                re.search(
+                    r"^- Git processes: `([0-9]+)`$",
+                    evidence,
+                    flags=re.MULTILINE,
+                ).group(1)
+            ),
+            baseline()["process_measurement"]["git_processes"],
         )
 
     def test_time_is_warning_only_and_context_is_required(self) -> None:

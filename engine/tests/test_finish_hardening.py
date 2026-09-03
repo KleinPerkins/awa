@@ -1127,7 +1127,7 @@ class DeliveryAndInstallAdversarialTest(HardeningBase):
         hooks.write_text("{ malformed", encoding="utf-8")
         before = hooks.read_bytes()
         env = {**os.environ, "AWA_HOOKS_JSON": str(hooks)}
-        bad = subprocess.run([str(INSTALL_HOOKS)], env=env,
+        bad = subprocess.run(["bash", str(INSTALL_HOOKS)], env=env,
                              capture_output=True, text=True)
         self.assertNotEqual(bad.returncode, 0)
         self.assertEqual(hooks.read_bytes(), before)
@@ -1141,7 +1141,7 @@ class DeliveryAndInstallAdversarialTest(HardeningBase):
                 "command": str(third_party), "type": "command", "timeout": 9,
             }]},
         }), encoding="utf-8")
-        ok = subprocess.run([str(INSTALL_HOOKS)], env=env,
+        ok = subprocess.run(["bash", str(INSTALL_HOOKS)], env=env,
                             capture_output=True, text=True)
         self.assertEqual(ok.returncode, 0, ok.stderr)
         entries = json.loads(hooks.read_text(encoding="utf-8"))[
@@ -1152,15 +1152,15 @@ class DeliveryAndInstallAdversarialTest(HardeningBase):
     def test_hook_check_catches_missing_and_exact_field_drift(self) -> None:
         hooks = self.data_home / "missing-hooks.json"
         env = {**os.environ, "AWA_HOOKS_JSON": str(hooks)}
-        missing = subprocess.run([str(INSTALL_HOOKS), "--check"], env=env,
+        missing = subprocess.run(["bash", str(INSTALL_HOOKS), "--check"], env=env,
                                  capture_output=True, text=True)
         self.assertNotEqual(missing.returncode, 0)
-        subprocess.run([str(INSTALL_HOOKS)], env=env, check=True,
+        subprocess.run(["bash", str(INSTALL_HOOKS)], env=env, check=True,
                        capture_output=True, text=True)
         doc = json.loads(hooks.read_text(encoding="utf-8"))
         doc["hooks"]["beforeSubmitPrompt"][0]["timeout"] = 19
         hooks.write_text(json.dumps(doc), encoding="utf-8")
-        drift = subprocess.run([str(INSTALL_HOOKS), "--check"], env=env,
+        drift = subprocess.run(["bash", str(INSTALL_HOOKS), "--check"], env=env,
                                capture_output=True, text=True)
         self.assertNotEqual(drift.returncode, 0)
 

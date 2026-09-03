@@ -83,8 +83,13 @@ class TestHookOwnerV2Matrix(unittest.TestCase):
         env = dict(self.env)
         env["AWA_HOOK_OWNER"] = owner
         env["AWA_HOOKS_JSON"] = str(hooks or self.hooks)
+        argv = (
+            ["bash", str(script), *args]
+            if script.resolve() == _INSTALL_HOOKS.resolve()
+            else [str(script), *args]
+        )
         return subprocess.run(
-            [str(script), *args],
+            argv,
             capture_output=True,
             text=True,
             env=env,
@@ -157,7 +162,7 @@ class TestHookOwnerV2Matrix(unittest.TestCase):
         )
 
         static = subprocess.run(
-            [str(_INSTALL), "--check"],
+            ["bash", str(_INSTALL), "--check"],
             capture_output=True,
             text=True,
             env=self.env,
@@ -307,7 +312,7 @@ class TestHookOwnerV2Matrix(unittest.TestCase):
 
     def test_doctor_reports_v2_role_matrix(self):
         result = subprocess.run(
-            [str(_DOCTOR), "doctor"],
+            ["bash", str(_DOCTOR), "doctor"],
             cwd=_ROOT,
             capture_output=True,
             text=True,

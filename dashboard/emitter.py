@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -46,6 +47,18 @@ DETAILS = ("fast", "deep")
 # (Phase-8: `environment.engine`), so the kernel contract + data-free seed stay byte-stable and
 # the engine stays off the safety path.
 ENGINE_LAUNCHER = _AWA_HOME / "bin" / "awa-engine.sh"
+
+
+def _product_script_ready(path: Path) -> bool:
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return False
+    return bool(
+        stat.S_ISREG(mode)
+        and mode & 0o111
+        and os.access(path, os.R_OK)
+    )
 
 
 def _policy_path() -> str:
@@ -417,11 +430,11 @@ def engine_status(timeout: float) -> dict:
     _PLAIN_OFF = "I step in the moment you try to change something. The always-watching-in-the-background part isn't switched on here."
     _PLAIN_ON = "I'm watching continuously in the background, on top of stepping in at each change."
     off = lambda reason: {"engine": {"running": False, "mode": "off", "reason": reason, "plain": _PLAIN_OFF}}
-    if not ENGINE_LAUNCHER.exists():
-        return off("engine launcher not present")
+    if not _product_script_ready(ENGINE_LAUNCHER):
+        return off("engine launcher not present or unreadable")
     try:
         proc = subprocess.run(
-            [str(ENGINE_LAUNCHER), "daemon", "status"],
+            ["bash", str(ENGINE_LAUNCHER), "daemon", "status"],
             text=True, capture_output=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -452,15 +465,15 @@ def recovery_status(timeout: float) -> dict:
     """
     def unavailable(reason: str) -> dict:
         return {"recovery": {"available": False, "reason": reason}}
-    if not ENGINE_LAUNCHER.exists():
-        return unavailable("engine launcher not present")
+    if not _product_script_ready(ENGINE_LAUNCHER):
+        return unavailable("engine launcher not present or unreadable")
     # Do not create engine state from a read-only dashboard render — probe only if it already exists.
     base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
     if not (Path(base) / "awa" / "state.db").exists():
         return unavailable("no engine recovery state yet")
     try:
         proc = subprocess.run(
-            [str(ENGINE_LAUNCHER), "recover", "status"],
+            ["bash", str(ENGINE_LAUNCHER), "recover", "status"],
             text=True, capture_output=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:

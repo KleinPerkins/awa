@@ -378,8 +378,9 @@ class DispatcherProjectionTest(FinalHardeningBase):
 
         def run(command, *args, **kwargs):
             nonlocal seen_machine_mode
-            if (isinstance(command, list) and command
-                    and str(command[0]).endswith("kernel/bin/dev-worktree.sh")):
+            if (isinstance(command, list) and len(command) > 1
+                    and command[0] == "bash"
+                    and str(command[1]).endswith("kernel/bin/dev-worktree.sh")):
                 seen_machine_mode = (
                     kwargs.get("env", {}).get("AWA_FINISH_PUBLIC_PROJECTION") == "1")
                 return subprocess.CompletedProcess(

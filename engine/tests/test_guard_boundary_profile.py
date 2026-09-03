@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -107,6 +109,157 @@ class GuardBoundaryProfileTest(unittest.TestCase):
             self.assertEqual(
                 len({roots[index] for roots in case_roots}),
                 len(case_roots),
+            )
+
+    def test_installed_runtime_uses_bash_without_relying_on_installer_shebang(self):
+        with tempfile.TemporaryDirectory(prefix="awa-noexec-install.") as raw:
+            root = Path(raw)
+            installer = root / "install.sh"
+            installer.write_text(
+                "#!/definitely/missing\nmkdir -p \"$XDG_DATA_HOME/awa/current\"\n",
+                encoding="utf-8",
+            )
+            installer.chmod(0o700)
+            environment = guard_boundary_profile._private_environment(
+                root / "environment"
+            )
+            with mock.patch.object(
+                guard_boundary_profile,
+                "INSTALL",
+                installer,
+            ):
+                runtime = guard_boundary_profile._install_runtime(
+                    root,
+                    environment,
+                )
+            self.assertEqual(
+                runtime,
+                Path(environment["XDG_DATA_HOME"]) / "awa" / "current",
+            )
+
+    def test_named_product_hooks_use_bash_without_relying_on_shebangs(self):
+        with tempfile.TemporaryDirectory(prefix="awa-noexec-named-hooks.") as raw:
+            root = Path(raw)
+            source = root / "source"
+            shutil.copytree(
+                guard_boundary_profile.REPO_ROOT / "kernel",
+                source / "kernel",
+            )
+            guard = source / "kernel" / "hooks" / "worktree-guard.sh"
+            session = source / "kernel" / "hooks" / "worktree-session.sh"
+            checker = source / "kernel" / "bin" / "dev-worktree.sh"
+            for script in (guard, session, checker):
+                lines = script.read_text(encoding="utf-8").splitlines(keepends=True)
+                lines[0] = "#!/definitely/missing\n"
+                script.write_text("".join(lines), encoding="utf-8")
+                script.chmod(0o700)
+
+            environment = guard_boundary_profile._private_environment(
+                root / "environment"
+            )
+            environment["AWA_HOME"] = str(source)
+            real_git = shutil.which("git", path=environment["PATH"])
+            self.assertIsNotNone(real_git)
+            case = guard_boundary_profile.GuardCase(
+                "noexec_named_hooks",
+                "git commit --allow-empty -m blocked",
+                "deny",
+                "clean",
+            )
+            fixture = guard_boundary_profile._make_case_fixture(
+                root,
+                case,
+                real_git,
+                environment,
+            )
+
+            with mock.patch.object(
+                guard_boundary_profile,
+                "SOURCE_GUARD",
+                guard,
+            ):
+                permission = guard_boundary_profile._hook_permission(
+                    guard,
+                    fixture,
+                    case.command,
+                    environment,
+                )
+            self.assertEqual(permission, case.expected_permission)
+
+            linked = fixture.root / "linked"
+            guard_boundary_profile._run_git(
+                real_git,
+                environment,
+                "-C",
+                str(fixture.repo),
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feat/noexec",
+                str(linked),
+            )
+
+            checked = subprocess.run(
+                ["bash", str(checker), "policy-check"],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+
+            payload = json.dumps(
+                {
+                    "workspace_roots": [str(linked)],
+                    "conversation_id": "noexec-conversation",
+                    "session_id": "noexec-session",
+                }
+            )
+            session_result = subprocess.run(
+                ["bash", str(session)],
+                input=payload,
+                cwd=str(linked),
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(
+                session_result.returncode,
+                0,
+                session_result.stdout + session_result.stderr,
+            )
+            session_output = json.loads(session_result.stdout)
+            self.assertIn("linked-worktree: yes", session_output["additional_context"])
+
+            roots = source / "kernel" / "lib" / "awa_roots.py"
+            disposition = subprocess.run(
+                ["python3", str(roots), "disposition", "--root", str(linked)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(
+                disposition.returncode,
+                0,
+                disposition.stdout + disposition.stderr,
+            )
+            self.assertEqual(
+                json.loads(disposition.stdout)["disposition"],
+                "active",
+            )
+
+            current = subprocess.run(
+                ["python3", str(roots), "current-session-read", "--root", str(linked)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(current.returncode, 0, current.stdout + current.stderr)
+            current_session = json.loads(current.stdout)
+            self.assertEqual(current_session["status"], "ok")
+            self.assertEqual(
+                current_session["current_session"]["session_id"],
+                "noexec-session",
             )
 
     def test_profile_validator_rejects_unknown_key(self):

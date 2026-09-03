@@ -383,8 +383,13 @@ def _hook_permission(
         "cwd": str(fixture.repo),
         "command": command,
     }
+    argv = (
+        ["bash", str(guard_path)]
+        if guard_path == SOURCE_GUARD
+        else [str(guard_path)]
+    )
     result = subprocess.run(
-        [str(guard_path)],
+        argv,
         input=json.dumps(payload),
         check=False,
         capture_output=True,
@@ -445,7 +450,7 @@ def _owner_permission(
             "target=\"${AWA_DELEGATE_TARGET:?}\"\n"
             "export AWA_POLICY=\"${AWA_EXTERNAL_POLICY:?}\"\n"
             "export AWA_GOVERNED_ROOT=\"${AWA_EXTERNAL_ROOT:?}\"\n"
-            "exec \"$target\"\n",
+            "exec bash \"$target\"\n",
             encoding="utf-8",
         )
         delegator.chmod(0o700)
@@ -471,7 +476,7 @@ def _install_runtime(profile_root: Path, base_env: Mapping[str, str]) -> Path:
     hooks = profile_root / "selected-hooks" / "hooks.json"
     install_env["AWA_HOOKS_JSON"] = str(hooks)
     result = subprocess.run(
-        [str(INSTALL)],
+        ["bash", str(INSTALL)],
         cwd=str(REPO_ROOT),
         check=False,
         capture_output=True,

@@ -21,8 +21,9 @@ import unittest
 from pathlib import Path
 from typing import Optional, Set, Tuple
 
-_IDENT = ("-c", "user.email=49759187+KleinPerkins@users.noreply.github.com",
-          "-c", "user.name=KleinPerkins")
+_TEST_EMAIL = "49759187+KleinPerkins@users.noreply.github.com"
+_TEST_NAME = "KleinPerkins"
+_IDENT = ("-c", f"user.email={_TEST_EMAIL}", "-c", f"user.name={_TEST_NAME}")
 _ACTIVE_TEST_ROOTS: Set[Path] = set()
 _PROCESS_REPO_SEED: Optional["RepoSeed"] = None
 _PROCESS_REPO_SEED_LOCK = threading.Lock()
@@ -96,6 +97,8 @@ def _tree_audit(root: Path) -> Tuple[str, Set[Tuple[int, int]]]:
 def _build_seed_from_scratch(root: Path) -> None:
     root.mkdir(mode=0o700)
     git(str(root), "init", "-q", ".")
+    git(str(root), "config", "user.email", _TEST_EMAIL)
+    git(str(root), "config", "user.name", _TEST_NAME)
     (root / "README.md").write_text("# uat\n", encoding="utf-8")
     git(str(root), "add", "-A")
     commit_env = os.environ.copy()
@@ -231,6 +234,8 @@ class EngineTestCase(unittest.TestCase):
         repo = str(Path(self._tmp.name) / name)
         os.makedirs(repo, exist_ok=True)
         git(repo, "init", "-q", ".")
+        git(repo, "config", "user.email", _TEST_EMAIL)
+        git(repo, "config", "user.name", _TEST_NAME)
         Path(repo, "README.md").write_text("# uat\n", encoding="utf-8")
         commit_all(repo, "init")
         git(repo, "branch", "-M", "main")
@@ -280,6 +285,7 @@ class EngineTestCase(unittest.TestCase):
         for end-to-end publish/quarantine tests — still fully offline, no network)."""
         bare = str(Path(self._tmp.name) / name)
         git(str(Path(self._tmp.name)), "init", "-q", "--bare", bare)
+        git(bare, "symbolic-ref", "HEAD", "refs/heads/main")
         # origin already exists (fake url) from make_repo; repoint it at the bare path.
         r = subprocess.run(["git", "-C", repo, "remote", "set-url", "origin", bare],
                            capture_output=True, text=True)

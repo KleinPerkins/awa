@@ -163,7 +163,7 @@ class TestEgressSurfaces(_EgressBase):
         if extra_env:
             env.update(extra_env)
         data = payload if isinstance(payload, str) else json.dumps(payload)
-        proc = subprocess.run([str(_GUARD)], input=data, capture_output=True, text=True,
+        proc = subprocess.run(["bash", str(_GUARD)], input=data, capture_output=True, text=True,
                               env=env, cwd=cwd)
         return json.loads(proc.stdout)
 

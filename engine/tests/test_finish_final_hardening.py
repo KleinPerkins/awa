@@ -211,7 +211,8 @@ class DeterministicGitEnvironmentTest(FinalHardeningBase):
             "DEV_SESSION_ID": "shell-env-parity",
         })
         result = subprocess.run(
-            [str(Path(__file__).resolve().parents[2] / "kernel" / "bin"
+            ["bash",
+             str(Path(__file__).resolve().parents[2] / "kernel" / "bin"
                  / "dev-worktree.sh"),
              "clean", "--finish-current", "--preview",
              "--conversation-id", "shell-env-parity"],

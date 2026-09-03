@@ -127,11 +127,24 @@ def _write_last(fd: int, value: int) -> None:
 
 def _run_engine(trigger: str, timeout_seconds: float) -> None:
     engine = _engine_path()
-    if not engine.is_file() or not os.access(str(engine), os.X_OK):
+    configured = bool(os.environ.get("AWA_INTEGRITY_ENGINE", "").strip())
+    try:
+        mode = engine.stat().st_mode
+    except OSError:
         return
+    if not stat.S_ISREG(mode) or mode & 0o111 == 0:
+        return
+    if configured:
+        if not os.access(str(engine), os.X_OK):
+            return
+        command = [str(engine)]
+    else:
+        if not os.access(str(engine), os.R_OK):
+            return
+        command = ["bash", str(engine)]
     process = subprocess.Popen(
-        [
-            str(engine),
+        command
+        + [
             "integrity",
             "verify",
             "--profile",

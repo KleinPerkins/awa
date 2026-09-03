@@ -1603,7 +1603,7 @@ def _kernel_parity(source: Path, probes: list[tuple[Path, str]]) -> bool | None:
             for cwd, command in probes:
                 direct = guard.decide_shell(str(cwd), command, str(policy))
                 proc = subprocess.run(
-                    [str(hook)],
+                    ["bash", str(hook)],
                     input=json.dumps({"cwd": str(cwd), "command": command}),
                     capture_output=True,
                     text=True,
@@ -1803,7 +1803,15 @@ def _valid_hook_role(
         command.relative_to(source.resolve())
     except ValueError:
         return False
-    if not command.is_file() or not os.access(command, os.X_OK):
+    try:
+        command_mode = command.lstat().st_mode
+    except OSError:
+        return False
+    if (
+        not stat.S_ISREG(command_mode)
+        or command_mode & 0o111 == 0
+        or not os.access(command, os.R_OK)
+    ):
         return False
     return _valid_hook_entry(role["entry"])
 

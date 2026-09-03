@@ -117,7 +117,15 @@ def valid_role(role: object, *, allow_dormant: bool) -> bool:
         command.relative_to(root)
     except ValueError:
         return False
-    if not command.is_file() or not os.access(command, os.X_OK):
+    try:
+        command_mode = command.lstat().st_mode
+    except OSError:
+        return False
+    if (
+        not stat.S_ISREG(command_mode)
+        or command_mode & 0o111 == 0
+        or not os.access(command, os.R_OK)
+    ):
         return False
     return valid_entry(role["entry"])
 

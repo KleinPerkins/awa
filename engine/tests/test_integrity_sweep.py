@@ -39,12 +39,19 @@ _SAFE_FACTS = {
 
 
 class TestIntegritySweep(EngineTestCase):
-    def _fake_root(self) -> Path:
+    def _fake_root(
+        self,
+        *,
+        executable: bool = True,
+        broken_shebang: bool = False,
+    ) -> Path:
         root = Path(self._tmp.name) / "fake-runtime"
         (root / "bin").mkdir(parents=True)
         engine = root / "bin" / "awa-engine.sh"
         engine.write_text(
-            """#!/usr/bin/env bash
+            ("""#!/definitely/missing
+""" if broken_shebang else """#!/usr/bin/env bash
+""") + """
 test "$1 $2 $3 $4 $5 $6" = \
 "integrity verify --profile deep --trigger launchd" || exit 91
 if [ "${FAKE_SIGNAL:-0}" = "1" ]; then
@@ -54,7 +61,7 @@ exit "${FAKE_EXIT:-0}"
 """,
             encoding="utf-8",
         )
-        engine.chmod(0o755)
+        engine.chmod(0o755 if executable else 0o600)
         return root
 
     def _run(self, *, root: Path | None = None, **extra_env: str):
@@ -71,7 +78,7 @@ exit "${FAKE_EXIT:-0}"
         ):
             env.pop(name, None)
         return subprocess.run(
-            [str(_SWEEP)],
+            ["bash", str(_SWEEP)],
             capture_output=True,
             text=True,
             env=env,
@@ -105,6 +112,17 @@ exit "${FAKE_EXIT:-0}"
                 self.assertEqual(result.returncode, code, result.stderr)
         crashed = self._run(root=root, FAKE_SIGNAL="1")
         self.assertEqual(crashed.returncode, -signal.SIGTERM)
+
+    def test_product_sweep_uses_bash_without_git_metadata(self):
+        root = self._fake_root(broken_shebang=True)
+        result = self._run(root=root, FAKE_EXIT="47")
+        self.assertEqual(result.returncode, 47, result.stderr)
+
+    def test_non_executable_runtime_engine_is_not_interpreted(self):
+        root = self._fake_root(executable=False)
+        result = self._run(root=root, FAKE_EXIT="47")
+        self.assertNotEqual(result.returncode, 47)
+        self.assertNotEqual(result.returncode, 0)
 
     def test_sweep_updates_launchd_trigger(self):
         result = self._run(

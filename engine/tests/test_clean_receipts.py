@@ -68,7 +68,7 @@ class CleanReceiptsTest(EngineTestCase):
         clean_env["AWA_HOME"] = str(self.repo_root)
         if env:
             clean_env.update(env)
-        return subprocess.run([self.dev_worktree, "clean", *args], cwd=str(self.repo_root),
+        return subprocess.run(["bash", self.dev_worktree, "clean", *args], cwd=str(self.repo_root),
                               env=clean_env, capture_output=True, text=True)
 
     def heartbeat(self, path: str) -> None:
@@ -363,7 +363,7 @@ class CleanReceiptsTest(EngineTestCase):
 
     def test_lock_open_failure_has_explicit_fail_closed_branch(self) -> None:
         source = Path(self.dev_worktree).read_text(encoding="utf-8")
-        self.assertIn('if ! { exec 200<>"$_lockfile"; } 2>/dev/null; then', source)
+        self.assertIn('if ! { exec 9<>"$_lockfile"; } 2>/dev/null; then', source)
         self.assertIn(
             'clean_set_disposition refused clean_lock_busy "cannot open per-common-dir lockfile',
             source)

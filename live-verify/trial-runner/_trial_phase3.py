@@ -571,14 +571,14 @@ def uninstall_survival(sb: Sandbox) -> str:
            "XDG_DATA_HOME": str(home / ".local" / "share"),
            "XDG_CONFIG_HOME": str(home / ".config"),
            "XDG_STATE_HOME": str(home / ".local" / "state")}
-    first = sb.run_raw([str(INSTALL_SH)], env=env)
+    first = sb.run_raw(["bash", str(INSTALL_SH)], env=env)
     check_eq(first.returncode, 0, f"install rc ({first.stdout}{first.stderr})")
     retained = Path(env["XDG_STATE_HOME"]) / "awa" / "protected-retain" / ("retain-" + "a" * 32)
     retained.mkdir(parents=True)
     (retained / "manifest.json").write_text('{"protected":true}\n', encoding="utf-8")
     ordinary = Path(env["XDG_STATE_HOME"]) / "awa" / "ordinary"
     ordinary.write_text("remove", encoding="utf-8")
-    removed = sb.run_raw([str(INSTALL_SH), "--uninstall"], env=env)
+    removed = sb.run_raw(["bash", str(INSTALL_SH), "--uninstall"], env=env)
     check_eq(removed.returncode, 0, f"uninstall rc ({removed.stdout}{removed.stderr})")
     check((retained / "manifest.json").exists(), "protected retain survives uninstall")
     check(not ordinary.exists(), "ordinary state removed on uninstall")

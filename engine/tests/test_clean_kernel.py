@@ -35,7 +35,7 @@ class CleanKernelTest(EngineTestCase):
         if env:
             clean_env.update(env)
         return subprocess.run(
-            [self.dev_worktree, "clean", "--path", path, *args],
+            ["bash", self.dev_worktree, "clean", "--path", path, *args],
             cwd=str(self.repo_root),
             env=clean_env,
             capture_output=True,

@@ -105,7 +105,7 @@ class FinishBase(EngineTestCase):
 
     def run_dev_finish(self, *args: str, cwd: str,
                        env: dict | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run([str(_DEV_WORKTREE), "clean", "--finish-current", *args],
+        return subprocess.run(["bash", str(_DEV_WORKTREE), "clean", "--finish-current", *args],
                               cwd=cwd, env=env or self.env(), capture_output=True, text=True)
 
     # ---- receipts (newest by mtime — receipt_ids collide at second granularity) --------
@@ -1888,7 +1888,7 @@ class OrdinaryCleanUnchangedTest(FinishBase):
         git(repo, "checkout", "-q", "main")
         git(repo, "merge", "--squash", "feat/ord")
         commit_all(repo, "squash")
-        r = subprocess.run([str(_DEV_WORKTREE), "clean", "--path", wt],
+        r = subprocess.run(["bash", str(_DEV_WORKTREE), "clean", "--path", wt],
                            cwd=str(_REPO_ROOT), env=self.env(engine_off=False),
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -1899,7 +1899,7 @@ class OrdinaryCleanUnchangedTest(FinishBase):
         self.assertFalse(rec["finish_current"])
 
     def test_preview_without_finish_current_refuses(self) -> None:
-        r = subprocess.run([str(_DEV_WORKTREE), "clean", "--preview", "--path", "/x"],
+        r = subprocess.run(["bash", str(_DEV_WORKTREE), "clean", "--preview", "--path", "/x"],
                            cwd=str(_REPO_ROOT), env=self.env(), capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertEqual(self.last_receipt()["reason_code"], "finish_bad_args")
