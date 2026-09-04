@@ -9,19 +9,19 @@ and does not alter the hypothesis-only timing or inventory fields in
 
 ## Producer
 
-Run once from the replacement-canary worktree with no competing AWA test suite:
+Run once from the live-evidence worktree with no competing AWA test suite:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -B \
   -m engine.tests.guard_boundary_profile \
   --boundary source \
   --count-git \
-  --json-out /tmp/awa-noexec-process-profile.json
+  --json-out /tmp/awa-v4-live-evidence-process-profile.json
 ```
 
-- Measured at: `2026-09-03T21:03:00Z`
-- Branch: `chore/awa-v4-replacement-canary-20260903`
-- Base HEAD: `90ec7a7d62af24a27c7b2d744de6c48f19bfa10b`
+- Measured at: `2026-09-04T00:07:41Z`
+- Branch: `docs/awa-v4-live-evidence-20260903`
+- Base HEAD: `3debd94d5dd1385212aded95398abfe15e0346ba`
 - Platform: `macOS-26.6.2-arm64-arm-64bit-Mach-O`
 - Python: `3.14.6`
 - Git: `git version 2.50.1 (Apple Git-155)`
@@ -32,8 +32,8 @@ path and its current bytes in sorted order, each length-prefixed with eight
 big-endian bytes. It excludes only the generated baseline and this evidence
 record, so adding those two outputs cannot change the measured-subject identity.
 
-- Measured-subject files: `259`
-- Measured-subject SHA-256: `9e7255538aabb2e5714689e6577adb9ea6b6c8b9e8a8044d8a54ddd40f0c762d`
+- Measured-subject files: `260`
+- Measured-subject SHA-256: `56723f3a2ac72c8ef9ceaaf58c849f357e905e934bcfb17b752395a151ac8553`
 - Excluded paths:
   - `engine/tests/performance-baseline.v1.json`
   - `live-verify/RESULTS-noexec-repair-process-profile-20260903.md`
