@@ -380,8 +380,13 @@ def _root_exists(path: str, disposition: dict | None) -> bool | None:
 def _live_session(disposition: dict | None) -> bool | None:
     if disposition is None:
         return None
-    if disposition.get("disposition") == "active":
+    canonical = disposition.get("disposition")
+    if canonical == "active":
         return True
+    if canonical == "dead":
+        # Canonical dead means the root is absent. Its retained heartbeat is
+        # historical evidence, not a live session; PID and boot remain unused.
+        return False
     # Absence of a heartbeat record proves there is no recorded live session.
     # If a record exists, PID/boot cannot turn it into retirement authorization.
     return False if disposition.get("record") is None else None

@@ -129,6 +129,69 @@ class TestLifecycleReconcile(EngineTestCase):
                     "retire_candidate",
                 )
 
+    def test_canonical_dead_retained_record_can_retire_only_with_full_conjunction(
+        self,
+    ):
+        root = self.state_home.parent / "removed-worktree"
+        roots = integrity._roots_module(integrity._source_root())
+        Path(roots.roots_dir()).mkdir(parents=True)
+        retained_record = {"historical": "heartbeat"}
+        Path(roots.record_path(str(root))).write_text(
+            json.dumps(retained_record),
+            encoding="utf-8",
+        )
+        canonical = roots.disposition(str(root))
+        self.assertEqual(canonical["disposition"], "dead")
+        self.assertIs(canonical["exists"], False)
+        self.assertEqual(canonical["record"], retained_record)
+
+        common_dir = str(self.state_home.parent / "repo" / ".git")
+        lease = _observation(path=str(root)).lease
+        lease["git_common_dir"] = common_dir
+        git_snapshot = lifecycle_reconcile._GitSnapshot(
+            registrations=(),
+            known_common_dirs=frozenset(
+                {lifecycle_reconcile._common_key(common_dir)}
+            ),
+        )
+        observation = lifecycle_reconcile._observation_for(
+            str(root),
+            lease=lease,
+            lease_snapshot_known=True,
+            lease_ambiguous=False,
+            registrations=[],
+            git_snapshot=git_snapshot,
+        )
+        self.assertEqual(
+            lifecycle_reconcile._classify_observation(
+                observation
+            ).classification,
+            "retire_candidate",
+        )
+        self.assertIs(observation.live_session, False)
+
+        stale = replace(
+            observation,
+            root_exists=True,
+            disposition="stale",
+            live_session=lifecycle_reconcile._live_session(
+                {"disposition": "stale", "record": retained_record}
+            ),
+        )
+        self.assertNotEqual(
+            lifecycle_reconcile._classify_observation(stale).classification,
+            "retire_candidate",
+        )
+        self.assertEqual(
+            lifecycle_reconcile._classify_observation(
+                replace(
+                    observation,
+                    journal_or_recovery_ambiguous=True,
+                )
+            ).classification,
+            "preserve",
+        )
+
     def test_fresh_heartbeat_row_preserved(self):
         row = _classify_one(
             _observation(
