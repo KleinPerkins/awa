@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from engine.tests import (
     guard_boundary_profile,
@@ -22,6 +23,13 @@ from engine.tests import (
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE_PATH = Path(__file__).with_name("performance-baseline.v1.json")
+NOEXEC_EVIDENCE = (
+    "live-verify/RESULTS-noexec-repair-process-profile-20260903.md"
+)
+NOEXEC_HISTORICAL_SUBJECT_FILES = 260
+NOEXEC_HISTORICAL_SUBJECT_SHA256 = (
+    "56723f3a2ac72c8ef9ceaaf58c849f357e905e934bcfb17b752395a151ac8553"
+)
 
 
 def baseline() -> dict:
@@ -96,14 +104,11 @@ class PerformancePolicyTest(unittest.TestCase):
             performance_policy.docs_workload_sha256(),
         )
 
-    def test_noexec_process_evidence_matches_current_subject_and_producers(
+    def test_noexec_evidence_matches_historical_subject_and_current_producers(
         self,
     ) -> None:
-        relative = (
-            "live-verify/RESULTS-noexec-repair-process-profile-20260903.md"
-        )
-        self.assertIn(relative, baseline()["evidence"])
-        evidence = (ROOT / relative).read_text(encoding="utf-8")
+        self.assertIn(NOEXEC_EVIDENCE, baseline()["evidence"])
+        evidence = (ROOT / NOEXEC_EVIDENCE).read_text(encoding="utf-8")
 
         def digest(label: str) -> str:
             match = re.search(
@@ -140,36 +145,22 @@ class PerformancePolicyTest(unittest.TestCase):
             ).hexdigest(),
         }
         for label, expected in expected_identities.items():
-            with self.subTest(identity=label):
-                self.assertEqual(digest(label), expected)
+            self.assertEqual(digest(label), expected, label)
 
-        excluded = {
-            "engine/tests/performance-baseline.v1.json",
-            relative,
-        }
-        paths = sorted(
-            path
-            for path in subprocess.run(
-                ["git", "ls-files", "-z"],
-                cwd=ROOT,
-                check=True,
-                capture_output=True,
-            ).stdout.decode().split("\0")
-            if path and path not in excluded
-        )
-        subject = hashlib.sha256()
-        for path in paths:
-            for raw in (path.encode(), (ROOT / path).read_bytes()):
-                subject.update(len(raw).to_bytes(8, "big"))
-                subject.update(raw)
         count_match = re.search(
             r"^- Measured-subject files: `([0-9]+)`$",
             evidence,
             flags=re.MULTILINE,
         )
         self.assertIsNotNone(count_match)
-        self.assertEqual(int(count_match.group(1)), len(paths))
-        self.assertEqual(digest("Measured-subject SHA-256"), subject.hexdigest())
+        self.assertEqual(
+            int(count_match.group(1)),
+            NOEXEC_HISTORICAL_SUBJECT_FILES,
+        )
+        self.assertEqual(
+            digest("Measured-subject SHA-256"),
+            NOEXEC_HISTORICAL_SUBJECT_SHA256,
+        )
         self.assertEqual(
             int(
                 re.search(
@@ -180,6 +171,57 @@ class PerformancePolicyTest(unittest.TestCase):
             ),
             baseline()["process_measurement"]["git_processes"],
         )
+
+    def test_unrelated_tracked_candidate_keeps_historical_evidence_valid(
+        self,
+    ) -> None:
+        tracked = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "README.md"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(tracked.stdout, "README.md\n")
+
+        readme = ROOT / "README.md"
+        evidence_path = ROOT / NOEXEC_EVIDENCE
+        source_guard = ROOT / "kernel/hooks/worktree-guard.sh"
+        read_bytes = Path.read_bytes
+        read_text = Path.read_text
+
+        def candidate_bytes(path: Path) -> bytes:
+            value = read_bytes(path)
+            if path == readme:
+                return value + b"\nUnrelated tracked candidate perturbation.\n"
+            return value
+
+        with mock.patch.object(Path, "read_bytes", candidate_bytes):
+            self.test_noexec_evidence_matches_historical_subject_and_current_producers()
+
+        def tampered_evidence(path: Path, *args, **kwargs) -> str:
+            value = read_text(path, *args, **kwargs)
+            if path == evidence_path:
+                return value.replace(
+                    NOEXEC_HISTORICAL_SUBJECT_SHA256,
+                    "0" * 64,
+                    1,
+                )
+            return value
+
+        with mock.patch.object(Path, "read_text", tampered_evidence):
+            with self.assertRaises(AssertionError):
+                self.test_noexec_evidence_matches_historical_subject_and_current_producers()
+
+        def drifted_producer(path: Path) -> bytes:
+            value = read_bytes(path)
+            if path == source_guard:
+                return value + b"\n# bound producer drift\n"
+            return value
+
+        with mock.patch.object(Path, "read_bytes", drifted_producer):
+            with self.assertRaises(AssertionError):
+                self.test_noexec_evidence_matches_historical_subject_and_current_producers()
 
     def test_time_is_warning_only_and_context_is_required(self) -> None:
         current = observation(elapsed_ms=999999, load_note="")
