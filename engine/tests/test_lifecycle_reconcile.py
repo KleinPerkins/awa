@@ -290,6 +290,59 @@ class TestLifecycleReconcile(EngineTestCase):
         self.assertEqual(row.content_safety, "clean")
         self.assertEqual(row.cached_remote, "redundant")
 
+    def test_on_disk_lease_without_active_db_lease_is_preserved(self):
+        repo = self.make_seeded_repo("orphaned-lease-repo")
+        (Path(repo) / ".gitignore").write_text(".awa/\n", encoding="utf-8")
+        git(repo, "add", ".gitignore")
+        git(repo, "commit", "-m", "ignore awa lease state")
+        worktree = self.add_worktree(repo, "feat/orphaned-lease")
+        git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        common_dir = git(
+            worktree,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ).stdout.strip()
+        lease_mod.write_lease(
+            worktree,
+            lease_mod.build_lease(
+                worktree,
+                "feat/orphaned-lease",
+                common_dir,
+                boot="old-boot",
+            ),
+        )
+        with state_mod.State():
+            pass
+
+        with mock.patch.dict(
+            os.environ,
+            {"AWA_INTEGRITY_PROBE_REPO": repo},
+            clear=False,
+        ):
+            rows = lifecycle_reconcile.classify()
+
+        row = next(
+            item
+            for item in rows
+            if item.worktree_path == str(Path(worktree).resolve())
+        )
+        self.assertIs(row.diagnostics["lease_on_disk"], True)
+        self.assertEqual(row.classification, "preserve")
+        unknown = _classify_one(
+            _observation(
+                leased=False,
+                root_exists=True,
+                registered=True,
+                disposition="untracked",
+                live_session=False,
+                lease_on_disk=None,
+                dirty=False,
+                cached_remote=True,
+            )
+        )
+        self.assertNotEqual(unknown.classification, "adopt_candidate")
+
     def test_pid_boot_are_diagnostic_only(self):
         first = _classify_one(
             _observation(pid=1, boot_id="current-looking-boot")

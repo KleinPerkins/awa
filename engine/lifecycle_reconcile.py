@@ -678,6 +678,7 @@ def _classification(
         and cached_remote == "redundant"
         and observation.registration is not None
         and observation.registration.linked is True
+        and observation.lease_on_disk is False
         and observation.journal_or_recovery_ambiguous is False
     )
     if complete_adopt_conjunction:
