@@ -24,6 +24,7 @@ from . import (
     integrity as integrity_mod,
     lease as lease_mod,
     lifecycle,
+    lifecycle_reconcile as lifecycle_reconcile_mod,
     modes as modes_mod,
     paths,
     recovery,
@@ -202,15 +203,20 @@ def cmd_integrity(args: argparse.Namespace) -> int:
     if args.what == "view":
         status = integrity_mod.read_status()
         if status is None:
-            return _emit(
-                {
-                    "schema": integrity_mod.SCHEMA,
-                    "overall": "red",
-                    "error": "integrity status missing or malformed",
-                },
-                code=2,
-            )
-        return _emit(status, code=_integrity_exit_code(status))
+            result = {
+                "schema": integrity_mod.SCHEMA,
+                "overall": "red",
+                "error": "integrity status missing or malformed",
+            }
+            code = 2
+        else:
+            result = dict(status)
+            code = _integrity_exit_code(status)
+        if getattr(args, "lifecycle", False):
+            result["lifecycle"] = [
+                row.to_dict() for row in lifecycle_reconcile_mod.classify()
+            ]
+        return _emit(result, code=code)
 
     if args.what == "verify":
         if args.trigger == "launchd" and args.profile != "deep":
@@ -472,10 +478,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="read or verify the private integrity status",
     )
     integrity_sub = integrity.add_subparsers(dest="what", required=True)
-    integrity_sub.add_parser(
+    integrity_view = integrity_sub.add_parser(
         "view",
         help="read the last committed integrity status",
-    ).set_defaults(fn=cmd_integrity)
+    )
+    integrity_view.add_argument(
+        "--lifecycle",
+        action="store_true",
+        help="include the read-only lifecycle reconciliation report",
+    )
+    integrity_view.set_defaults(fn=cmd_integrity)
     integrity_verify = integrity_sub.add_parser(
         "verify",
         help="evaluate once and commit status",
