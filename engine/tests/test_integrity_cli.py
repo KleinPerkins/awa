@@ -204,8 +204,12 @@ class TestIntegrityCli(EngineTestCase):
         )
         self.assertIsNone(integrity.read_status())
 
-    def test_no_repair_or_export_verb_registered(self):
-        for verb in ("repair", "export", "sweep"):
+    def test_repair_registered_but_export_and_sweep_remain_unregistered(self):
+        repair = self._run("integrity", "repair", "plan")
+        self.assertNotIn("invalid choice", repair.stderr)
+        self.assertIn("awa-integrity-repair-plan/v1", repair.stdout)
+
+        for verb in ("export", "sweep"):
             with self.subTest(verb=verb):
                 proc = self._run("integrity", verb)
                 self.assertEqual(proc.returncode, 2)

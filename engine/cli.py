@@ -22,6 +22,7 @@ from . import (
     gitutil,
     guard as guard_mod,
     integrity as integrity_mod,
+    integrity_repair as integrity_repair_mod,
     lease as lease_mod,
     lifecycle,
     lifecycle_reconcile as lifecycle_reconcile_mod,
@@ -200,6 +201,27 @@ def _open_console(path: Path) -> bool:
 
 
 def cmd_integrity(args: argparse.Namespace) -> int:
+    if args.what == "repair":
+        if args.repair_what == "plan":
+            return _emit(integrity_repair_mod.build_plan())
+        if args.repair_what == "apply":
+            try:
+                result = integrity_repair_mod.apply(
+                    args.plan_digest,
+                    args.action,
+                    args.authorization,
+                )
+            except integrity_repair_mod.RepairRefused as exc:
+                return _emit(
+                    {
+                        "schema": "awa-integrity-repair-result/v1",
+                        "ok": False,
+                        "error": str(exc),
+                    },
+                    code=1,
+                )
+            return _emit({"ok": True, **result})
+
     if args.what == "view":
         status = integrity_mod.read_status()
         if status is None:
@@ -513,6 +535,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="open the referenced private HTML file with the host default",
     )
     integrity_console.set_defaults(fn=cmd_integrity)
+    integrity_repair = integrity_sub.add_parser(
+        "repair",
+        help="plan or apply one digest-bound lifecycle repair",
+    )
+    integrity_repair_sub = integrity_repair.add_subparsers(
+        dest="repair_what",
+        required=True,
+    )
+    integrity_repair_plan = integrity_repair_sub.add_parser(
+        "plan",
+        help="print a deterministic read-only repair plan",
+    )
+    integrity_repair_plan.set_defaults(fn=cmd_integrity)
+    integrity_repair_apply = integrity_repair_sub.add_parser(
+        "apply",
+        help="apply one explicitly row-authorized planned repair",
+    )
+    integrity_repair_apply.add_argument("--plan-digest", required=True)
+    integrity_repair_apply.add_argument("--action", required=True)
+    integrity_repair_apply.add_argument("--authorization", required=True)
+    integrity_repair_apply.set_defaults(fn=cmd_integrity)
     g = sub.add_parser("guard", help="engine-off kernel guard (shell/can-clean)")
     g.add_argument("what", choices=["shell", "can-clean"])
     g.add_argument("--cwd", default=".")
