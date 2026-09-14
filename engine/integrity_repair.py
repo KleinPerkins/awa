@@ -54,6 +54,14 @@ class RepairRefused(RuntimeError):
     """Live evidence or explicit authorization did not permit the repair."""
 
 
+class RepairAppliedPlanUnavailable(RuntimeError):
+    """The repair committed, but its mandatory post-success plan could not render."""
+
+    def __init__(self, applied_result: dict):
+        super().__init__("repair applied but fresh post-success plan is unavailable")
+        self.applied_result = applied_result
+
+
 @dataclass(frozen=True)
 class Capture:
     archive: str
@@ -564,7 +572,12 @@ def _read_new_receipt(before: set[str], target: str) -> dict | None:
 
 
 def _default_clean_runner(argv: list[str]) -> CleanResult:
-    target = lifecycle_reconcile._path_key(argv[-2])
+    path_positions = [
+        index for index, value in enumerate(argv) if value == "--path"
+    ]
+    if len(path_positions) != 1 or path_positions[0] + 1 >= len(argv):
+        raise ValueError("clean argv must contain exactly one --path value")
+    target = lifecycle_reconcile._path_key(argv[path_positions[0] + 1])
     before = _receipt_files()
     result = subprocess.run(
         argv,
@@ -692,6 +705,12 @@ def _apply_remove_worktree(
         "--path",
         action["target"],
         "--bundle",
+        "--expected-branch",
+        action["live_git"]["branch"],
+        "--expected-head",
+        action["live_git"]["head"],
+        "--expected-common-dir",
+        action["live_git"]["git_common_dir"],
     ]
     try:
         result = clean_runner(argv)
@@ -737,14 +756,14 @@ def apply(
         raise RepairRefused("a canonical plan digest is required")
     action = _fresh_action(plan_digest, action_kind, authorization)
     if action_kind == "retire-bookkeeping":
-        return _apply_retire_bookkeeping(
+        applied = _apply_retire_bookkeeping(
             action,
             plan_digest=plan_digest,
             authorization=authorization,
             fault=fault,
         )
-    if action_kind == "remove-worktree":
-        return _apply_remove_worktree(
+    elif action_kind == "remove-worktree":
+        applied = _apply_remove_worktree(
             action,
             plan_digest=plan_digest,
             authorization=authorization,
@@ -752,4 +771,14 @@ def apply(
             clean_runner=clean_runner or _default_clean_runner,
             fault=fault,
         )
-    raise RepairRefused("unknown integrity repair action")
+    else:
+        raise RepairRefused("unknown integrity repair action")
+
+    # The side effect and its audit/receipt are already committed. A fresh plan
+    # is mandatory in every successful response; if rebuilding fails, preserve
+    # the truthful applied outcome in a typed error rather than implying rollback.
+    try:
+        fresh_plan = build_plan()
+    except Exception as exc:
+        raise RepairAppliedPlanUnavailable(applied) from exc
+    return {**applied, "fresh_plan": fresh_plan}

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from engine import integrity, paths
+from engine import cli, integrity, integrity_repair, paths
 from engine.tests.helpers import EngineTestCase
 
 
@@ -221,6 +224,78 @@ class TestIntegrityCli(EngineTestCase):
         self.assertEqual(console.returncode, 2)
         self.assertIn("awa-integrity-console/v1", console.stdout)
         self.assertNotIn("invalid choice", console.stderr)
+
+    def test_repair_apply_emits_fresh_plan_for_both_action_kinds(self):
+        fresh_plan = {
+            "schema": integrity_repair.PLAN_SCHEMA,
+            "plan_digest": "b" * 64,
+            "actions": [],
+        }
+        for kind in sorted(integrity_repair.ACTION_KINDS):
+            with self.subTest(kind=kind):
+                args = cli.build_parser().parse_args(
+                    [
+                        "integrity",
+                        "repair",
+                        "apply",
+                        "--plan-digest",
+                        "a" * 64,
+                        "--action",
+                        kind,
+                        "--authorization",
+                        "authorization",
+                    ]
+                )
+                stdout = io.StringIO()
+                with mock.patch.object(
+                    cli.integrity_repair_mod,
+                    "apply",
+                    return_value={
+                        "schema": "awa-integrity-repair-result/v1",
+                        "kind": kind,
+                        "result": "retired" if kind == "retire-bookkeeping" else "removed",
+                        "fresh_plan": fresh_plan,
+                    },
+                ), contextlib.redirect_stdout(stdout):
+                    code = args.fn(args)
+
+                self.assertEqual(code, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertIs(payload["ok"], True)
+                self.assertEqual(payload["fresh_plan"], fresh_plan)
+
+    def test_repair_apply_reports_already_applied_when_fresh_plan_fails(self):
+        args = cli.build_parser().parse_args(
+            [
+                "integrity",
+                "repair",
+                "apply",
+                "--plan-digest",
+                "a" * 64,
+                "--action",
+                "retire-bookkeeping",
+                "--authorization",
+                "authorization",
+            ]
+        )
+        applied = {
+            "schema": "awa-integrity-repair-result/v1",
+            "kind": "retire-bookkeeping",
+            "result": "retired",
+        }
+        stdout = io.StringIO()
+        with mock.patch.object(
+            cli.integrity_repair_mod,
+            "apply",
+            side_effect=integrity_repair.RepairAppliedPlanUnavailable(applied),
+        ), contextlib.redirect_stdout(stdout):
+            code = args.fn(args)
+
+        self.assertEqual(code, 3)
+        payload = json.loads(stdout.getvalue())
+        self.assertIs(payload["ok"], False)
+        self.assertIs(payload["applied"], True)
+        self.assertEqual(payload["applied_result"], applied)
 
 
 if __name__ == "__main__":

@@ -211,6 +211,17 @@ def cmd_integrity(args: argparse.Namespace) -> int:
                     args.action,
                     args.authorization,
                 )
+            except integrity_repair_mod.RepairAppliedPlanUnavailable as exc:
+                return _emit(
+                    {
+                        "schema": "awa-integrity-repair-result/v1",
+                        "ok": False,
+                        "applied": True,
+                        "error": str(exc),
+                        "applied_result": exc.applied_result,
+                    },
+                    code=3,
+                )
             except integrity_repair_mod.RepairRefused as exc:
                 return _emit(
                     {

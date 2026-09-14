@@ -21,7 +21,7 @@ from engine import (
     recovery,
     state as state_mod,
 )
-from engine.tests.helpers import EngineTestCase
+from engine.tests.helpers import EngineTestCase, commit_all, git
 
 
 def _observation(
@@ -96,7 +96,11 @@ class TestIntegrityRepair(EngineTestCase):
         with mock.patch.object(
             lifecycle_reconcile,
             "_observations",
-            return_value=[self.retire_observation],
+            side_effect=[
+                [self.retire_observation],
+                [self.retire_observation],
+                [],
+            ],
         ):
             return integrity_repair.apply(
                 plan["plan_digest"],
@@ -239,6 +243,8 @@ class TestIntegrityRepair(EngineTestCase):
         result = self._apply_retire(plan)
 
         self.assertEqual(result["result"], "retired")
+        self.assertEqual(result["fresh_plan"]["schema"], integrity_repair.PLAN_SCHEMA)
+        self.assertEqual(result["fresh_plan"]["actions"], [])
         self.assertFalse(os.path.lexists(self.target))
         self.assertEqual(marker.read_text(encoding="utf-8"), "untouched")
         with state_mod.State() as state:
@@ -346,9 +352,22 @@ class TestIntegrityRepair(EngineTestCase):
                 clean_runner=clean_runner,
             )
         self.assertEqual(result["result"], "removed")
+        self.assertEqual(result["fresh_plan"]["schema"], integrity_repair.PLAN_SCHEMA)
         self.assertEqual(calls[0], ("capture", action["target"]))
         clean_argv = calls[1][1]
-        self.assertEqual(clean_argv[-4:], ("clean", "--path", action["target"], "--bundle"))
+        self.assertEqual(clean_argv[2:6], ("clean", "--path", action["target"], "--bundle"))
+        expected_flags = {
+            clean_argv[index]: clean_argv[index + 1]
+            for index in range(6, len(clean_argv), 2)
+        }
+        self.assertEqual(
+            expected_flags,
+            {
+                "--expected-branch": action["live_git"]["branch"],
+                "--expected-head": action["live_git"]["head"],
+                "--expected-common-dir": action["live_git"]["git_common_dir"],
+            },
+        )
         self.assertNotIn("--force", clean_argv)
         self.assertNotIn("--delete-branch", clean_argv)
 
@@ -367,6 +386,8 @@ class TestIntegrityRepair(EngineTestCase):
             )
 
         self.assertEqual(result["result"], "removed")
+        self.assertEqual(result["fresh_plan"]["schema"], integrity_repair.PLAN_SCHEMA)
+        self.assertEqual(result["fresh_plan"]["actions"], [])
         self.assertFalse(os.path.lexists(action["target"]))
         manifests = list(paths.recovery_dir().glob("*.worktree.manifest.json"))
         self.assertEqual(len(manifests), 1)
@@ -382,6 +403,37 @@ class TestIntegrityRepair(EngineTestCase):
         self.assertEqual(
             receipt["flags"],
             {"bundle": True, "force": False, "delete_branch": False},
+        )
+
+    def test_remove_worktree_expected_identity_race_refuses_before_side_effect(self):
+        action, observation = self._remove_action()
+        plan = self._plan(observation)
+        target = action["target"]
+        repo = str(Path(action["live_git"]["git_common_dir"]).parent)
+
+        def race_then_real_clean(argv):
+            Path(target, "race.txt").write_text("changed head\n", encoding="utf-8")
+            commit_all(target, "advance during integrity-clean handoff")
+            git(repo, "merge", "--ff-only", action["live_git"]["branch"])
+            return integrity_repair._default_clean_runner(argv)
+
+        with mock.patch.object(
+            lifecycle_reconcile,
+            "_observations",
+            return_value=[observation],
+        ):
+            with self.assertRaises(integrity_repair.RepairRefused):
+                integrity_repair.apply(
+                    plan["plan_digest"],
+                    "remove-worktree",
+                    plan["actions"][0]["authorization"],
+                    clean_runner=race_then_real_clean,
+                )
+
+        self.assertTrue(Path(target).is_dir())
+        self.assertIn(
+            target,
+            git(repo, "worktree", "list", "--porcelain").stdout,
         )
 
     def test_remove_worktree_refuses_active_root(self):
@@ -494,6 +546,27 @@ class TestIntegrityRepair(EngineTestCase):
                         },
                     ),
                 )
+
+    def test_post_success_plan_failure_reports_applied_outcome(self):
+        plan = self._plan()
+        action = plan["actions"][0]
+        with mock.patch.object(
+            integrity_repair,
+            "build_plan",
+            side_effect=[plan, plan, RuntimeError("injected plan failure")],
+        ):
+            with self.assertRaises(
+                integrity_repair.RepairAppliedPlanUnavailable
+            ) as raised:
+                integrity_repair.apply(
+                    plan["plan_digest"],
+                    action["kind"],
+                    action["authorization"],
+                )
+
+        self.assertEqual(raised.exception.applied_result["result"], "retired")
+        with state_mod.State() as state:
+            self.assertEqual(state.get_lease("awa1-repair")["status"], "retired")
 
     def _remove_action(self):
         repo = self.make_seeded_repo("remove-repo")
