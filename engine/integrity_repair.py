@@ -55,11 +55,19 @@ class RepairRefused(RuntimeError):
 
 
 class RepairAppliedPlanUnavailable(RuntimeError):
-    """The repair committed, but its mandatory post-success plan could not render."""
+    """The repair applied, but mandatory post-effect bookkeeping did not finish."""
 
-    def __init__(self, applied_result: dict):
-        super().__init__("repair applied but fresh post-success plan is unavailable")
+    def __init__(
+        self,
+        applied_result: dict,
+        *,
+        incomplete_stage: str = "fresh-plan",
+    ):
+        super().__init__(
+            f"repair applied but {incomplete_stage} did not complete"
+        )
         self.applied_result = applied_result
+        self.incomplete_stage = incomplete_stage
 
 
 @dataclass(frozen=True)
@@ -621,6 +629,71 @@ def _valid_removed_receipt(receipt: object, action: dict) -> bool:
     )
 
 
+def _remove_audit_detail(
+    action: dict,
+    *,
+    plan_digest: str,
+    authorization: str,
+    capture: dict,
+    phase: str,
+    receipt: dict | None = None,
+) -> dict:
+    rollback = {
+        "recovery_artifact_id": capture["artifact_id"],
+        "recovery_sha256": capture["sha256"],
+    }
+    if receipt is not None:
+        rollback["clean_receipt_id"] = receipt["receipt_id"]
+    return {
+        "schema": "awa-integrity-repair-audit/v1",
+        "phase": phase,
+        "action_id": action["action_id"],
+        "plan_digest": plan_digest,
+        "authorization_sha256": hashlib.sha256(
+            authorization.encode("utf-8")
+        ).hexdigest(),
+        "expected_identity": action["live_git"],
+        "rollback": rollback,
+    }
+
+
+def _record_remove_intent(
+    action: dict,
+    *,
+    plan_digest: str,
+    authorization: str,
+    capture: dict,
+) -> None:
+    connection = _write_connection()
+    committed = False
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        now = state_mod.now_iso()
+        detail = _remove_audit_detail(
+            action,
+            plan_digest=plan_digest,
+            authorization=authorization,
+            capture=capture,
+            phase="intent",
+        )
+        connection.execute(
+            "INSERT INTO events(ts,lease_id,kind,detail) VALUES(?,?,?,?)",
+            (
+                now,
+                None,
+                "integrity_repair_remove_worktree_intent",
+                json.dumps(detail, sort_keys=True, separators=(",", ":")),
+            ),
+        )
+        connection.execute("COMMIT")
+        committed = True
+    finally:
+        if not committed:
+            with contextlib.suppress(sqlite3.Error):
+                connection.execute("ROLLBACK")
+        connection.close()
+
+
 def _record_remove_audit(
     action: dict,
     *,
@@ -635,19 +708,14 @@ def _record_remove_audit(
     try:
         connection.execute("BEGIN IMMEDIATE")
         now = state_mod.now_iso()
-        detail = {
-            "schema": "awa-integrity-repair-audit/v1",
-            "action_id": action["action_id"],
-            "plan_digest": plan_digest,
-            "authorization_sha256": hashlib.sha256(
-                authorization.encode("utf-8")
-            ).hexdigest(),
-            "rollback": {
-                "recovery_artifact_id": capture["artifact_id"],
-                "recovery_sha256": capture["sha256"],
-                "clean_receipt_id": receipt["receipt_id"],
-            },
-        }
+        detail = _remove_audit_detail(
+            action,
+            plan_digest=plan_digest,
+            authorization=authorization,
+            capture=capture,
+            phase="completed",
+            receipt=receipt,
+        )
         connection.execute(
             "INSERT INTO events(ts,lease_id,kind,detail) VALUES(?,?,?,?)",
             (
@@ -692,6 +760,18 @@ def _apply_remove_worktree(
     ):
         raise RepairRefused("worktree evidence changed; create a fresh plan")
 
+    try:
+        _record_remove_intent(
+            action,
+            plan_digest=plan_digest,
+            authorization=authorization,
+            capture=capture_metadata,
+        )
+    except Exception as exc:
+        raise RepairRefused(
+            "repair audit intent could not be recorded; worktree preserved"
+        ) from exc
+
     clean_script = (
         Path(__file__).resolve().parent.parent
         / "kernel"
@@ -719,15 +799,7 @@ def _apply_remove_worktree(
     if result.returncode != 0 or not _valid_removed_receipt(result.receipt, action):
         raise RepairRefused("the existing clean safety path refused or was not receipted")
 
-    _record_remove_audit(
-        action,
-        plan_digest=plan_digest,
-        authorization=authorization,
-        capture=capture_metadata,
-        receipt=result.receipt,
-        fault=fault,
-    )
-    return {
+    applied = {
         "schema": "awa-integrity-repair-result/v1",
         "kind": "remove-worktree",
         "action_id": action["action_id"],
@@ -736,6 +808,21 @@ def _apply_remove_worktree(
         "clean_receipt_id": result.receipt["receipt_id"],
         "fresh_plan_required": True,
     }
+    try:
+        _record_remove_audit(
+            action,
+            plan_digest=plan_digest,
+            authorization=authorization,
+            capture=capture_metadata,
+            receipt=result.receipt,
+            fault=fault,
+        )
+    except Exception as exc:
+        raise RepairAppliedPlanUnavailable(
+            applied,
+            incomplete_stage="audit-completion",
+        ) from exc
+    return applied
 
 
 def apply(
@@ -780,5 +867,8 @@ def apply(
     try:
         fresh_plan = build_plan()
     except Exception as exc:
-        raise RepairAppliedPlanUnavailable(applied) from exc
+        raise RepairAppliedPlanUnavailable(
+            applied,
+            incomplete_stage="fresh-plan",
+        ) from exc
     return {**applied, "fresh_plan": fresh_plan}

@@ -365,6 +365,8 @@ exec "$REAL_GIT" "$@"
                     "head": "f" * 40,
                     "common-dir": str(Path(self._tmp.name) / "different.git"),
                 }[dimension]
+                if dimension == "common-dir":
+                    Path(expected[dimension]).mkdir()
 
                 result = self.run_clean(
                     wt,
@@ -391,3 +393,39 @@ exec "$REAL_GIT" "$@"
                     "--porcelain",
                 ).stdout
                 self.assertIn(str(Path(wt).resolve()), registered)
+
+    def test_equivalent_expected_common_dir_alias_allows_removal(self) -> None:
+        repo, wt = self.single_commit_squash(
+            "expected-common-alias",
+            "feat/expected-common-alias",
+        )
+        branch = git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        head = git(wt, "rev-parse", "HEAD").stdout.strip()
+        common_dir = Path(
+            git(
+                wt,
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ).stdout.strip()
+        )
+        common_alias = Path(self._tmp.name) / "common-dir-alias"
+        common_alias.symlink_to(common_dir, target_is_directory=True)
+
+        result = self.run_clean(
+            wt,
+            "--bundle",
+            "--expected-branch",
+            branch,
+            "--expected-head",
+            head,
+            "--expected-common-dir",
+            str(common_alias),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(Path(wt).exists())
+        self.assertNotIn(
+            str(Path(wt).resolve()),
+            git(repo, "worktree", "list", "--porcelain").stdout,
+        )

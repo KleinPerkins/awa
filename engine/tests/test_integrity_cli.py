@@ -297,6 +297,45 @@ class TestIntegrityCli(EngineTestCase):
         self.assertIs(payload["applied"], True)
         self.assertEqual(payload["applied_result"], applied)
 
+    def test_repair_apply_reports_post_removal_audit_failure_without_traceback(self):
+        args = cli.build_parser().parse_args(
+            [
+                "integrity",
+                "repair",
+                "apply",
+                "--plan-digest",
+                "a" * 64,
+                "--action",
+                "remove-worktree",
+                "--authorization",
+                "authorization",
+            ]
+        )
+        applied = {
+            "schema": "awa-integrity-repair-result/v1",
+            "kind": "remove-worktree",
+            "result": "removed",
+            "recovery_artifact_id": "artifact-1",
+            "clean_receipt_id": "receipt-1",
+        }
+        stdout = io.StringIO()
+        with mock.patch.object(
+            cli.integrity_repair_mod,
+            "apply",
+            side_effect=integrity_repair.RepairAppliedPlanUnavailable(
+                applied,
+                incomplete_stage="audit-completion",
+            ),
+        ), contextlib.redirect_stdout(stdout):
+            code = args.fn(args)
+
+        self.assertEqual(code, 3)
+        payload = json.loads(stdout.getvalue())
+        self.assertIs(payload["applied"], True)
+        self.assertEqual(payload["incomplete_stage"], "audit-completion")
+        self.assertEqual(payload["applied_result"], applied)
+        self.assertNotIn("Traceback", stdout.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

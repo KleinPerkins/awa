@@ -1304,13 +1304,20 @@ clean_worktree() {
   # callers omit the optional all-or-none guard and retain byte-for-byte behavior.
   if [ "$expected_clean_count" -eq 3 ]; then
     local recheck_branch="" recheck_head="" recheck_common_dir=""
+    local expected_common_canonical="" recheck_common_canonical=""
     recheck_branch="$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
     recheck_head="$(git -C "$path" rev-parse HEAD 2>/dev/null || true)"
     recheck_common_dir="$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    # Use the same physical-directory canonicalization primitive as clean's target path.
+    # This treats aliases such as /var and /private/var as one identity without accepting
+    # an absent or genuinely different common directory.
+    expected_common_canonical="$(cd "$expected_clean_common_dir" 2>/dev/null && pwd -P || true)"
+    recheck_common_canonical="$(cd "$recheck_common_dir" 2>/dev/null && pwd -P || true)"
     if [ -z "$recheck_branch" ] || [ -z "$recheck_head" ] || [ -z "$recheck_common_dir" ] || \
+       [ -z "$expected_common_canonical" ] || [ -z "$recheck_common_canonical" ] || \
        [ "$recheck_branch" != "$expected_clean_branch" ] || \
        [ "$recheck_head" != "$expected_clean_head" ] || \
-       [ "$recheck_common_dir" != "$expected_clean_common_dir" ]; then
+       [ "$recheck_common_canonical" != "$expected_common_canonical" ]; then
       clean_set_disposition refused expected_identity_mismatch \
         "expected identity changed before removal — worktree preserved"
       die "refusing to remove worktree — expected identity changed before removal"

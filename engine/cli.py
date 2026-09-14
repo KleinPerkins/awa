@@ -217,6 +217,7 @@ def cmd_integrity(args: argparse.Namespace) -> int:
                         "schema": "awa-integrity-repair-result/v1",
                         "ok": False,
                         "applied": True,
+                        "incomplete_stage": exc.incomplete_stage,
                         "error": str(exc),
                         "applied_result": exc.applied_result,
                     },

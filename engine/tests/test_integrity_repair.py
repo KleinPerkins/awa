@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import unittest
 from dataclasses import replace
@@ -404,6 +405,29 @@ class TestIntegrityRepair(EngineTestCase):
             receipt["flags"],
             {"bundle": True, "force": False, "delete_branch": False},
         )
+        with state_mod.State() as state:
+            events = [
+                event
+                for event in state.events()
+                if event["kind"].startswith("integrity_repair_remove_worktree")
+            ]
+        self.assertEqual(
+            [event["kind"] for event in events],
+            [
+                "integrity_repair_remove_worktree",
+                "integrity_repair_remove_worktree_intent",
+            ],
+        )
+        completion = json.loads(events[0]["detail"])
+        intent = json.loads(events[1]["detail"])
+        self.assertEqual(completion["phase"], "completed")
+        self.assertEqual(intent["phase"], "intent")
+        self.assertEqual(
+            completion["rollback"]["clean_receipt_id"],
+            receipt["receipt_id"],
+        )
+        self.assertNotIn(plan["actions"][0]["authorization"], events[0]["detail"])
+        self.assertNotIn(plan["actions"][0]["authorization"], events[1]["detail"])
 
     def test_remove_worktree_expected_identity_race_refuses_before_side_effect(self):
         action, observation = self._remove_action()
@@ -435,6 +459,118 @@ class TestIntegrityRepair(EngineTestCase):
             target,
             git(repo, "worktree", "list", "--porcelain").stdout,
         )
+
+    def test_remove_worktree_audit_failure_reports_applied_and_is_not_retried(self):
+        action, observation = self._remove_action()
+        plan = self._plan(observation)
+        authorization = plan["actions"][0]["authorization"]
+
+        with mock.patch.object(
+            lifecycle_reconcile,
+            "_observations",
+            return_value=[observation],
+        ), mock.patch.object(
+            integrity_repair,
+            "_record_remove_audit",
+            side_effect=sqlite3.OperationalError("injected audit failure"),
+        ):
+            with self.assertRaises(
+                integrity_repair.RepairAppliedPlanUnavailable
+            ) as raised:
+                integrity_repair.apply(
+                    plan["plan_digest"],
+                    "remove-worktree",
+                    authorization,
+                )
+
+        applied = raised.exception.applied_result
+        self.assertEqual(applied["result"], "removed")
+        self.assertTrue(applied["recovery_artifact_id"])
+        self.assertTrue(applied["clean_receipt_id"])
+        self.assertEqual(raised.exception.incomplete_stage, "audit-completion")
+        self.assertFalse(Path(action["target"]).exists())
+        with state_mod.State() as state:
+            events = state.events()
+        intents = [
+            event
+            for event in events
+            if event["kind"] == "integrity_repair_remove_worktree_intent"
+        ]
+        completions = [
+            event
+            for event in events
+            if event["kind"] == "integrity_repair_remove_worktree"
+        ]
+        self.assertEqual(len(intents), 1)
+        self.assertEqual(completions, [])
+        intent = json.loads(intents[0]["detail"])
+        self.assertEqual(intent["phase"], "intent")
+        self.assertEqual(
+            intent["rollback"]["recovery_artifact_id"],
+            applied["recovery_artifact_id"],
+        )
+        self.assertNotIn(authorization, intents[0]["detail"])
+
+        retry_clean = mock.Mock()
+        with mock.patch.object(
+            lifecycle_reconcile,
+            "_observations",
+            return_value=[observation],
+        ):
+            with self.assertRaises(integrity_repair.RepairRefused):
+                integrity_repair.apply(
+                    plan["plan_digest"],
+                    "remove-worktree",
+                    authorization,
+                    clean_runner=retry_clean,
+                )
+        retry_clean.assert_not_called()
+
+    def test_remove_worktree_post_audit_fault_reports_applied_intent_only(self):
+        action, observation = self._remove_action()
+        plan = self._plan(observation)
+        authorization = plan["actions"][0]["authorization"]
+
+        def fault(point):
+            if point == "remove-after-audit":
+                raise RuntimeError("injected post-audit fault")
+
+        with mock.patch.object(
+            lifecycle_reconcile,
+            "_observations",
+            return_value=[observation],
+        ):
+            with self.assertRaises(
+                integrity_repair.RepairAppliedPlanUnavailable
+            ) as raised:
+                integrity_repair.apply(
+                    plan["plan_digest"],
+                    "remove-worktree",
+                    authorization,
+                    fault=fault,
+                )
+
+        applied = raised.exception.applied_result
+        self.assertEqual(applied["result"], "removed")
+        self.assertEqual(raised.exception.incomplete_stage, "audit-completion")
+        self.assertFalse(Path(action["target"]).exists())
+        with state_mod.State() as state:
+            events = state.events()
+        self.assertEqual(
+            [
+                event["kind"]
+                for event in events
+                if event["kind"].startswith("integrity_repair_remove_worktree")
+            ],
+            ["integrity_repair_remove_worktree_intent"],
+        )
+        detail = json.loads(events[0]["detail"])
+        self.assertEqual(detail["phase"], "intent")
+        self.assertEqual(
+            detail["rollback"]["recovery_artifact_id"],
+            applied["recovery_artifact_id"],
+        )
+        self.assertNotIn(authorization, events[0]["detail"])
 
     def test_remove_worktree_refuses_active_root(self):
         _action, observation = self._remove_action()
