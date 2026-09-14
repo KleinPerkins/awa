@@ -1,11 +1,11 @@
-# Noexec repair process-profile evidence — 2026-09-03
+# Current source-checker process-profile evidence — 2026-09-14
 
 ## Purpose
 
-This is the fresh bounded process observation required after the guard-boundary
-producer changed during the AWA noexec repair. It replaces no historical result
-and does not alter the hypothesis-only timing or inventory fields in
-`performance-baseline.v1.json`.
+This is the fresh bounded process observation required after M2.2 canonicalized
+the digest-bound expected common-dir guard. It replaces the prior observation at
+this canonical evidence path and does not alter the hypothesis-only timing or
+inventory fields in `performance-baseline.v1.json`.
 
 ## Producer
 
@@ -16,12 +16,12 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B \
   -m engine.tests.guard_boundary_profile \
   --boundary source \
   --count-git \
-  --json-out /tmp/awa-v4-live-evidence-process-profile.json
+  --json-out /tmp/awa-m2-2-audit-alias-process-profile.json
 ```
 
-- Measured at: `2026-09-04T00:07:41Z`
-- Branch: `docs/awa-v4-live-evidence-20260903`
-- Base HEAD: `3debd94d5dd1385212aded95398abfe15e0346ba`
+- Measured at: `2026-09-14T03:33:44Z`
+- Branch: `feat/awa-integrity-m2-2-repair`
+- Base HEAD: `9849e34dc46b9754914e52cb7b9b810a9f5f5f4f`
 - Platform: `macOS-26.6.2-arm64-arm-64bit-Mach-O`
 - Python: `3.14.6`
 - Git: `git version 2.50.1 (Apple Git-155)`
@@ -32,8 +32,8 @@ path and its current bytes in sorted order, each length-prefixed with eight
 big-endian bytes. It excludes only the generated baseline and this evidence
 record, so adding those two outputs cannot change the measured-subject identity.
 
-- Measured-subject files: `260`
-- Measured-subject SHA-256: `56723f3a2ac72c8ef9ceaaf58c849f357e905e934bcfb17b752395a151ac8553`
+- Measured-subject files: `264`
+- Measured-subject SHA-256: `2131af9746b42b5f71fd02fbc9a43089082217837129ce1d9cca68fefab00b0e`
 - Excluded paths:
   - `engine/tests/performance-baseline.v1.json`
   - `live-verify/RESULTS-noexec-repair-process-profile-20260903.md`
@@ -45,7 +45,7 @@ record, so adding those two outputs cannot change the measured-subject identity.
 - Combined performance producer: `da65feeb123cc1e8164d73009abc65a94202c50298b085eb29b88a49be3a5a7b`
 - Case manifest: `eb4e7662f096cecc6d0a99717d71e1868552596f22abe1db61536e61d4476435`
 - Source guard: `aeee0c147f08976f20ea600d6fd3c891030346554871bdf7f39b6bf1e42baedf`
-- Source checker: `d8fa3055714d785e84b5650b9a10fdfec4e467b0454074ccc76ff64b3231315e`
+- Source checker: `de08a4ba9723f6d894da954dedbcbf80531bb757ec1570165850bac15121f4be`
 - Default policy: `dbc06510525f69a5cd51d6f7c8e9a0c9ea6d888e35a854f45a06bc4168337870`
 
 ## Result

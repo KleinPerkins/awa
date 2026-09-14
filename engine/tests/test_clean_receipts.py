@@ -375,6 +375,40 @@ class CleanReceiptsTest(EngineTestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(len(self.receipts()), 1, "the EXIT trap must emit exactly one receipt")
 
+    def test_expected_identity_mismatch_receipted_before_removal(self) -> None:
+        repo, wt = self.safe_worktree("expected-identity-receipt")
+        branch = git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        common_dir = git(
+            wt,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ).stdout.strip()
+
+        result = self.run_clean(
+            "--path",
+            wt,
+            "--bundle",
+            "--expected-branch",
+            branch,
+            "--expected-head",
+            "f" * 40,
+            "--expected-common-dir",
+            common_dir,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        receipt = self.only_receipt(result)
+        self.assertEqual(
+            (receipt["disposition"], receipt["reason_code"]),
+            ("refused", "expected_identity_mismatch"),
+        )
+        self.assertTrue(Path(wt).is_dir())
+        self.assertIn(
+            str(Path(wt).resolve()),
+            git(repo, "worktree", "list", "--porcelain").stdout,
+        )
+
     # ---- coverage/meta: the reason_code universe is LOCKED -------------------
     def test_reason_code_universe_is_locked(self) -> None:
         """Every disposition/reason authored in the script must be a KNOWN, receipt-bearing path.
@@ -405,6 +439,7 @@ class CleanReceiptsTest(EngineTestCase):
             # the shared write-serialization lock held across the destructive section; on contention
             # the clean refuses fail-safe and preserves the worktree (covered behaviorally below).
             ("refused", "clean_lock_busy"),
+            ("refused", "expected_identity_mismatch"),
             # Root-Bound Worktree Finish (Phase 1) terminal paths — additive-within-v1 (2026-07-10).
             # Each is a receipt-bearing `clean --finish-current` outcome; covered behaviorally in
             # engine/tests/test_finish_kernel.py.

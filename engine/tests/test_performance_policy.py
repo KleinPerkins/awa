@@ -26,9 +26,9 @@ BASELINE_PATH = Path(__file__).with_name("performance-baseline.v1.json")
 NOEXEC_EVIDENCE = (
     "live-verify/RESULTS-noexec-repair-process-profile-20260903.md"
 )
-NOEXEC_HISTORICAL_SUBJECT_FILES = 260
+NOEXEC_HISTORICAL_SUBJECT_FILES = 264
 NOEXEC_HISTORICAL_SUBJECT_SHA256 = (
-    "56723f3a2ac72c8ef9ceaaf58c849f357e905e934bcfb17b752395a151ac8553"
+    "2131af9746b42b5f71fd02fbc9a43089082217837129ce1d9cca68fefab00b0e"
 )
 
 

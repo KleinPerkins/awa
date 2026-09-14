@@ -88,6 +88,11 @@ clean options:
   --bundle         archive git-ignored local files to the recovery dir before removal (X3)
   --force          discard git-ignored files (no bundle) and pass --force to worktree remove
   --delete-branch  also delete the local branch when it still points at captured HEAD
+  --expected-branch NAME
+  --expected-head SHA
+  --expected-common-dir PATH
+                    optional all-or-none identity guard; rechecked under the existing
+                    common-dir lock immediately before ordinary clean removal
 
   --finish-current       finish (discard + remove) the CURRENT linked worktree (takes NO --path;
                          the target is the physical current dir, which must be a linked worktree).
@@ -1045,12 +1050,16 @@ clean_worktree() {
   local path="" force=0 delete_branch=0 bundle=0
   local finish_current=0 preview=0 authorization="" conversation_id="" have_auth=0
   local expected_nonce="" expected_generation=""
+  local expected_clean_branch="" expected_clean_head="" expected_clean_common_dir=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --path) shift; path="${1:?--path requires a path}" ;;
       --force) force=1 ;;
       --bundle) bundle=1 ;;
       --delete-branch) delete_branch=1 ;;
+      --expected-branch) shift; expected_clean_branch="${1:?--expected-branch requires a value}" ;;
+      --expected-head) shift; expected_clean_head="${1:?--expected-head requires a value}" ;;
+      --expected-common-dir) shift; expected_clean_common_dir="${1:?--expected-common-dir requires a value}" ;;
       --finish-current) finish_current=1 ;;
       --preview) preview=1 ;;
       --authorization) shift; authorization="${1?--authorization requires a value}"; have_auth=1 ;;
@@ -1065,6 +1074,12 @@ clean_worktree() {
 
   # Route the root-bound finish path separately from the ordinary `clean --path` lifecycle flow.
   if [ "$finish_current" -eq 1 ]; then
+    if [ -n "$expected_clean_branch" ] || [ -n "$expected_clean_head" ] || \
+       [ -n "$expected_clean_common_dir" ]; then
+      clean_set_disposition refused finish_bad_args \
+        "--expected-branch/--expected-head/--expected-common-dir apply only to ordinary clean --path"
+      die "--expected-branch/--expected-head/--expected-common-dir require ordinary clean --path"
+    fi
     clean_finish_current "$preview" "$have_auth" "$authorization" "$conversation_id" "$path" \
       "$expected_nonce" "$expected_generation"
     return $?
@@ -1075,6 +1090,15 @@ clean_worktree() {
     clean_set_disposition refused finish_bad_args \
       "--preview/--authorization/--conversation-id/--expected-* require --finish-current"
     die "--preview/--authorization/--conversation-id/--expected-* require --finish-current"
+  fi
+  local expected_clean_count=0
+  [ -n "$expected_clean_branch" ] && expected_clean_count=$((expected_clean_count + 1))
+  [ -n "$expected_clean_head" ] && expected_clean_count=$((expected_clean_count + 1))
+  [ -n "$expected_clean_common_dir" ] && expected_clean_count=$((expected_clean_count + 1))
+  if [ "$expected_clean_count" -ne 0 ] && [ "$expected_clean_count" -ne 3 ]; then
+    clean_set_disposition refused expected_identity_mismatch \
+      "ordinary clean expected identity must supply branch, HEAD, and common-dir together"
+    die "--expected-branch/--expected-head/--expected-common-dir must be supplied together"
   fi
 
   _CLEAN_PATH="$path"
@@ -1274,6 +1298,31 @@ clean_worktree() {
   # window, REFUSE (reason_code reactivated_during_clean). There is no OS lock (a deliberate
   # non-goal) — this shrinks the race window from minutes to ~microseconds, fail-closed.
   clean_active_root_gate "$path" recheck || return 1
+  # M2.2 digest-bound repair hands its authorized branch/HEAD/common-dir identity to THIS
+  # existing clean authority. Re-read all three while the ordinary clean common-dir lock is
+  # held, immediately before any AWA bookkeeping unlink or `git worktree remove`. Existing
+  # callers omit the optional all-or-none guard and retain byte-for-byte behavior.
+  if [ "$expected_clean_count" -eq 3 ]; then
+    local recheck_branch="" recheck_head="" recheck_common_dir=""
+    local expected_common_canonical="" recheck_common_canonical=""
+    recheck_branch="$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    recheck_head="$(git -C "$path" rev-parse HEAD 2>/dev/null || true)"
+    recheck_common_dir="$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    # Use the same physical-directory canonicalization primitive as clean's target path.
+    # This treats aliases such as /var and /private/var as one identity without accepting
+    # an absent or genuinely different common directory.
+    expected_common_canonical="$(cd "$expected_clean_common_dir" 2>/dev/null && pwd -P || true)"
+    recheck_common_canonical="$(cd "$recheck_common_dir" 2>/dev/null && pwd -P || true)"
+    if [ -z "$recheck_branch" ] || [ -z "$recheck_head" ] || [ -z "$recheck_common_dir" ] || \
+       [ -z "$expected_common_canonical" ] || [ -z "$recheck_common_canonical" ] || \
+       [ "$recheck_branch" != "$expected_clean_branch" ] || \
+       [ "$recheck_head" != "$expected_clean_head" ] || \
+       [ "$recheck_common_canonical" != "$expected_common_canonical" ]; then
+      clean_set_disposition refused expected_identity_mismatch \
+        "expected identity changed before removal — worktree preserved"
+      die "refusing to remove worktree — expected identity changed before removal"
+    fi
+  fi
   # Remove only the already-proven AWA lease, under the shared lifecycle lock, and revalidate it in
   # the helper immediately before unlink. The helper uses a no-follow directory fd and unlinks only
   # `lease.json`; it deliberately leaves the now-empty `.awa/` directory for Git to remove with the
