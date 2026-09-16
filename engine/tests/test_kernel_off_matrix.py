@@ -225,7 +225,12 @@ class KernelOffMatrixTest(EngineTestCase):
     # behavioral fail-safe (busy -> refuse, never force-remove) is proven in the finish/clean suites.
     # awa_roots.py uses the identical lock ABI only for the root-bound current-session CAS, so a
     # fire-and-forget sessionStart cannot erase a conversation attached by the first prompt.
-    _LOCK_EXEMPT = {"awa_finish.py", "awa_roots.py", "dev-worktree.sh"}
+    _LOCK_EXEMPT = {
+        "awa_finish.py",
+        "awa_handoff.py",
+        "awa_roots.py",
+        "dev-worktree.sh",
+    }
 
     # Darwin durability (2026-07-10) requires fcntl(fd, F_FULLFSYNC) — a physical write BARRIER,
     # not an advisory lock. awa_durability.py therefore imports fcntl SOLELY for F_FULLFSYNC. It is
@@ -258,9 +263,10 @@ class KernelOffMatrixTest(EngineTestCase):
     def test_no_advisory_lock_in_kernel_change_surface(self) -> None:
         """The KERNEL introduces no OS advisory lock ON WORKTREES. (The engine's pre-existing
         SQLite / common-dir advisory locks serialize writers and are out of scope — they do
-        NOT lock a worktree against removal. The finish core's shared write-serialization lock is
-        exempt for the same reason; see _LOCK_EXEMPT. awa_durability.py's fcntl is the F_FULLFSYNC
-        durability barrier — not a lock — and is carved out by _FSYNC_ONLY_FCNTL.)"""
+        NOT lock a worktree against removal. The finish core's shared write-serialization lock and
+        handoff's dedicated metadata CAS lock are exempt for the same reason; see _LOCK_EXEMPT.
+        awa_durability.py's fcntl is the F_FULLFSYNC durability barrier — not a lock — and is
+        carved out by _FSYNC_ONLY_FCNTL.)"""
         offenders = [f"{p.relative_to(_REPO_ROOT)}: {tok}"
                      for p in self._src_files(_KERNEL)
                      for tok in self._lock_offenders_in(

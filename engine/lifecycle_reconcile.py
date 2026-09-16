@@ -9,6 +9,7 @@ in classification.
 from __future__ import annotations
 
 import dataclasses
+import fnmatch
 import json
 import os
 import re
@@ -18,7 +19,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import integrity, paths
+from . import integrity, paths, policy as policy_mod
 
 
 SCHEMA = "awa-integrity-lifecycle/v1"
@@ -90,6 +91,67 @@ def _path_key(value: str) -> str:
 
 def _common_key(value: str) -> str:
     return _path_key(value) if value else ""
+
+
+def _policy_path() -> Path:
+    configured = os.environ.get("AWA_POLICY", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return integrity._source_root() / "kernel" / "policy" / "default-worktree-policy.yml"
+
+
+def _lifecycle_policy() -> policy_mod.PolicyConfig:
+    return policy_mod.load_lifecycle_policy(_policy_path())
+
+
+def _canonical_match_path(value: str | Path) -> str | None:
+    try:
+        expanded = os.path.expanduser(os.fspath(value))
+        if not os.path.isabs(expanded) or "\0" in expanded:
+            return None
+        return os.path.realpath(os.path.abspath(expanded))
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _canonical_pattern(pattern: str) -> str | None:
+    expanded = os.path.expanduser(pattern)
+    parts = Path(expanded).parts
+    first_glob = next(
+        (index for index, part in enumerate(parts) if any(c in part for c in "*?[")),
+        len(parts),
+    )
+    prefix_parts = parts[:first_glob]
+    suffix_parts = parts[first_glob:]
+    if not prefix_parts:
+        return None
+    prefix = os.path.join(*prefix_parts)
+    if expanded.startswith(os.sep) and not prefix.startswith(os.sep):
+        prefix = os.sep + prefix
+    canonical_prefix = _canonical_match_path(prefix)
+    if canonical_prefix is None:
+        return None
+    return os.path.join(canonical_prefix, *suffix_parts) if suffix_parts else canonical_prefix
+
+
+def is_no_touch(path: str | Path, policy: policy_mod.PolicyConfig) -> bool:
+    """Canonical lifecycle exclusion predicate; uncertainty always preserves."""
+    if not isinstance(policy, policy_mod.PolicyConfig) or not policy.lifecycle_no_touch_valid:
+        return True
+    candidate = _canonical_match_path(path)
+    if candidate is None:
+        return True
+    for raw in policy.lifecycle_no_touch:
+        pattern = _canonical_pattern(raw)
+        if pattern is None:
+            return True
+        if any(character in pattern for character in "*?["):
+            root_pattern = pattern[:-3] if pattern.endswith(os.sep + "**") else None
+            if fnmatch.fnmatch(candidate, pattern) or candidate == root_pattern:
+                return True
+        elif candidate == pattern:
+            return True
+    return False
 
 
 def _read_lease_snapshot() -> tuple[list[dict], bool]:
@@ -699,7 +761,10 @@ def _classification(
     return "preserve"
 
 
-def _classify_observation(observation: _Observation) -> Row:
+def _classify_observation(
+    observation: _Observation,
+    policy: policy_mod.PolicyConfig | None = None,
+) -> Row:
     topology = _score_topology(observation)
     content_safety = _score_content_safety(observation)
     activity = _score_activity(observation)
@@ -711,6 +776,12 @@ def _classify_observation(observation: _Observation) -> Row:
         activity=activity,
         cached_remote=cached_remote,
     )
+    configured_no_touch = is_no_touch(
+        observation.path,
+        policy if policy is not None else _lifecycle_policy(),
+    )
+    if configured_no_touch:
+        classification = "preserve"
     if classification not in CLASSIFICATIONS:
         raise RuntimeError("invalid lifecycle classification")
     lease = observation.lease if isinstance(observation.lease, dict) else {}
@@ -741,6 +812,7 @@ def _classify_observation(observation: _Observation) -> Row:
             "journal_or_recovery_ambiguous": (
                 observation.journal_or_recovery_ambiguous
             ),
+            "no_touch": configured_no_touch,
             # Diagnostic only: neither value is read by any score or predicate.
             "pid": lease.get("pid"),
             "boot_id": lease.get("boot_id"),
@@ -750,7 +822,8 @@ def _classify_observation(observation: _Observation) -> Row:
 
 def classify() -> list[Row]:
     """Return deterministic read-only lifecycle rows; perform no lifecycle action."""
+    policy = _lifecycle_policy()
     return sorted(
-        (_classify_observation(item) for item in _observations()),
+        (_classify_observation(item, policy) for item in _observations()),
         key=lambda row: (row.worktree_path, row.lease_id or ""),
     )

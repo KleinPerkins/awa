@@ -34,6 +34,47 @@ NOT_GIT = "not-git"
 # governs every read/write path: only `off` disables protection; ANY other value
 # (a typo, a removed legacy value, an unknown) resolves to ON/include.
 MODE_VALUES = ("on", "off")
+LIFECYCLE_NO_TOUCH_FIELD = "lifecycle_no_touch"
+
+
+def _valid_glob_syntax(value: str) -> bool:
+    """Reject malformed bracket expressions; fnmatch otherwise accepts them literally."""
+    escaped = False
+    open_bracket = False
+    for character in value:
+        if escaped:
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == "[":
+            if open_bracket:
+                return False
+            open_bracket = True
+        elif character == "]":
+            if not open_bracket:
+                return False
+            open_bracket = False
+    return not open_bracket
+
+
+def _lifecycle_no_touch(data: dict) -> tuple[list[str], bool]:
+    raw = data.get(LIFECYCLE_NO_TOUCH_FIELD, [])
+    if not isinstance(raw, list):
+        return [], False
+    result = []
+    for item in raw:
+        if (
+            not isinstance(item, str)
+            or not item
+            or "\0" in item
+            or item.startswith("~") and not item.startswith("~/")
+            or not (item.startswith("/") or item.startswith("~/"))
+            or ".." in Path(item[2:] if item.startswith("~/") else item).parts
+            or not _valid_glob_syntax(item)
+        ):
+            return [], False
+        result.append(item)
+    return result, True
 
 
 def _parse_mini_yaml(text: str) -> dict:
@@ -176,6 +217,10 @@ class PolicyConfig:
     read_only_paths: list[str] = field(default_factory=list)
     overrides_include: list[str] = field(default_factory=list)
     overrides_exclude: list[str] = field(default_factory=list)
+    # Absolute/~/absolute host-supplied exact paths or globs excluded from every
+    # lifecycle candidate and repair. The product ships no instance values.
+    lifecycle_no_touch: list[str] = field(default_factory=list)
+    lifecycle_no_touch_valid: bool = True
     # Explicit per-repo modes (rel-glob -> on|off). Empty by default so a host
     # that configures nothing behaves byte-for-byte as before.
     modes: dict = field(default_factory=dict)
@@ -192,9 +237,14 @@ class PolicyConfig:
         if not p.exists():
             return cls()
         data = _parse_mini_yaml(p.read_text(encoding="utf-8"))
+        return cls._from_data(data, path)
+
+    @classmethod
+    def _from_data(cls, data: dict, path: str | Path) -> "PolicyConfig":
         detectors = data.get("detectors", {}) if isinstance(data.get("detectors"), dict) else {}
         overrides = data.get("overrides", {}) if isinstance(data.get("overrides"), dict) else {}
         modes, default_mode = _resolve_modes(data, path)
+        lifecycle_no_touch, lifecycle_no_touch_valid = _lifecycle_no_touch(data)
         return cls(
             version=int(str(data.get("version", 1)) or 1),
             governed_roots=list(data.get("governed_roots", []) or []),
@@ -207,9 +257,23 @@ class PolicyConfig:
             read_only_paths=list(detectors.get("read_only_paths", []) or []),
             overrides_include=list(overrides.get("include", []) or []),
             overrides_exclude=list(overrides.get("exclude", []) or []),
+            lifecycle_no_touch=lifecycle_no_touch,
+            lifecycle_no_touch_valid=lifecycle_no_touch_valid,
             modes=modes,
             default_mode=default_mode,
         )
+
+
+def load_lifecycle_policy(path: str | Path) -> PolicyConfig:
+    """Safely load host lifecycle policy; uncertainty means preserve every path."""
+    try:
+        text = _read_regular_text(path)
+        data = _parse_mini_yaml(text)
+        if not isinstance(data, dict):
+            raise ValueError("policy is not a mapping")
+        return PolicyConfig._from_data(data, path)
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return PolicyConfig(lifecycle_no_touch_valid=False)
 
 
 @dataclass

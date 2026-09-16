@@ -42,6 +42,10 @@ default_mode: on
 include: []
 exclude: []
 
+# Host-supplied absolute or ~/absolute exact paths/globs that lifecycle
+# reconciliation and integrity repair must preserve. No product instances.
+lifecycle_no_touch: []
+
 detectors:
   # A repo that ships its OWN governance marker is self-governed -> excluded GENERICALLY.
   # This is how a self-governed sibling repo is left alone WITHOUT ever naming it.

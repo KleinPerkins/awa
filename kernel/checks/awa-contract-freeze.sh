@@ -19,6 +19,7 @@ GUARD="$AWA_HOME/kernel/hooks/worktree-guard.sh"
 COMPOSITE_GUARD="$AWA_HOME/kernel/hooks/worktree-guard-with-integrity.sh"
 INTEGRITY_OBSERVER="$AWA_HOME/kernel/hooks/awa-integrity-observer.sh"
 SESSION_HANDOFF="$AWA_HOME/kernel/hooks/awa-session-handoff.sh"
+HANDOFF_AUTHORITY="$AWA_HOME/kernel/lib/awa_handoff.py"
 INTEGRITY_DETACHER="$AWA_HOME/engine/integrity_detach.py"
 INSTALL_HOOKS="$AWA_HOME/kernel/hooks/install-hooks.sh"
 EMITTER="$AWA_HOME/dashboard/emitter.py"
@@ -57,7 +58,7 @@ if [ ! -f "$HOOK_OWNER_V2" ] ||
   bad "hook-owner v2 contract missing or invalid: $HOOK_OWNER_V2"
 fi
 for f in "$DEV_WORKTREE" "$GUARD" "$COMPOSITE_GUARD" \
-  "$INTEGRITY_OBSERVER" "$SESSION_HANDOFF" "$INTEGRITY_DETACHER" \
+    "$INTEGRITY_OBSERVER" "$SESSION_HANDOFF" "$HANDOFF_AUTHORITY" "$INTEGRITY_DETACHER" \
   "$INSTALL_HOOKS" "$EMITTER"; do
   [ -f "$f" ] || bad "role-resolved shim missing: $f"
 done
@@ -201,7 +202,7 @@ if any(
 ):
     errors.append("v2 external path-class drift")
 if v2_roles and v2_roles[-1].get("dormant_until_milestone") != "M2.4":
-    errors.append("session-handoff dormancy drift")
+    errors.append("session-handoff historical activation metadata drift")
 
 try:
     projection = json.load(open(os.environ["OWNER_DIRECT"], encoding="utf-8"))
@@ -250,8 +251,9 @@ else
 fi
 rm -rf "$owner_tmp" 2>/dev/null || true
 
-# 0a) M1-C hook mechanics: the composite delegates guard output through exec,
-# both observers use the detached fast verifier, and handoff remains dormant.
+# 0a) M1-C hook mechanics: the composite delegates guard output through exec
+# and both observers use the detached fast verifier. M2.4 handoff delegates to
+# its single metadata-only authority with fail-open sessionStart behavior.
 if has_executable_mode "$COMPOSITE_GUARD" "$INTEGRITY_OBSERVER" \
      "$SESSION_HANDOFF" "$INTEGRITY_DETACHER" && \
    grep -Fq '[[ -z "${AWA_INTEGRITY_GUARD:-}" ]]' \
@@ -260,7 +262,11 @@ if has_executable_mode "$COMPOSITE_GUARD" "$INTEGRITY_OBSERVER" \
    grep -Fq 'exec "$GUARD"' "$COMPOSITE_GUARD" && \
    grep -Fq -- '--trigger beforeShell' "$COMPOSITE_GUARD" && \
    grep -Fq -- '--trigger stop' "$INTEGRITY_OBSERVER" && \
-   ! grep -Eq 'integrity[[:space:]]+verify|status\.json|handoff_required' "$SESSION_HANDOFF" && \
+   grep -Fq 'awa_handoff.py' "$SESSION_HANDOFF" && \
+   grep -Fq 'consume' "$SESSION_HANDOFF" && \
+   grep -Fq '|| true' "$SESSION_HANDOFF" && \
+   grep -Fq 'awa-session-handoff/v1' "$HANDOFF_AUTHORITY" && \
+   ! grep -Eq 'integrity[[:space:]]+verify|move_agent_to_root' "$SESSION_HANDOFF" && \
    INTEGRITY_DETACHER="$INTEGRITY_DETACHER" python3 - <<'PY'
 import ast
 import os
@@ -294,9 +300,9 @@ for call in popen_calls:
             raise SystemExit(1)
 PY
 then
-  pass "M1-C composite/detacher/stop mechanics valid; session-handoff remains dormant"
+  pass "M1-C hooks valid; M2.4 metadata-only session-handoff is active and fail-open"
 else
-  bad "M1-C hook mechanics or dormant handoff drifted"
+  bad "M1-C hook mechanics or M2.4 handoff semantics drifted"
 fi
 
 # 1) CLI surface: every frozen verb + flag must appear in dev-worktree.sh usage/dispatch.
