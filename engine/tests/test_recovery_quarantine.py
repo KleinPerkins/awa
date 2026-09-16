@@ -171,6 +171,135 @@ class TestPreviewAndEligibility(QuarantineBase):
             self.preview(Path(applied["quarantined_path"]))
 
 
+class TestQuarantineNamespaceContainment(QuarantineBase):
+    def test_symlinked_quarantine_root_refuses_before_external_effect(self):
+        preview = self.preview()
+        outside = Path(self._tmp.name) / "outside-quarantine"
+        outside.mkdir()
+        sentinel = outside / "sentinel"
+        sentinel.write_bytes(b"unchanged")
+        (self.rec / "quarantine").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(recovery.QuarantineRefused):
+            self.apply(preview)
+        self.assertTrue(self.archive.exists())
+        self.assertEqual(sentinel.read_bytes(), b"unchanged")
+        self.assertEqual(sorted(p.name for p in outside.iterdir()), ["sentinel"])
+
+    def test_preview_refuses_symlinked_recovery_root_without_creating_dirs(self):
+        alias = Path(self._tmp.name) / "recovery-alias"
+        alias.symlink_to(self.rec, target_is_directory=True)
+        with self.assertRaises(recovery.QuarantineRefused):
+            recovery.preview_quarantine(
+                str(self.archive), recovery_dir=alias
+            )
+        self.assertFalse((self.rec / "quarantine").exists())
+
+    def test_each_symlinked_namespace_refuses_before_source_effect(self):
+        preview = self.preview()
+        for child in ("artifacts", "metadata", "journals", "reversals"):
+            with self.subTest(child=child):
+                quarantine = self.rec / "quarantine"
+                quarantine.mkdir(exist_ok=True)
+                outside = Path(self._tmp.name) / f"outside-{child}"
+                outside.mkdir()
+                sentinel = outside / "sentinel"
+                sentinel.write_bytes(b"unchanged")
+                (quarantine / child).symlink_to(
+                    outside, target_is_directory=True
+                )
+                with self.assertRaises(recovery.QuarantineRefused):
+                    self.apply(preview)
+                self.assertTrue(self.archive.exists())
+                self.assertEqual(sentinel.read_bytes(), b"unchanged")
+                self.assertEqual(
+                    sorted(p.name for p in outside.iterdir()), ["sentinel"]
+                )
+                (quarantine / child).unlink()
+
+    def test_destination_parent_swap_immediately_before_rename_refuses(self):
+        outside = Path(self._tmp.name) / "outside-swap"
+        outside.mkdir()
+        sentinel = outside / "sentinel"
+        sentinel.write_bytes(b"unchanged")
+        preview = self.preview()
+
+        def fault(point: str) -> None:
+            if point == "journal_durable":
+                artifacts = self.rec / "quarantine" / "artifacts"
+                artifacts.rmdir()
+                artifacts.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaises(recovery.QuarantineRefused):
+            self.apply(preview, fault=fault)
+        self.assertTrue(self.archive.exists())
+        self.assertEqual(sentinel.read_bytes(), b"unchanged")
+        self.assertEqual(sorted(p.name for p in outside.iterdir()), ["sentinel"])
+
+    def test_resume_refuses_namespace_swap_before_effect(self):
+        preview = self.preview()
+
+        def crash(point: str) -> None:
+            if point == "journal_durable":
+                raise recovery.QuarantineInjectedCrash(point)
+
+        with self.assertRaises(recovery.QuarantineInjectedCrash):
+            self.apply(preview, fault=crash)
+        outside = Path(self._tmp.name) / "outside-resume"
+        outside.mkdir()
+        sentinel = outside / "sentinel"
+        sentinel.write_bytes(b"unchanged")
+        artifacts = self.rec / "quarantine" / "artifacts"
+        artifacts.rmdir()
+        artifacts.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(recovery.QuarantineRefused):
+            self.apply(preview)
+        self.assertTrue(self.archive.exists())
+        self.assertEqual(sentinel.read_bytes(), b"unchanged")
+
+    def test_reverse_refuses_symlinked_namespace_before_effect(self):
+        applied = self.apply()
+        quarantined = Path(applied["quarantined_path"])
+        outside = Path(self._tmp.name) / "outside-reverse"
+        outside.mkdir()
+        sentinel = outside / "sentinel"
+        sentinel.write_bytes(b"unchanged")
+        reversals = self.rec / "quarantine" / "reversals"
+        reversals.rmdir()
+        reversals.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(recovery.QuarantineRefused):
+            recovery._reverse_quarantine(
+                applied["metadata_path"], recovery_dir=self.rec
+            )
+        self.assertFalse(self.archive.exists())
+        self.assertTrue(quarantined.exists())
+        self.assertEqual(sentinel.read_bytes(), b"unchanged")
+
+    def test_reverse_source_parent_swap_before_rename_refuses_pre_effect(self):
+        applied = self.apply()
+        quarantined = Path(applied["quarantined_path"])
+        artifacts = quarantined.parent
+        saved_artifacts = artifacts.with_name("artifacts-saved")
+        outside = Path(self._tmp.name) / "outside-reverse-swap"
+        outside.mkdir()
+        sentinel = outside / "sentinel"
+        sentinel.write_bytes(b"unchanged")
+
+        def fault(point: str) -> None:
+            if point == "reverse_journal_durable":
+                artifacts.rename(saved_artifacts)
+                artifacts.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaises(recovery.QuarantineRefused):
+            recovery._reverse_quarantine(
+                applied["metadata_path"],
+                recovery_dir=self.rec,
+                fault=fault,
+            )
+        self.assertFalse(self.archive.exists())
+        self.assertTrue((saved_artifacts / quarantined.name).exists())
+        self.assertEqual(sentinel.read_bytes(), b"unchanged")
+
+
 class TestApplyResumeAndReverse(QuarantineBase):
     def test_legacy_trash_migration_is_byte_identical_and_private(self):
         trash = self.rec / ".trash"
@@ -282,6 +411,29 @@ class TestApplyResumeAndReverse(QuarantineBase):
         self.assertEqual(replay["outcome"], "already_quarantined")
         self.assertFalse(journals[0].exists())
 
+    def test_committed_replay_is_truthful_when_stale_journal_unlink_fails(self):
+        preview = self.preview()
+
+        def fault(point: str) -> None:
+            if point == "metadata_committed":
+                raise recovery.QuarantineInjectedCrash(point)
+
+        with self.assertRaises(recovery.QuarantineInjectedCrash):
+            self.apply(preview, fault=fault)
+        journal = next(
+            (self.rec / "quarantine" / "journals").glob("*.json")
+        )
+        with mock.patch.object(
+            recovery,
+            "_durable_unlink",
+            side_effect=OSError("injected unlink failure"),
+        ):
+            replay = self.apply(preview)
+        self.assertEqual(replay["outcome"], "already_quarantined")
+        self.assertTrue(replay["applied"])
+        self.assertFalse(replay["mutated"])
+        self.assertTrue(journal.exists())
+
     def test_guarded_reverse_restores_and_is_idempotent(self):
         applied = self.apply()
         metadata = Path(applied["metadata_path"])
@@ -301,14 +453,18 @@ class TestApplyResumeAndReverse(QuarantineBase):
         metadata = Path(applied["metadata_path"])
         real_write = recovery._atomic_private_write
 
-        def fail_final(path: Path, document: dict) -> None:
+        def fail_final(
+            path: Path,
+            document: dict,
+            recovery_root: Path,
+        ) -> None:
             if (
                 path.parent.name == "reversals"
                 and path.name.endswith(".json")
                 and not path.name.endswith(".pending.json")
             ):
                 raise OSError("injected reversal bookkeeping failure")
-            real_write(path, document)
+            real_write(path, document, recovery_root)
 
         with mock.patch.object(
             recovery, "_atomic_private_write", side_effect=fail_final
@@ -441,6 +597,49 @@ class TestMaintenanceInstallAndCount(QuarantineBase):
             if p.is_file()
         }
         self.assertEqual(after, before)
+
+    def test_normal_uninstall_never_traverses_symlinked_quarantine(self):
+        home = Path(self._tmp.name) / "symlink-uninstall-home"
+        env = {
+            **os.environ,
+            "HOME": str(home),
+            "XDG_DATA_HOME": str(home / ".local" / "share"),
+            "XDG_CONFIG_HOME": str(home / ".config"),
+            "XDG_STATE_HOME": str(home / ".local" / "state"),
+        }
+        installed = subprocess.run(
+            ["bash", str(_ROOT / "install.sh")],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(
+            installed.returncode, 0, installed.stdout + installed.stderr
+        )
+        recovery_dir = (
+            Path(env["XDG_STATE_HOME"]) / "awa" / "recovery"
+        )
+        recovery_dir.mkdir(parents=True, exist_ok=True)
+        outside = Path(self._tmp.name) / "uninstall-external"
+        outside.mkdir()
+        sentinel = outside / "sentinel"
+        sentinel.write_bytes(b"do not traverse")
+        (recovery_dir / "quarantine").symlink_to(
+            outside, target_is_directory=True
+        )
+        removed = subprocess.run(
+            ["bash", str(_ROOT / "install.sh"), "--uninstall"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(
+            removed.returncode, 0, removed.stdout + removed.stderr
+        )
+        self.assertEqual(sentinel.read_bytes(), b"do not traverse")
+        self.assertEqual(sorted(p.name for p in outside.iterdir()), ["sentinel"])
 
     def test_count_uses_only_committed_valid_on_disk_records(self):
         applied = self.apply()

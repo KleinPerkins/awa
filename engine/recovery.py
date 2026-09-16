@@ -102,27 +102,159 @@ def _quarantine_root(recovery_root: Path) -> Path:
     return recovery_root / "quarantine"
 
 
-def _quarantine_dirs(recovery_root: Path) -> dict[str, Path]:
-    root = paths.ensure_dir(_quarantine_root(recovery_root))
+def _absolute_path(path: Path) -> Path:
+    return Path(os.path.abspath(os.path.expanduser(str(path))))
+
+
+def _open_contained_directory(
+    directory: Path,
+    recovery_root: Path,
+    *,
+    quarantine_namespace: bool = False,
+) -> int:
+    """Open and pin one real directory without following its leaf symlink."""
+    root = _absolute_path(recovery_root)
+    target = _absolute_path(directory)
+    fd = -1
+    try:
+        root_named = root.lstat()
+        if stat.S_ISLNK(root_named.st_mode) or not stat.S_ISDIR(root_named.st_mode):
+            raise QuarantineRefused("recovery_root_invalid")
+        root_real = root.resolve(strict=True)
+        target_real = target.resolve(strict=True)
+        try:
+            relative = target.relative_to(root)
+        except ValueError:
+            relative = target_real.relative_to(root_real)
+            if target != target_real:
+                raise QuarantineRefused("quarantine_namespace_alias")
+        if quarantine_namespace and (
+            not relative.parts or relative.parts[0] != "quarantine"
+        ):
+            raise QuarantineRefused("quarantine_namespace_escape")
+        named = target.lstat()
+        if stat.S_ISLNK(named.st_mode) or not stat.S_ISDIR(named.st_mode):
+            raise QuarantineRefused("quarantine_namespace_invalid")
+        if target_real != root_real / relative:
+            raise QuarantineRefused("quarantine_namespace_alias")
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        fd = os.open(str(target), flags)
+        opened = os.fstat(fd)
+        after = target.lstat()
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or (opened.st_dev, opened.st_ino)
+            != (named.st_dev, named.st_ino)
+            or (after.st_dev, after.st_ino)
+            != (opened.st_dev, opened.st_ino)
+        ):
+            raise QuarantineRefused("quarantine_namespace_swap")
+        return fd
+    except QuarantineRefused:
+        if fd >= 0:
+            os.close(fd)
+        raise
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+        if fd >= 0:
+            os.close(fd)
+        raise QuarantineRefused("quarantine_namespace_invalid") from exc
+
+
+def _validate_recovery_root(recovery_root: Path) -> None:
+    fd = _open_contained_directory(recovery_root, recovery_root)
+    os.close(fd)
+
+
+def _mkdir_private_directory(
+    directory: Path,
+    recovery_root: Path,
+) -> None:
+    parent_fd = _open_contained_directory(
+        directory.parent,
+        recovery_root,
+        quarantine_namespace=directory.parent != _absolute_path(recovery_root),
+    )
+    try:
+        os.mkdir(directory.name, paths.DIR_MODE, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    except FileExistsError:
+        pass
+    finally:
+        os.close(parent_fd)
+    fd = _open_contained_directory(
+        directory,
+        recovery_root,
+        quarantine_namespace=True,
+    )
+    try:
+        os.fchmod(fd, paths.DIR_MODE)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _quarantine_dirs(
+    recovery_root: Path,
+    *,
+    create: bool = True,
+) -> dict[str, Path]:
+    recovery_root = _absolute_path(recovery_root)
+    _validate_recovery_root(recovery_root)
+    root = _quarantine_root(recovery_root)
     result = {
         "root": root,
-        "artifacts": paths.ensure_dir(root / "artifacts"),
-        "metadata": paths.ensure_dir(root / "metadata"),
-        "journals": paths.ensure_dir(root / "journals"),
-        "reversals": paths.ensure_dir(root / "reversals"),
+        "artifacts": root / "artifacts",
+        "metadata": root / "metadata",
+        "journals": root / "journals",
+        "reversals": root / "reversals",
     }
+    # Validate every existing component before creating anything through this namespace.
     for directory in result.values():
-        try:
-            os.chmod(directory, paths.DIR_MODE)
-        except OSError:
-            pass
+        if os.path.lexists(directory):
+            fd = _open_contained_directory(
+                directory,
+                recovery_root,
+                quarantine_namespace=True,
+            )
+            os.close(fd)
+    if create:
+        for directory in result.values():
+            if not os.path.lexists(directory):
+                _mkdir_private_directory(directory, recovery_root)
+        for directory in result.values():
+            fd = _open_contained_directory(
+                directory,
+                recovery_root,
+                quarantine_namespace=True,
+            )
+            try:
+                os.fchmod(fd, paths.DIR_MODE)
+            finally:
+                os.close(fd)
     return result
 
 
-def _fsync_dir(directory: Path) -> None:
-    fd = os.open(
-        str(directory),
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+def _fsync_dir(
+    directory: Path,
+    recovery_root: Path | None = None,
+    *,
+    quarantine_namespace: bool = False,
+) -> None:
+    fd = (
+        _open_contained_directory(
+            directory,
+            recovery_root,
+            quarantine_namespace=quarantine_namespace,
+        )
+        if recovery_root is not None
+        else os.open(
+            str(directory),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
     )
     try:
         os.fsync(fd)
@@ -140,17 +272,30 @@ def _write_all(fd: int, payload: bytes) -> None:
         written += count
 
 
-def _atomic_private_write(target: Path, document: dict) -> None:
-    paths.ensure_dir(target.parent)
+def _atomic_private_write(
+    target: Path,
+    document: dict,
+    recovery_root: Path,
+) -> None:
     payload = (
         json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode("utf-8")
     temporary = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
-    fd = os.open(
-        str(temporary),
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-        paths.FILE_MODE,
+    parent_fd = _open_contained_directory(
+        target.parent,
+        recovery_root,
+        quarantine_namespace=True,
     )
+    try:
+        fd = os.open(
+            temporary.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            paths.FILE_MODE,
+            dir_fd=parent_fd,
+        )
+    except BaseException:
+        os.close(parent_fd)
+        raise
     try:
         _write_all(fd, payload)
         os.fchmod(fd, paths.FILE_MODE)
@@ -158,29 +303,61 @@ def _atomic_private_write(target: Path, document: dict) -> None:
     except BaseException:
         os.close(fd)
         try:
-            temporary.unlink()
+            os.unlink(temporary.name, dir_fd=parent_fd)
         except OSError:
             pass
+        os.close(parent_fd)
         raise
     else:
         os.close(fd)
     try:
-        os.replace(str(temporary), str(target))
-        _fsync_dir(target.parent)
+        check_fd = _open_contained_directory(
+            target.parent,
+            recovery_root,
+            quarantine_namespace=True,
+        )
+        try:
+            if (
+                os.fstat(check_fd).st_dev,
+                os.fstat(check_fd).st_ino,
+            ) != (
+                os.fstat(parent_fd).st_dev,
+                os.fstat(parent_fd).st_ino,
+            ):
+                raise QuarantineRefused("quarantine_namespace_swap")
+        finally:
+            os.close(check_fd)
+        os.replace(
+            temporary.name,
+            target.name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        os.fsync(parent_fd)
     except BaseException:
         try:
-            temporary.unlink()
+            os.unlink(temporary.name, dir_fd=parent_fd)
         except OSError:
             pass
         raise
+    finally:
+        os.close(parent_fd)
 
 
-def _durable_unlink(path: Path) -> None:
+def _durable_unlink(path: Path, recovery_root: Path) -> None:
+    parent_fd = _open_contained_directory(
+        path.parent,
+        recovery_root,
+        quarantine_namespace=True,
+    )
     try:
-        path.unlink()
-    except FileNotFoundError:
-        return
-    _fsync_dir(path.parent)
+        try:
+            os.unlink(path.name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            return
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
 
 
 def _contained(path: Path, root: Path) -> bool:
@@ -378,6 +555,8 @@ def preview_quarantine(
     recovery_root = (
         Path(recovery_dir) if recovery_dir is not None else paths.recovery_dir()
     )
+    recovery_root = _absolute_path(recovery_root)
+    _quarantine_dirs(recovery_root, create=False)
     candidate = Path(os.path.abspath(os.path.expanduser(archive)))
     canonical, fingerprint = _fingerprint_open(candidate, recovery_root)
     sidecar = _sidecar_evidence(
@@ -407,6 +586,42 @@ def _read_json(path: Path) -> dict | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _read_quarantine_json(
+    path: Path,
+    recovery_root: Path,
+) -> dict | None:
+    parent_fd = _open_contained_directory(
+        path.parent,
+        recovery_root,
+        quarantine_namespace=True,
+    )
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        try:
+            fd = os.open(path.name, flags, dir_fd=parent_fd)
+        except OSError:
+            return None
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode):
+                return None
+            payload = bytearray()
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                payload.extend(chunk)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
 
@@ -535,21 +750,35 @@ def _find_operation(
     root = _quarantine_root(recovery_root)
     for child, committed in (("metadata", True), ("journals", False)):
         directory = root / child
-        if not directory.is_dir() or directory.is_symlink():
+        if not os.path.lexists(directory):
             continue
-        for candidate in sorted(directory.glob("*.json")):
-            if candidate.is_symlink() or not candidate.is_file():
-                continue
-            document = _read_json(candidate)
-            if (
-                document is not None
-                and _valid_operation_document(
-                    document, recovery_root, committed=committed
+        directory_fd = _open_contained_directory(
+            directory,
+            recovery_root,
+            quarantine_namespace=True,
+        )
+        try:
+            names = sorted(
+                name
+                for name in os.listdir(directory_fd)
+                if name.endswith(".json")
+            )
+            for name in names:
+                candidate = directory / name
+                document = _read_quarantine_json(
+                    candidate, recovery_root
                 )
-                and document.get("original_path") == original_path
-                and _operation_token(document) == token
-            ):
-                return candidate, document, committed
+                if (
+                    document is not None
+                    and _valid_operation_document(
+                        document, recovery_root, committed=committed
+                    )
+                    and document.get("original_path") == original_path
+                    and _operation_token(document) == token
+                ):
+                    return candidate, document, committed
+        finally:
+            os.close(directory_fd)
     return None
 
 
@@ -620,10 +849,14 @@ def _committed_result(metadata_path: Path, document: dict, *, replay: bool) -> d
     return result
 
 
-def _commit_quarantine_metadata(path: Path, document: dict) -> None:
+def _commit_quarantine_metadata(
+    path: Path,
+    document: dict,
+    recovery_root: Path,
+) -> None:
     if os.path.lexists(path):
         raise QuarantineRefused("metadata_collision")
-    _atomic_private_write(path, document)
+    _atomic_private_write(path, document, recovery_root)
 
 
 def _fault(fault, point: str) -> None:
@@ -635,16 +868,50 @@ def _move_verified_source(
     source: Path,
     destination: Path,
     fingerprint: dict,
+    recovery_root: Path,
     *,
     fault=None,
+    source_quarantine: bool = False,
+    destination_quarantine: bool = True,
     permissions_point: str = "permissions_tightened",
     renamed_point: str = "renamed",
 ) -> None:
     """Re-open/no-follow and keep the verified file descriptor across rename."""
+    destination_parent_fd = _open_contained_directory(
+        destination.parent,
+        recovery_root,
+        quarantine_namespace=destination_quarantine,
+    )
+    try:
+        source_parent_fd = _open_contained_directory(
+            source.parent,
+            recovery_root,
+            quarantine_namespace=source_quarantine,
+        )
+    except BaseException:
+        os.close(destination_parent_fd)
+        raise
+    try:
+        try:
+            os.stat(
+                destination.name,
+                dir_fd=destination_parent_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            raise QuarantineRefused("destination_collision")
+    except BaseException:
+        os.close(source_parent_fd)
+        os.close(destination_parent_fd)
+        raise
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(str(source), flags)
+        fd = os.open(source.name, flags, dir_fd=source_parent_fd)
     except OSError as exc:
+        os.close(source_parent_fd)
+        os.close(destination_parent_fd)
         raise QuarantineRefused("archive_open_refused") from exc
     try:
         opened = os.fstat(fd)
@@ -669,20 +936,58 @@ def _move_verified_source(
         named = source.lstat()
         if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
             raise QuarantineRefused("archive_path_swap")
-        if destination.parent.stat().st_dev != opened.st_dev:
+        if os.fstat(destination_parent_fd).st_dev != opened.st_dev:
             raise QuarantineRefused("cross_filesystem_destination")
-        os.rename(str(source), str(destination))
+        check_fd = _open_contained_directory(
+            destination.parent,
+            recovery_root,
+            quarantine_namespace=destination_quarantine,
+        )
+        try:
+            if (
+                os.fstat(check_fd).st_dev,
+                os.fstat(check_fd).st_ino,
+            ) != (
+                os.fstat(destination_parent_fd).st_dev,
+                os.fstat(destination_parent_fd).st_ino,
+            ):
+                raise QuarantineRefused("quarantine_namespace_swap")
+        finally:
+            os.close(check_fd)
+        try:
+            os.stat(
+                destination.name,
+                dir_fd=destination_parent_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            raise QuarantineRefused("destination_collision")
+        os.rename(
+            source.name,
+            destination.name,
+            src_dir_fd=source_parent_fd,
+            dst_dir_fd=destination_parent_fd,
+        )
         _fault(fault, renamed_point)
         moved = os.fstat(fd)
         if (moved.st_dev, moved.st_ino) != (opened.st_dev, opened.st_ino):
             raise QuarantineRefused("archive_identity_drift")
     finally:
         os.close(fd)
+        os.close(source_parent_fd)
+        os.close(destination_parent_fd)
 
 
-def _write_journal_phase(path: Path, document: dict, phase: str) -> None:
+def _write_journal_phase(
+    path: Path,
+    document: dict,
+    phase: str,
+    recovery_root: Path,
+) -> None:
     document["phase"] = phase
-    _atomic_private_write(path, document)
+    _atomic_private_write(path, document, recovery_root)
 
 
 def _component_state(component: dict) -> tuple[Path, Path, bool, bool]:
@@ -740,6 +1045,7 @@ def apply_quarantine(
     recovery_root = (
         Path(recovery_dir) if recovery_dir is not None else paths.recovery_dir()
     )
+    recovery_root = _absolute_path(recovery_root)
     input_path = Path(os.path.abspath(os.path.expanduser(archive)))
     try:
         original_input = str(input_path.resolve(strict=False))
@@ -750,6 +1056,7 @@ def apply_quarantine(
     sidecar: dict | None = None
     try:
         with lock_mod.state_root_lock(blocking=True, timeout=30.0):
+            dirs = _quarantine_dirs(recovery_root, create=False)
             existing = _find_operation(recovery_root, original_input, token)
             if existing is not None:
                 record_path, document, committed = existing
@@ -768,7 +1075,9 @@ def apply_quarantine(
                         / "journals"
                         / f"{document['operation_id']}.json"
                     )
-                    stale = _read_json(stale_journal)
+                    stale = _read_quarantine_json(
+                        stale_journal, recovery_root
+                    )
                     if (
                         stale is not None
                         and _valid_operation_document(
@@ -777,7 +1086,10 @@ def apply_quarantine(
                         and stale.get("operation_id") == document["operation_id"]
                         and _operation_token(stale) == token
                     ):
-                        _durable_unlink(stale_journal)
+                        try:
+                            _durable_unlink(stale_journal, recovery_root)
+                        except (OSError, QuarantineRefused):
+                            pass
                     return _committed_result(record_path, document, replay=True)
             else:
                 record_path = None
@@ -798,7 +1110,7 @@ def apply_quarantine(
                 )
                 if _token_for(canonical, fingerprint, sidecar) != token:
                     raise QuarantineRefused("evidence_drift")
-                dirs = _quarantine_dirs(recovery_root)
+                dirs = _quarantine_dirs(recovery_root, create=True)
                 destination = _destination_for(canonical, fingerprint, recovery_root)
                 operation_id = uuid.uuid4().hex
                 journal_path = dirs["journals"] / f"{operation_id}.json"
@@ -828,13 +1140,13 @@ def apply_quarantine(
                         recovery_root,
                         allow_destination=False,
                     )
-                _atomic_private_write(journal_path, document)
+                _atomic_private_write(journal_path, document, recovery_root)
                 record_path = journal_path
                 _fault(fault, "journal_durable")
             else:
                 journal_path = record_path
                 destination = Path(str(document["quarantined_path"]))
-                dirs = _quarantine_dirs(recovery_root)
+                dirs = _quarantine_dirs(recovery_root, create=False)
 
             assert document is not None
             assert destination is not None
@@ -881,6 +1193,7 @@ def apply_quarantine(
                             sidecar_source,
                             sidecar_destination,
                             sidecar["fingerprint"],
+                            recovery_root,
                             fault=fault,
                             permissions_point="sidecar_permissions_tightened",
                             renamed_point="sidecar_renamed",
@@ -890,14 +1203,23 @@ def apply_quarantine(
                             sidecar_destination.exists()
                             and not sidecar_source.exists()
                         )
-                    _fsync_dir(sidecar_source.parent)
+                    _fsync_dir(
+                        sidecar_source.parent, recovery_root
+                    )
                     _fault(fault, "sidecar_source_dir_synced")
-                    _fsync_dir(sidecar_destination.parent)
+                    _fsync_dir(
+                        sidecar_destination.parent,
+                        recovery_root,
+                        quarantine_namespace=True,
+                    )
                     _fault(fault, "sidecar_destination_dir_synced")
                 elif sidecar_destination_exists:
                     moved = True
                 _write_journal_phase(
-                    journal_path, document, "sidecar_moved"
+                    journal_path,
+                    document,
+                    "sidecar_moved",
+                    recovery_root,
                 )
                 _fault(fault, "sidecar_phase_durable")
 
@@ -913,18 +1235,26 @@ def apply_quarantine(
                         source,
                         destination,
                         fingerprint,
+                        recovery_root,
                         fault=fault,
                     )
                 finally:
                     moved = moved or (
                         destination.exists() and not source.exists()
                     )
-                _fsync_dir(source.parent)
+                _fsync_dir(source.parent, recovery_root)
                 _fault(fault, "source_dir_synced")
-                _fsync_dir(destination.parent)
+                _fsync_dir(
+                    destination.parent,
+                    recovery_root,
+                    quarantine_namespace=True,
+                )
                 _fault(fault, "destination_dir_synced")
             _write_journal_phase(
-                journal_path, document, "components_moved"
+                journal_path,
+                document,
+                "components_moved",
+                recovery_root,
             )
             if sidecar.get("present") is True:
                 _fault(fault, "components_phase_durable")
@@ -959,9 +1289,13 @@ def apply_quarantine(
             metadata_path = (
                 dirs["metadata"] / f"{document['operation_id']}.json"
             )
-            _commit_quarantine_metadata(metadata_path, committed_document)
+            _commit_quarantine_metadata(
+                metadata_path,
+                committed_document,
+                recovery_root,
+            )
             _fault(fault, "metadata_committed")
-            _durable_unlink(journal_path)
+            _durable_unlink(journal_path, recovery_root)
             _fault(fault, "journal_removed")
             return _committed_result(
                 metadata_path, committed_document, replay=False
@@ -1020,8 +1354,10 @@ def _reverse_quarantine(
     recovery_root = (
         Path(recovery_dir) if recovery_dir is not None else paths.recovery_dir()
     )
+    recovery_root = _absolute_path(recovery_root)
     metadata = Path(metadata_path)
     with lock_mod.state_root_lock(blocking=True, timeout=30.0):
+        dirs = _quarantine_dirs(recovery_root, create=False)
         try:
             if (
                 metadata.is_symlink()
@@ -1034,7 +1370,7 @@ def _reverse_quarantine(
                 raise QuarantineRefused("quarantine_metadata_invalid")
         except (FileNotFoundError, OSError, RuntimeError):
             raise QuarantineRefused("quarantine_metadata_invalid")
-        document = _read_json(metadata)
+        document = _read_quarantine_json(metadata, recovery_root)
         if (
             document is None
             or not _valid_operation_document(
@@ -1042,14 +1378,21 @@ def _reverse_quarantine(
             )
         ):
             raise QuarantineRefused("quarantine_metadata_invalid")
-        dirs = _quarantine_dirs(recovery_root)
         operation_id = document.get("operation_id")
         if not isinstance(operation_id, str) or not operation_id:
             raise QuarantineRefused("quarantine_metadata_invalid")
         reversal_path = dirs["reversals"] / f"{operation_id}.json"
         pending_path = dirs["reversals"] / f"{operation_id}.pending.json"
-        reversal = _read_json(reversal_path)
-        pending = _read_json(pending_path)
+        reversal = (
+            _read_quarantine_json(reversal_path, recovery_root)
+            if os.path.lexists(reversal_path)
+            else None
+        )
+        pending = (
+            _read_quarantine_json(pending_path, recovery_root)
+            if os.path.lexists(pending_path)
+            else None
+        )
         components = [
             {
                 "original_path": document["original_path"],
@@ -1078,7 +1421,7 @@ def _reverse_quarantine(
             and all_restored
         ):
             if pending is not None:
-                _durable_unlink(pending_path)
+                _durable_unlink(pending_path, recovery_root)
             return {
                 "schema": QUARANTINE_REVERSAL_SCHEMA,
                 "outcome": "already_restored",
@@ -1126,12 +1469,15 @@ def _reverse_quarantine(
             }
             if os.path.lexists(pending_path):
                 raise QuarantineRefused("reversal_journal_collision")
-            _atomic_private_write(pending_path, reversal_intent)
+            _atomic_private_write(
+                pending_path, reversal_intent, recovery_root
+            )
             pending = reversal_intent
             _fault(fault, "reverse_journal_durable")
         else:
             reversal_intent = pending
 
+        reverse_moved = resumed_effect
         try:
             for index, component in enumerate(components):
                 (
@@ -1150,20 +1496,35 @@ def _reverse_quarantine(
                         if index == 0
                         else "reverse_sidecar_renamed"
                     )
-                    _move_verified_source(
-                        component_quarantined,
-                        component_original,
-                        component["fingerprint"],
-                        fault=fault,
-                        permissions_point=(
-                            "reverse_archive_permissions_tightened"
-                            if index == 0
-                            else "reverse_sidecar_permissions_tightened"
-                        ),
-                        renamed_point=renamed_point,
+                    try:
+                        _move_verified_source(
+                            component_quarantined,
+                            component_original,
+                            component["fingerprint"],
+                            recovery_root,
+                            fault=fault,
+                            source_quarantine=True,
+                            destination_quarantine=False,
+                            permissions_point=(
+                                "reverse_archive_permissions_tightened"
+                                if index == 0
+                                else "reverse_sidecar_permissions_tightened"
+                            ),
+                            renamed_point=renamed_point,
+                        )
+                    finally:
+                        reverse_moved = reverse_moved or (
+                            component_original.exists()
+                            and not component_quarantined.exists()
+                        )
+                    _fsync_dir(
+                        component_quarantined.parent,
+                        recovery_root,
+                        quarantine_namespace=True,
                     )
-                    _fsync_dir(component_quarantined.parent)
-                    _fsync_dir(component_original.parent)
+                    _fsync_dir(
+                        component_original.parent, recovery_root
+                    )
                     _fault(
                         fault,
                         "reverse_archive_synced"
@@ -1174,6 +1535,7 @@ def _reverse_quarantine(
                         pending_path,
                         reversal_intent,
                         "archive_restored" if index == 0 else "sidecar_restored",
+                        recovery_root,
                     )
             for component in components:
                 canonical, observed = _fingerprint_open(
@@ -1192,12 +1554,27 @@ def _reverse_quarantine(
                     "reverse bytes moved; reversal bookkeeping collision",
                     str(original),
                 )
-            _atomic_private_write(reversal_path, reversal)
+            _atomic_private_write(
+                reversal_path, reversal, recovery_root
+            )
             _fault(fault, "reverse_metadata_committed")
-            _durable_unlink(pending_path)
+            _durable_unlink(pending_path, recovery_root)
         except QuarantineInjectedCrash:
             raise
+        except QuarantineRefused as exc:
+            if not reverse_moved:
+                raise
+            raise QuarantineAppliedIncomplete(
+                f"reverse bytes moved; reversal bookkeeping incomplete: {exc}",
+                str(original),
+            ) from exc
+        except QuarantineAppliedIncomplete:
+            raise
         except Exception as exc:
+            if not reverse_moved:
+                raise QuarantineRefused(
+                    "quarantine_reverse_failed"
+                ) from exc
             raise QuarantineAppliedIncomplete(
                 f"reverse bytes moved; reversal bookkeeping incomplete: {exc}",
                 str(original),
@@ -1216,23 +1593,42 @@ def quarantine_count(recovery_dir: Path | None = None) -> int:
     recovery_root = (
         Path(recovery_dir) if recovery_dir is not None else paths.recovery_dir()
     )
-    metadata_dir = _quarantine_root(recovery_root) / "metadata"
-    if not metadata_dir.is_dir() or metadata_dir.is_symlink():
+    recovery_root = _absolute_path(recovery_root)
+    try:
+        dirs = _quarantine_dirs(recovery_root, create=False)
+    except QuarantineRefused:
+        return 0
+    metadata_dir = dirs["metadata"]
+    if not os.path.lexists(metadata_dir):
         return 0
     count = 0
-    for metadata in sorted(metadata_dir.glob("*.json")):
-        document = _read_json(metadata)
-        if (
-            document is None
-            or document.get("schema") != QUARANTINE_SCHEMA
-            or document.get("state") != "committed"
-        ):
-            continue
-        try:
-            _verified_destination(document, recovery_root)
-        except QuarantineRefused:
-            continue
-        count += 1
+    directory_fd = _open_contained_directory(
+        metadata_dir,
+        recovery_root,
+        quarantine_namespace=True,
+    )
+    try:
+        names = sorted(
+            name
+            for name in os.listdir(directory_fd)
+            if name.endswith(".json")
+        )
+        for name in names:
+            metadata = metadata_dir / name
+            document = _read_quarantine_json(metadata, recovery_root)
+            if (
+                document is None
+                or document.get("schema") != QUARANTINE_SCHEMA
+                or document.get("state") != "committed"
+            ):
+                continue
+            try:
+                _verified_destination(document, recovery_root)
+            except QuarantineRefused:
+                continue
+            count += 1
+    finally:
+        os.close(directory_fd)
     return count
 
 

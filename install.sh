@@ -456,13 +456,44 @@ do_uninstall() {
     if [ -d "$STATE_DIR" ]; then
       awa_warn "removing ordinary state at $STATE_DIR; protected Retain + protected recovery artifacts survive normal uninstall"
       STATE_DIR="$STATE_DIR" python3 - <<'PY'
-import json, os, shutil
+import json, os, shutil, stat
 from pathlib import Path
 
 root = Path(os.environ["STATE_DIR"])
 protected_retain = root / "protected-retain"   # kernel Retain artifacts (already protected)
 recovery = root / "recovery"                    # engine recovery artifacts (some protected)
 quarantine = recovery / "quarantine"            # explicit digest-bound preservation namespace
+
+
+def real_directory(path):
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError:
+        return False
+    return stat.S_ISDIR(mode) and not stat.S_ISLNK(mode)
+
+
+def recovery_entries_nonfollowing(recovery_dir, preserved):
+    """Enumerate lexically without entering symlink directories or the preserved quarantine."""
+    files = []
+    directories = []
+    pending = [recovery_dir]
+    while pending:
+        current = pending.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            path = Path(entry.path)
+            if path == preserved:
+                continue
+            if entry.is_dir(follow_symlinks=False) and not entry.is_symlink():
+                directories.append(path)
+                pending.append(path)
+            else:
+                files.append(path)
+    return files, directories
 
 
 def protected_recovery_files(recovery_dir):
@@ -489,17 +520,25 @@ def protected_recovery_files(recovery_dir):
 
 
 keep = protected_recovery_files(recovery)
+quarantine_is_real = real_directory(quarantine)
+if os.path.lexists(quarantine) and not quarantine_is_real:
+    # Remove only the lexical unsafe entry. Never inspect or traverse its target.
+    try:
+        quarantine.unlink()
+    except OSError:
+        pass
 
 for child in list(root.iterdir()):
     if child == protected_retain:
         continue
-    if child == recovery and (keep or quarantine.is_dir()):
+    if child == recovery and (keep or quarantine_is_real):
         # Prune ONLY ordinary artifacts; preserve protected artifacts and the complete quarantine
         # subtree byte-identically, including any crash-resume journal.
-        for f in list(recovery.rglob("*")):
-            if f.is_dir() or f.is_symlink():
-                continue
-            if quarantine == f or quarantine in f.parents:
+        files, directories = recovery_entries_nonfollowing(
+            recovery, quarantine if quarantine_is_real else None
+        )
+        for f in files:
+            if f.is_symlink():
                 continue
             if str(f.resolve()) in keep:
                 continue
@@ -507,9 +546,7 @@ for child in list(root.iterdir()):
                 f.unlink()
             except OSError:
                 pass
-        for d in sorted((p for p in recovery.rglob("*") if p.is_dir()), reverse=True):
-            if d == quarantine or quarantine in d.parents:
-                continue
+        for d in reversed(directories):
             try:
                 d.rmdir()
             except OSError:
