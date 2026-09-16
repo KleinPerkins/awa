@@ -43,6 +43,23 @@ class QuarantineBase(EngineTestCase):
             **kwargs,
         )
 
+    def add_manifest(self, *, protected: bool = False) -> Path:
+        name = self.archive.name
+        self.assertTrue(name.endswith(".tar.gz"))
+        manifest = self.archive.with_name(
+            name[: -len(".tar.gz")] + ".manifest.json"
+        )
+        document = retention.build_manifest(
+            "bundle",
+            "/fixture/source",
+            self.archive,
+            protected=protected,
+            recovery_root=self.rec,
+        )
+        manifest.write_text(json.dumps(document) + "\n", encoding="utf-8")
+        manifest.chmod(0o400 if protected else 0o600)
+        return manifest
+
 
 class TestPreviewAndEligibility(QuarantineBase):
     def test_preview_is_deterministic_and_read_only(self):
@@ -247,6 +264,23 @@ class TestApplyResumeAndReverse(QuarantineBase):
         self.assertTrue(caught.exception.mutated)
         self.assertFalse(self.archive.exists())
         self.assertTrue(Path(caught.exception.quarantined_path).exists())
+
+    def test_committed_metadata_replay_finalizes_stale_prepared_journal(self):
+        preview = self.preview()
+
+        def fault(point: str) -> None:
+            if point == "metadata_committed":
+                raise recovery.QuarantineInjectedCrash(point)
+
+        with self.assertRaises(recovery.QuarantineInjectedCrash):
+            self.apply(preview, fault=fault)
+        journals = list(
+            (self.rec / "quarantine" / "journals").glob("*.json")
+        )
+        self.assertEqual(len(journals), 1)
+        replay = self.apply(preview)
+        self.assertEqual(replay["outcome"], "already_quarantined")
+        self.assertFalse(journals[0].exists())
 
     def test_guarded_reverse_restores_and_is_idempotent(self):
         applied = self.apply()
@@ -462,6 +496,243 @@ class TestMaintenanceInstallAndCount(QuarantineBase):
                     st, recovery_dir=self.rec, trigger="manual"
                 )
             integrity._recovery_facts()
+
+
+class TestRetentionSidecarQuarantine(QuarantineBase):
+    def test_valid_sidecar_moves_without_retention_orphan_and_survives_maintenance(self):
+        manifest = self.add_manifest(protected=True)
+        archive_bytes = self.archive.read_bytes()
+        manifest_bytes = manifest.read_bytes()
+        preview = self.preview()
+        self.assertTrue(preview["sidecar"]["present"])
+        applied = self.apply(preview)
+        quarantined_manifest = Path(applied["sidecar"]["quarantined_path"])
+        self.assertFalse(manifest.exists())
+        self.assertEqual(quarantined_manifest.read_bytes(), manifest_bytes)
+        self.assertEqual(Path(applied["quarantined_path"]).read_bytes(), archive_bytes)
+        scan = retention.scan(self.rec)
+        self.assertEqual(scan.descriptors, [])
+        self.assertEqual(scan.needs_repair, [])
+        with state_mod.State() as st:
+            maintained = retention.run_maintenance(
+                st,
+                recovery_dir=self.rec,
+                trigger="manual",
+                ttl_seconds=0,
+                watermark_bytes=0,
+                min_age_seconds=0,
+            )
+            trash = self.rec / ".trash"
+            trash.mkdir(exist_ok=True)
+            hostile = trash / "sidecar.deletion.json"
+            hostile.write_text(
+                json.dumps(
+                    {
+                        "schema": retention.SCHEMA_DELETION_JOURNAL,
+                        "artifact_id": "sidecar-hostile",
+                        "reason": "ttl",
+                        "archive": "",
+                        "manifest": str(quarantined_manifest),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            resumed = retention._resume(self.rec, st)
+        recovery.prune_artifacts(recovery_dir=self.rec, force=True)
+        self.assertEqual(maintained["needs_repair"], [])
+        self.assertIn(str(hostile), resumed["needs_repair"])
+        self.assertTrue(quarantined_manifest.exists())
+        self.assertEqual(recovery.quarantine_count(self.rec), 1)
+
+    def test_digest_binds_sidecar_presence_and_absence(self):
+        absent = self.preview()
+        self.assertFalse(absent["sidecar"]["present"])
+        manifest = self.add_manifest()
+        present = self.preview()
+        self.assertTrue(present["sidecar"]["present"])
+        self.assertNotEqual(absent["token"], present["token"])
+        with self.assertRaises(recovery.QuarantineRefused):
+            self.apply(absent)
+        self.assertTrue(self.archive.exists())
+        self.assertTrue(manifest.exists())
+
+    def test_sidecar_drift_swap_or_disappearance_refuses_pre_effect(self):
+        mutations = ("content", "mtime", "inode", "missing")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                archive = self.rec / f"{mutation}.tar.gz"
+                archive.write_bytes(b"archive")
+                self.archive = archive
+                manifest = self.add_manifest()
+                preview = self.preview()
+                original_stat = manifest.stat()
+                if mutation == "content":
+                    manifest.write_bytes(b"changed manifest")
+                    os.utime(
+                        manifest,
+                        ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+                    )
+                elif mutation == "mtime":
+                    os.utime(
+                        manifest,
+                        ns=(
+                            original_stat.st_atime_ns,
+                            original_stat.st_mtime_ns + 1_000_000_000,
+                        ),
+                    )
+                elif mutation == "inode":
+                    replacement = manifest.with_suffix(".replacement")
+                    replacement.write_bytes(manifest.read_bytes())
+                    os.utime(
+                        replacement,
+                        ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+                    )
+                    os.replace(replacement, manifest)
+                else:
+                    manifest.unlink()
+                with self.assertRaises(recovery.QuarantineRefused):
+                    self.apply(preview)
+                self.assertTrue(archive.exists())
+
+    def test_sidecar_symlink_escape_and_destination_collision_refuse(self):
+        candidate = self.archive.with_name("legacy.manifest.json")
+        outside = Path(self._tmp.name) / "outside.manifest.json"
+        outside.write_text("{}\n", encoding="utf-8")
+        candidate.symlink_to(outside)
+        with self.assertRaises(recovery.QuarantineRefused):
+            self.preview()
+        candidate.unlink()
+        document = retention.build_manifest(
+            "bundle", "", self.archive, recovery_root=self.rec
+        )
+        document["archive"] = str(Path(self._tmp.name) / "outside.tar.gz")
+        candidate.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaises(recovery.QuarantineRefused):
+            self.preview()
+        candidate.unlink()
+        self.add_manifest()
+        preview = self.preview()
+        collision = Path(preview["sidecar"]["destination"])
+        collision.parent.mkdir(parents=True, exist_ok=True)
+        collision.write_bytes(b"collision")
+        with self.assertRaises(recovery.QuarantineRefused):
+            self.apply(preview)
+        self.assertEqual(collision.read_bytes(), b"collision")
+        self.assertTrue(self.archive.exists())
+
+    def test_sidecar_component_crash_points_resume_without_orphan(self):
+        self.archive.unlink()
+        for point in recovery.QUARANTINE_SIDECAR_CRASH_POINTS:
+            with self.subTest(point=point):
+                archive = self.rec / f"{point}.tar.gz"
+                archive.write_bytes(point.encode())
+                self.archive = archive
+                manifest = self.add_manifest()
+                archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
+                manifest_hash = hashlib.sha256(manifest.read_bytes()).hexdigest()
+                preview = self.preview()
+
+                def fault(observed: str) -> None:
+                    if observed == point:
+                        raise recovery.QuarantineInjectedCrash(point)
+
+                with self.assertRaises(recovery.QuarantineInjectedCrash):
+                    self.apply(preview, fault=fault)
+                resumed = self.apply(preview)
+                self.assertEqual(
+                    hashlib.sha256(
+                        Path(resumed["quarantined_path"]).read_bytes()
+                    ).hexdigest(),
+                    archive_hash,
+                )
+                self.assertEqual(
+                    hashlib.sha256(
+                        Path(resumed["sidecar"]["quarantined_path"]).read_bytes()
+                    ).hexdigest(),
+                    manifest_hash,
+                )
+                self.assertEqual(retention.scan(self.rec).needs_repair, [])
+
+    def test_partial_sidecar_first_move_survives_maintenance_before_resume(self):
+        manifest = self.add_manifest()
+        preview = self.preview()
+
+        def fault(point: str) -> None:
+            if point == "sidecar_phase_durable":
+                raise recovery.QuarantineInjectedCrash(point)
+
+        with self.assertRaises(recovery.QuarantineInjectedCrash):
+            self.apply(preview, fault=fault)
+        self.assertTrue(self.archive.exists())
+        self.assertFalse(manifest.exists())
+        quarantined_sidecar = Path(preview["sidecar"]["destination"])
+        self.assertTrue(quarantined_sidecar.exists())
+        with state_mod.State() as st:
+            retention.run_maintenance(
+                st,
+                recovery_dir=self.rec,
+                trigger="manual",
+                ttl_seconds=0,
+                watermark_bytes=0,
+                min_age_seconds=0,
+            )
+        self.assertTrue(self.archive.exists())
+        self.assertTrue(quarantined_sidecar.exists())
+        resumed = self.apply(preview)
+        self.assertTrue(Path(resumed["quarantined_path"]).exists())
+        self.assertTrue(Path(resumed["sidecar"]["quarantined_path"]).exists())
+
+    def test_post_sidecar_pre_archive_failure_reports_applied_truthfully(self):
+        self.add_manifest()
+        preview = self.preview()
+
+        def fault(point: str) -> None:
+            if point == "sidecar_phase_durable":
+                self.archive.write_bytes(b"archive drift after sidecar move")
+
+        with self.assertRaises(recovery.QuarantineAppliedIncomplete) as caught:
+            self.apply(preview, fault=fault)
+        self.assertTrue(caught.exception.applied)
+        self.assertTrue(caught.exception.mutated)
+        self.assertTrue(Path(caught.exception.quarantined_path).exists())
+        self.assertTrue(self.archive.exists())
+
+    def test_guarded_reversal_restores_both_files_and_resumes_crashes(self):
+        for point in recovery.QUARANTINE_REVERSAL_SIDECAR_CRASH_POINTS:
+            with self.subTest(point=point):
+                archive = self.rec / f"reverse-{point}.tar.gz"
+                archive.write_bytes(point.encode())
+                self.archive = archive
+                manifest = self.add_manifest()
+                archive_bytes = archive.read_bytes()
+                manifest_bytes = manifest.read_bytes()
+                applied = self.apply()
+                metadata = Path(applied["metadata_path"])
+
+                def fault(observed: str) -> None:
+                    if observed == point:
+                        raise recovery.QuarantineInjectedCrash(point)
+
+                with self.assertRaises(recovery.QuarantineInjectedCrash):
+                    recovery._reverse_quarantine(
+                        metadata,
+                        recovery_dir=self.rec,
+                        fault=fault,
+                    )
+                resumed = recovery._reverse_quarantine(
+                    metadata, recovery_dir=self.rec
+                )
+                self.assertIn(
+                    resumed["outcome"], {"restored", "already_restored"}
+                )
+                self.assertEqual(archive.read_bytes(), archive_bytes)
+                self.assertEqual(manifest.read_bytes(), manifest_bytes)
+                self.assertFalse(
+                    Path(applied["quarantined_path"]).exists()
+                )
+                self.assertFalse(
+                    Path(applied["sidecar"]["quarantined_path"]).exists()
+                )
 
 
 class TestQuarantineCli(QuarantineBase):

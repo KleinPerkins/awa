@@ -58,6 +58,22 @@ QUARANTINE_CRASH_POINTS = (
     "metadata_committed",
     "journal_removed",
 )
+QUARANTINE_SIDECAR_CRASH_POINTS = (
+    "sidecar_phase_durable",
+    "sidecar_permissions_tightened",
+    "sidecar_renamed",
+    "sidecar_source_dir_synced",
+    "sidecar_destination_dir_synced",
+    "components_phase_durable",
+)
+QUARANTINE_REVERSAL_SIDECAR_CRASH_POINTS = (
+    "reverse_journal_durable",
+    "reverse_archive_renamed",
+    "reverse_archive_synced",
+    "reverse_sidecar_renamed",
+    "reverse_sidecar_synced",
+    "reverse_metadata_committed",
+)
 
 
 class QuarantineRefused(RuntimeError):
@@ -253,7 +269,11 @@ def _fingerprint_open(
     }
 
 
-def _token_for(canonical_path: str, fingerprint: dict) -> str:
+def _token_for(
+    canonical_path: str,
+    fingerprint: dict,
+    sidecar: dict | None = None,
+) -> str:
     evidence = {
         "canonical_path": canonical_path,
         "sha256": fingerprint["sha256"],
@@ -261,6 +281,7 @@ def _token_for(canonical_path: str, fingerprint: dict) -> str:
         "mtime_ns": fingerprint["mtime_ns"],
         "device": fingerprint["device"],
         "inode": fingerprint["inode"],
+        "sidecar": sidecar if sidecar is not None else {"present": False},
     }
     return hashlib.sha256(
         json.dumps(
@@ -284,6 +305,70 @@ def _destination_for(
     )
 
 
+def _sidecar_path(archive: Path) -> Path | None:
+    """Use the existing deterministic recovery writer naming; never manifest content."""
+    name = archive.name
+    if name.endswith(".tar.gz"):
+        return archive.with_name(
+            name[: -len(".tar.gz")] + ".manifest.json"
+        )
+    if name.endswith(".patch"):
+        return archive.with_name(name + ".manifest.json")
+    return None
+
+
+def _normalized_path(value: str) -> str | None:
+    try:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            return None
+        return str(path.resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _sidecar_evidence(
+    archive_path: Path,
+    canonical_archive: str,
+    archive_fingerprint: dict,
+    recovery_root: Path,
+) -> dict:
+    candidate = _sidecar_path(archive_path)
+    if candidate is None or not os.path.lexists(candidate):
+        return {"present": False}
+    canonical, fingerprint = _fingerprint_open(candidate, recovery_root)
+    document = _read_json(candidate)
+    if (
+        document is None
+        or document.get("schema") != retention.SCHEMA_ARTIFACT
+        or document.get("archive_name") != Path(canonical_archive).name
+        or _normalized_path(str(document.get("archive") or ""))
+        != canonical_archive
+        or document.get("sha256") != archive_fingerprint["sha256"]
+        or document.get("size") != archive_fingerprint["size"]
+    ):
+        raise QuarantineRefused("sidecar_pairing_invalid")
+    return {
+        "present": True,
+        "original_path": canonical,
+        "quarantined_path": str(
+            _destination_for(canonical, fingerprint, recovery_root)
+        ),
+        "fingerprint": fingerprint,
+    }
+
+
+def _sidecar_preview(sidecar: dict) -> dict:
+    if sidecar.get("present") is not True:
+        return {"present": False}
+    return {
+        "present": True,
+        "path": sidecar["original_path"],
+        "destination": sidecar["quarantined_path"],
+        "fingerprint": sidecar["fingerprint"],
+    }
+
+
 def preview_quarantine(
     archive: str,
     *,
@@ -295,7 +380,13 @@ def preview_quarantine(
     )
     candidate = Path(os.path.abspath(os.path.expanduser(archive)))
     canonical, fingerprint = _fingerprint_open(candidate, recovery_root)
-    token = _token_for(canonical, fingerprint)
+    sidecar = _sidecar_evidence(
+        candidate,
+        canonical,
+        fingerprint,
+        recovery_root,
+    )
+    token = _token_for(canonical, fingerprint, sidecar)
     return {
         "schema": QUARANTINE_SCHEMA,
         "action": "quarantine",
@@ -307,6 +398,7 @@ def preview_quarantine(
             _destination_for(canonical, fingerprint, recovery_root)
         ),
         "fingerprint": fingerprint,
+        "sidecar": _sidecar_preview(sidecar),
         "token": token,
     }
 
@@ -322,15 +414,75 @@ def _read_json(path: Path) -> dict | None:
 def _operation_token(document: dict) -> str | None:
     source = document.get("original_path")
     fingerprint = document.get("fingerprint")
+    sidecar = document.get("sidecar")
     if not isinstance(source, str) or not isinstance(fingerprint, dict):
         return None
     required = {"sha256", "size", "mtime_ns", "device", "inode"}
     if set(fingerprint) != required:
         return None
     try:
-        return _token_for(source, fingerprint)
+        return _token_for(source, fingerprint, sidecar)
     except (KeyError, TypeError):
         return None
+
+
+def _valid_fingerprint(fingerprint: object) -> bool:
+    return bool(
+        isinstance(fingerprint, dict)
+        and set(fingerprint) == {"sha256", "size", "mtime_ns", "device", "inode"}
+        and isinstance(fingerprint.get("sha256"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", fingerprint["sha256"]) is not None
+        and all(
+            type(fingerprint.get(key)) is int and fingerprint[key] >= 0
+            for key in ("size", "mtime_ns", "device", "inode")
+        )
+    )
+
+
+def _valid_sidecar_document(
+    sidecar: object,
+    recovery_root: Path,
+    archive_original: str,
+) -> bool:
+    if sidecar == {"present": False}:
+        return True
+    if not isinstance(sidecar, dict) or sidecar.get("present") is not True:
+        return False
+    if set(sidecar) != {
+        "present",
+        "original_path",
+        "quarantined_path",
+        "fingerprint",
+    }:
+        return False
+    original = sidecar.get("original_path")
+    destination = sidecar.get("quarantined_path")
+    fingerprint = sidecar.get("fingerprint")
+    if (
+        not isinstance(original, str)
+        or not Path(original).is_absolute()
+        or not isinstance(destination, str)
+        or not _valid_fingerprint(fingerprint)
+    ):
+        return False
+    try:
+        root = recovery_root.resolve(strict=True)
+        Path(original).parent.resolve(strict=True).relative_to(root)
+        deterministic = _sidecar_path(Path(archive_original))
+        if (
+            deterministic is None
+            or str(deterministic.resolve(strict=False)) != original
+        ):
+            return False
+        observed = Path(destination)
+        expected = _destination_for(original, fingerprint, recovery_root)
+        return (
+            observed == expected
+            and observed.parent.resolve(strict=True)
+            == (_quarantine_root(recovery_root) / "artifacts").resolve(strict=True)
+        )
+    except (FileNotFoundError, OSError, RuntimeError, ValueError):
+        return False
 
 
 def _valid_operation_document(
@@ -345,6 +497,7 @@ def _valid_operation_document(
     original = document.get("original_path")
     destination = document.get("quarantined_path")
     fingerprint = document.get("fingerprint")
+    sidecar = document.get("sidecar")
     if (
         document.get("schema") != expected_schema
         or document.get("state") != expected_state
@@ -353,14 +506,8 @@ def _valid_operation_document(
         or not isinstance(original, str)
         or not Path(original).is_absolute()
         or not isinstance(destination, str)
-        or not isinstance(fingerprint, dict)
-        or set(fingerprint) != {"sha256", "size", "mtime_ns", "device", "inode"}
-        or not isinstance(fingerprint.get("sha256"), str)
-        or re.fullmatch(r"[0-9a-f]{64}", fingerprint["sha256"]) is None
-        or any(
-            type(fingerprint.get(key)) is not int or fingerprint[key] < 0
-            for key in ("size", "mtime_ns", "device", "inode")
-        )
+        or not _valid_fingerprint(fingerprint)
+        or not _valid_sidecar_document(sidecar, recovery_root, original)
     ):
         return False
     try:
@@ -406,16 +553,12 @@ def _find_operation(
     return None
 
 
-def _verified_destination(document: dict, recovery_root: Path) -> Path:
-    destination_raw = document.get("quarantined_path")
-    fingerprint = document.get("fingerprint")
-    if (
-        not isinstance(destination_raw, str)
-        or not isinstance(fingerprint, dict)
-        or not _valid_operation_document(
-            document, recovery_root, committed=True
-        )
-    ):
+def _verified_component(
+    destination_raw: object,
+    fingerprint: object,
+    recovery_root: Path,
+) -> Path:
+    if not isinstance(destination_raw, str) or not _valid_fingerprint(fingerprint):
         raise QuarantineRefused("quarantine_record_malformed")
     destination = Path(destination_raw)
     expected_parent = _quarantine_root(recovery_root) / "artifacts"
@@ -434,8 +577,26 @@ def _verified_destination(document: dict, recovery_root: Path) -> Path:
     return destination
 
 
+def _verified_destination(document: dict, recovery_root: Path) -> Path:
+    if not _valid_operation_document(document, recovery_root, committed=True):
+        raise QuarantineRefused("quarantine_record_malformed")
+    destination = _verified_component(
+        document.get("quarantined_path"),
+        document.get("fingerprint"),
+        recovery_root,
+    )
+    sidecar = document["sidecar"]
+    if sidecar.get("present") is True:
+        _verified_component(
+            sidecar.get("quarantined_path"),
+            sidecar.get("fingerprint"),
+            recovery_root,
+        )
+    return destination
+
+
 def _committed_result(metadata_path: Path, document: dict, *, replay: bool) -> dict:
-    return {
+    result = {
         "schema": QUARANTINE_SCHEMA,
         "action": "quarantine",
         "outcome": "already_quarantined" if replay else "quarantined",
@@ -445,7 +606,18 @@ def _committed_result(metadata_path: Path, document: dict, *, replay: bool) -> d
         "quarantined_path": document["quarantined_path"],
         "metadata_path": str(metadata_path),
         "fingerprint": document["fingerprint"],
+        "sidecar": (
+            {
+                "present": True,
+                "original_path": document["sidecar"]["original_path"],
+                "quarantined_path": document["sidecar"]["quarantined_path"],
+                "fingerprint": document["sidecar"]["fingerprint"],
+            }
+            if document["sidecar"].get("present") is True
+            else {"present": False}
+        ),
     }
+    return result
 
 
 def _commit_quarantine_metadata(path: Path, document: dict) -> None:
@@ -465,6 +637,8 @@ def _move_verified_source(
     fingerprint: dict,
     *,
     fault=None,
+    permissions_point: str = "permissions_tightened",
+    renamed_point: str = "renamed",
 ) -> None:
     """Re-open/no-follow and keep the verified file descriptor across rename."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -491,19 +665,66 @@ def _move_verified_source(
         if digest.hexdigest() != fingerprint["sha256"]:
             raise QuarantineRefused("archive_content_drift")
         os.fchmod(fd, paths.FILE_MODE)
-        _fault(fault, "permissions_tightened")
+        _fault(fault, permissions_point)
         named = source.lstat()
         if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
             raise QuarantineRefused("archive_path_swap")
         if destination.parent.stat().st_dev != opened.st_dev:
             raise QuarantineRefused("cross_filesystem_destination")
         os.rename(str(source), str(destination))
-        _fault(fault, "renamed")
+        _fault(fault, renamed_point)
         moved = os.fstat(fd)
         if (moved.st_dev, moved.st_ino) != (opened.st_dev, opened.st_ino):
             raise QuarantineRefused("archive_identity_drift")
     finally:
         os.close(fd)
+
+
+def _write_journal_phase(path: Path, document: dict, phase: str) -> None:
+    document["phase"] = phase
+    _atomic_private_write(path, document)
+
+
+def _component_state(component: dict) -> tuple[Path, Path, bool, bool]:
+    source = Path(component["original_path"])
+    destination = Path(component["quarantined_path"])
+    return (
+        source,
+        destination,
+        os.path.lexists(source),
+        os.path.lexists(destination),
+    )
+
+
+def _verify_bound_component(
+    component: dict,
+    recovery_root: Path,
+    *,
+    allow_destination: bool,
+) -> None:
+    source, destination, source_exists, destination_exists = _component_state(
+        component
+    )
+    if source_exists and destination_exists:
+        raise QuarantineRefused("destination_collision")
+    if source_exists:
+        canonical, observed = _fingerprint_open(source, recovery_root)
+        if (
+            canonical != component["original_path"]
+            or observed != component["fingerprint"]
+        ):
+            raise QuarantineRefused("evidence_drift")
+        if destination.parent.stat().st_dev != observed["device"]:
+            raise QuarantineRefused("cross_filesystem_destination")
+        return
+    if allow_destination and destination_exists:
+        _verified_component(
+            str(destination),
+            component["fingerprint"],
+            recovery_root,
+        )
+        return
+    raise QuarantineRefused("component_missing")
 
 
 def apply_quarantine(
@@ -513,7 +734,7 @@ def apply_quarantine(
     recovery_dir: Path | None = None,
     fault=None,
 ) -> dict:
-    """Apply or resume one token-bound, same-filesystem quarantine transition."""
+    """Apply/resume one token-bound quarantine operation, including its sidecar."""
     if not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{64}", token) is None:
         raise QuarantineRefused("token_invalid")
     recovery_root = (
@@ -526,6 +747,7 @@ def apply_quarantine(
         original_input = str(input_path)
     moved = False
     destination: Path | None = None
+    sidecar: dict | None = None
     try:
         with lock_mod.state_root_lock(blocking=True, timeout=30.0):
             existing = _find_operation(recovery_root, original_input, token)
@@ -534,7 +756,28 @@ def apply_quarantine(
                 if committed and document.get("state") == "committed":
                     if os.path.lexists(original_input):
                         raise QuarantineRefused("original_path_reappeared")
+                    sidecar = document["sidecar"]
+                    if (
+                        sidecar.get("present") is True
+                        and os.path.lexists(sidecar["original_path"])
+                    ):
+                        raise QuarantineRefused("sidecar_path_reappeared")
                     _verified_destination(document, recovery_root)
+                    stale_journal = (
+                        _quarantine_root(recovery_root)
+                        / "journals"
+                        / f"{document['operation_id']}.json"
+                    )
+                    stale = _read_json(stale_journal)
+                    if (
+                        stale is not None
+                        and _valid_operation_document(
+                            stale, recovery_root, committed=False
+                        )
+                        and stale.get("operation_id") == document["operation_id"]
+                        and _operation_token(stale) == token
+                    ):
+                        _durable_unlink(stale_journal)
                     return _committed_result(record_path, document, replay=True)
             else:
                 record_path = None
@@ -546,12 +789,17 @@ def apply_quarantine(
                 canonical, fingerprint = _fingerprint_open(source, recovery_root)
                 if canonical != original_input:
                     original_input = canonical
-                if _token_for(canonical, fingerprint) != token:
+                    source = Path(canonical)
+                sidecar = _sidecar_evidence(
+                    source,
+                    canonical,
+                    fingerprint,
+                    recovery_root,
+                )
+                if _token_for(canonical, fingerprint, sidecar) != token:
                     raise QuarantineRefused("evidence_drift")
                 dirs = _quarantine_dirs(recovery_root)
                 destination = _destination_for(canonical, fingerprint, recovery_root)
-                if os.path.lexists(destination):
-                    raise QuarantineRefused("destination_collision")
                 operation_id = uuid.uuid4().hex
                 journal_path = dirs["journals"] / f"{operation_id}.json"
                 document = {
@@ -561,7 +809,25 @@ def apply_quarantine(
                     "original_path": canonical,
                     "quarantined_path": str(destination),
                     "fingerprint": fingerprint,
+                    "sidecar": sidecar,
+                    "phase": "prepared",
                 }
+                archive_component = {
+                    "original_path": document["original_path"],
+                    "quarantined_path": document["quarantined_path"],
+                    "fingerprint": document["fingerprint"],
+                }
+                _verify_bound_component(
+                    archive_component,
+                    recovery_root,
+                    allow_destination=False,
+                )
+                if sidecar.get("present") is True:
+                    _verify_bound_component(
+                        sidecar,
+                        recovery_root,
+                        allow_destination=False,
+                    )
                 _atomic_private_write(journal_path, document)
                 record_path = journal_path
                 _fault(fault, "journal_durable")
@@ -573,18 +839,75 @@ def apply_quarantine(
             assert document is not None
             assert destination is not None
             fingerprint = document["fingerprint"]
-            source_exists = os.path.lexists(source)
-            destination_exists = os.path.lexists(destination)
-            if source_exists and destination_exists:
-                raise QuarantineRefused("destination_collision")
+            sidecar = document["sidecar"]
+            if sidecar.get("present") is not True:
+                candidate = _sidecar_path(Path(document["original_path"]))
+                if candidate is not None and os.path.lexists(candidate):
+                    raise QuarantineRefused("sidecar_presence_drift")
+            archive_component = {
+                "original_path": document["original_path"],
+                "quarantined_path": document["quarantined_path"],
+                "fingerprint": fingerprint,
+            }
+            (
+                source,
+                destination,
+                source_exists,
+                destination_exists,
+            ) = _component_state(archive_component)
+            moved = destination_exists and not source_exists
+            _verify_bound_component(
+                archive_component,
+                recovery_root,
+                allow_destination=True,
+            )
+            if sidecar.get("present") is True:
+                _verify_bound_component(
+                    sidecar,
+                    recovery_root,
+                    allow_destination=True,
+                )
+
+            if sidecar.get("present") is True:
+                (
+                    sidecar_source,
+                    sidecar_destination,
+                    sidecar_source_exists,
+                    sidecar_destination_exists,
+                ) = _component_state(sidecar)
+                if sidecar_source_exists:
+                    try:
+                        _move_verified_source(
+                            sidecar_source,
+                            sidecar_destination,
+                            sidecar["fingerprint"],
+                            fault=fault,
+                            permissions_point="sidecar_permissions_tightened",
+                            renamed_point="sidecar_renamed",
+                        )
+                    finally:
+                        moved = moved or (
+                            sidecar_destination.exists()
+                            and not sidecar_source.exists()
+                        )
+                    _fsync_dir(sidecar_source.parent)
+                    _fault(fault, "sidecar_source_dir_synced")
+                    _fsync_dir(sidecar_destination.parent)
+                    _fault(fault, "sidecar_destination_dir_synced")
+                elif sidecar_destination_exists:
+                    moved = True
+                _write_journal_phase(
+                    journal_path, document, "sidecar_moved"
+                )
+                _fault(fault, "sidecar_phase_durable")
+
+            (
+                source,
+                destination,
+                source_exists,
+                destination_exists,
+            ) = _component_state(archive_component)
             if source_exists:
-                canonical, observed = _fingerprint_open(source, recovery_root)
-                if (
-                    canonical != document["original_path"]
-                    or observed != fingerprint
-                    or _token_for(canonical, observed) != token
-                ):
-                    raise QuarantineRefused("evidence_drift")
                 try:
                     _move_verified_source(
                         source,
@@ -593,15 +916,18 @@ def apply_quarantine(
                         fault=fault,
                     )
                 finally:
-                    moved = destination.exists() and not source.exists()
+                    moved = moved or (
+                        destination.exists() and not source.exists()
+                    )
                 _fsync_dir(source.parent)
                 _fault(fault, "source_dir_synced")
                 _fsync_dir(destination.parent)
                 _fault(fault, "destination_dir_synced")
-            elif destination_exists:
-                moved = True
-            else:
-                raise QuarantineRefused("archive_missing")
+            _write_journal_phase(
+                journal_path, document, "components_moved"
+            )
+            if sidecar.get("present") is True:
+                _fault(fault, "components_phase_durable")
 
             canonical_destination, observed = _fingerprint_open(
                 destination,
@@ -613,6 +939,12 @@ def apply_quarantine(
                 or observed != fingerprint
             ):
                 raise QuarantineRefused("post_move_verification_failed")
+            if sidecar.get("present") is True:
+                _verified_component(
+                    sidecar["quarantined_path"],
+                    sidecar["fingerprint"],
+                    recovery_root,
+                )
             _fault(fault, "post_move_verified")
 
             committed_document = {
@@ -622,6 +954,7 @@ def apply_quarantine(
                 "original_path": document["original_path"],
                 "quarantined_path": document["quarantined_path"],
                 "fingerprint": fingerprint,
+                "sidecar": sidecar,
             }
             metadata_path = (
                 dirs["metadata"] / f"{document['operation_id']}.json"
@@ -636,17 +969,43 @@ def apply_quarantine(
     except QuarantineInjectedCrash:
         raise
     except QuarantineRefused as exc:
-        if moved and destination is not None and destination.exists():
+        moved_path = (
+            destination
+            if destination is not None and destination.exists()
+            else (
+                Path(sidecar["quarantined_path"])
+                if (
+                    isinstance(sidecar, dict)
+                    and sidecar.get("present") is True
+                    and Path(sidecar["quarantined_path"]).exists()
+                )
+                else None
+            )
+        )
+        if moved and moved_path is not None:
             raise QuarantineAppliedIncomplete(
                 f"quarantine bytes moved; bookkeeping incomplete: {exc}",
-                str(destination),
+                str(moved_path),
             ) from exc
         raise
     except Exception as exc:
-        if moved and destination is not None and destination.exists():
+        moved_path = (
+            destination
+            if destination is not None and destination.exists()
+            else (
+                Path(sidecar["quarantined_path"])
+                if (
+                    isinstance(sidecar, dict)
+                    and sidecar.get("present") is True
+                    and Path(sidecar["quarantined_path"]).exists()
+                )
+                else None
+            )
+        )
+        if moved and moved_path is not None:
             raise QuarantineAppliedIncomplete(
                 f"quarantine bytes moved; bookkeeping incomplete: {exc}",
-                str(destination),
+                str(moved_path),
             ) from exc
         raise QuarantineRefused("quarantine_apply_failed") from exc
 
@@ -655,6 +1014,7 @@ def _reverse_quarantine(
     metadata_path: str | Path,
     *,
     recovery_dir: Path | None = None,
+    fault=None,
 ) -> dict:
     """Internal guarded reversal; intentionally not exposed as a public CLI verb."""
     recovery_root = (
@@ -690,15 +1050,35 @@ def _reverse_quarantine(
         pending_path = dirs["reversals"] / f"{operation_id}.pending.json"
         reversal = _read_json(reversal_path)
         pending = _read_json(pending_path)
-        original = Path(str(document["original_path"]))
-        quarantined = Path(str(document["quarantined_path"]))
+        components = [
+            {
+                "original_path": document["original_path"],
+                "quarantined_path": document["quarantined_path"],
+                "fingerprint": document["fingerprint"],
+            }
+        ]
+        if document["sidecar"].get("present") is True:
+            components.append(document["sidecar"])
+
+        def component_states() -> list[tuple[Path, Path, bool, bool]]:
+            return [_component_state(component) for component in components]
+
+        original = Path(components[0]["original_path"])
+        quarantined = Path(components[0]["quarantined_path"])
+        all_restored = all(
+            source_exists and not destination_exists
+            for _, _, source_exists, destination_exists in component_states()
+        )
         if (
             isinstance(reversal, dict)
             and reversal.get("schema") == QUARANTINE_REVERSAL_SCHEMA
             and reversal.get("state") == "restored"
-            and original.exists()
-            and not quarantined.exists()
+            and reversal.get("operation_id") == operation_id
+            and reversal.get("sidecar") == document["sidecar"]
+            and all_restored
         ):
+            if pending is not None:
+                _durable_unlink(pending_path)
             return {
                 "schema": QUARANTINE_REVERSAL_SCHEMA,
                 "outcome": "already_restored",
@@ -706,7 +1086,7 @@ def _reverse_quarantine(
                 "applied": True,
                 "restored_path": str(original),
             }
-        if (
+        pending_valid = (
             isinstance(pending, dict)
             and pending.get("schema") == QUARANTINE_REVERSAL_SCHEMA
             and pending.get("operation_id") == operation_id
@@ -714,64 +1094,109 @@ def _reverse_quarantine(
             and pending.get("original_path") == str(original)
             and pending.get("quarantined_path") == str(quarantined)
             and pending.get("fingerprint") == document["fingerprint"]
-            and original.exists()
-            and not quarantined.exists()
-        ):
-            canonical, observed = _fingerprint_open(original, recovery_root)
-            if canonical != str(original) or observed != document["fingerprint"]:
-                raise QuarantineRefused("restored_fingerprint_drift")
-            completed = dict(pending)
-            completed["state"] = "restored"
-            _atomic_private_write(reversal_path, completed)
-            _durable_unlink(pending_path)
-            return {
-                "schema": QUARANTINE_REVERSAL_SCHEMA,
-                "outcome": "already_restored",
-                "mutated": False,
-                "applied": True,
-                "restored_path": str(original),
-            }
-        if os.path.lexists(original):
-            raise QuarantineRefused("original_destination_collision")
-        _verified_destination(document, recovery_root)
-        reversal_intent = {
-            "schema": QUARANTINE_REVERSAL_SCHEMA,
-            "operation_id": operation_id,
-            "state": "prepared",
-            "original_path": str(original),
-            "quarantined_path": str(quarantined),
-            "fingerprint": document["fingerprint"],
-        }
-        if os.path.lexists(pending_path):
-            raise QuarantineRefused("reversal_journal_collision")
-        _atomic_private_write(pending_path, reversal_intent)
-        os.rename(str(quarantined), str(original))
-        try:
-            _fsync_dir(quarantined.parent)
-            _fsync_dir(original.parent)
-            canonical, observed = _fingerprint_open(original, recovery_root)
-            if canonical != document["original_path"] or observed != document["fingerprint"]:
-                raise QuarantineAppliedIncomplete(
-                    "reverse bytes moved; bookkeeping incomplete",
-                    str(original),
+            and pending.get("sidecar") == document["sidecar"]
+        )
+        if pending is not None and not pending_valid:
+            raise QuarantineRefused("reversal_journal_invalid")
+        resumed_effect = bool(
+            pending_valid
+            and any(
+                source_exists
+                for _, _, source_exists, _ in component_states()
+            )
+        )
+        if not pending_valid:
+            if any(source_exists for _, _, source_exists, _ in component_states()):
+                raise QuarantineRefused("original_destination_collision")
+            for component in components:
+                _verified_component(
+                    component["quarantined_path"],
+                    component["fingerprint"],
+                    recovery_root,
                 )
+            reversal_intent = {
+                "schema": QUARANTINE_REVERSAL_SCHEMA,
+                "operation_id": operation_id,
+                "state": "prepared",
+                "phase": "prepared",
+                "original_path": str(original),
+                "quarantined_path": str(quarantined),
+                "fingerprint": document["fingerprint"],
+                "sidecar": document["sidecar"],
+            }
+            if os.path.lexists(pending_path):
+                raise QuarantineRefused("reversal_journal_collision")
+            _atomic_private_write(pending_path, reversal_intent)
+            pending = reversal_intent
+            _fault(fault, "reverse_journal_durable")
+        else:
+            reversal_intent = pending
+
+        try:
+            for index, component in enumerate(components):
+                (
+                    component_original,
+                    component_quarantined,
+                    original_exists,
+                    quarantined_exists,
+                ) = _component_state(component)
+                if original_exists and quarantined_exists:
+                    raise QuarantineRefused("reverse_destination_collision")
+                if not original_exists and not quarantined_exists:
+                    raise QuarantineRefused("reverse_component_missing")
+                if not original_exists:
+                    renamed_point = (
+                        "reverse_archive_renamed"
+                        if index == 0
+                        else "reverse_sidecar_renamed"
+                    )
+                    _move_verified_source(
+                        component_quarantined,
+                        component_original,
+                        component["fingerprint"],
+                        fault=fault,
+                        permissions_point=(
+                            "reverse_archive_permissions_tightened"
+                            if index == 0
+                            else "reverse_sidecar_permissions_tightened"
+                        ),
+                        renamed_point=renamed_point,
+                    )
+                    _fsync_dir(component_quarantined.parent)
+                    _fsync_dir(component_original.parent)
+                    _fault(
+                        fault,
+                        "reverse_archive_synced"
+                        if index == 0
+                        else "reverse_sidecar_synced",
+                    )
+                    _write_journal_phase(
+                        pending_path,
+                        reversal_intent,
+                        "archive_restored" if index == 0 else "sidecar_restored",
+                    )
+            for component in components:
+                canonical, observed = _fingerprint_open(
+                    Path(component["original_path"]), recovery_root
+                )
+                if (
+                    canonical != component["original_path"]
+                    or observed != component["fingerprint"]
+                ):
+                    raise QuarantineRefused("restored_fingerprint_drift")
             reversal = dict(reversal_intent)
             reversal["state"] = "restored"
-        except QuarantineAppliedIncomplete:
-            raise
-        except Exception as exc:
-            raise QuarantineAppliedIncomplete(
-                f"reverse bytes moved; bookkeeping incomplete: {exc}",
-                str(original),
-            ) from exc
-        if os.path.lexists(reversal_path):
-            raise QuarantineAppliedIncomplete(
-                "reverse bytes moved; reversal bookkeeping collision",
-                str(original),
-            )
-        try:
+            reversal["phase"] = "complete"
+            if os.path.lexists(reversal_path):
+                raise QuarantineAppliedIncomplete(
+                    "reverse bytes moved; reversal bookkeeping collision",
+                    str(original),
+                )
             _atomic_private_write(reversal_path, reversal)
+            _fault(fault, "reverse_metadata_committed")
             _durable_unlink(pending_path)
+        except QuarantineInjectedCrash:
+            raise
         except Exception as exc:
             raise QuarantineAppliedIncomplete(
                 f"reverse bytes moved; reversal bookkeeping incomplete: {exc}",
@@ -779,8 +1204,8 @@ def _reverse_quarantine(
             ) from exc
         return {
             "schema": QUARANTINE_REVERSAL_SCHEMA,
-            "outcome": "restored",
-            "mutated": True,
+            "outcome": "already_restored" if resumed_effect else "restored",
+            "mutated": not resumed_effect,
             "applied": True,
             "restored_path": str(original),
         }
