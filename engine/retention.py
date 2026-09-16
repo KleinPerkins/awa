@@ -85,6 +85,7 @@ _DIR_MODE = 0o700
 _FILE_MODE = 0o600
 _PROTECTED_FILE_MODE = 0o400
 _TRASH_DIRNAME = ".trash"
+_QUARANTINE_DIRNAME = "quarantine"
 
 
 # ---- durability shims (shared helper preferred; stdlib fallback) --------------------------------
@@ -345,6 +346,17 @@ def _safe_target(p: Path, recovery_root: Path) -> bool:
     return rp == rr or str(rp).startswith(str(rr) + os.sep)
 
 
+def _is_quarantine_target(p: Path, recovery_root: Path) -> bool:
+    """Quarantine is a separate preservation namespace, never a deletion target."""
+    try:
+        target = p.resolve(strict=False)
+        quarantine = (recovery_root / _QUARANTINE_DIRNAME).resolve(strict=False)
+        target.relative_to(quarantine)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
 def _unlink_retry(p: Path) -> tuple[bool, str]:
     """Bounded retry/backoff unlink. Returns (ok, error). ok=True means the file is GONE
     (removed or already absent); ok=False means a real failure after retries (an ERROR)."""
@@ -388,11 +400,17 @@ def _delete_one(recovery_root: Path, desc: ArtifactDescriptor, reason: str,
     artifact is still restorable, so no tombstone is written and it is not counted deleted)."""
     if desc.archive is None:
         return {"outcome": "error", "artifact_id": desc.artifact_id, "detail": "no archive path"}
-    if not _safe_target(desc.archive, recovery_root):
+    if (
+        not _safe_target(desc.archive, recovery_root)
+        or _is_quarantine_target(desc.archive, recovery_root)
+    ):
         return {"outcome": "refused_containment", "artifact_id": desc.artifact_id,
                 "detail": str(desc.archive)}
     if desc.manifest is not None and desc.manifest.exists() \
-            and not _safe_target(desc.manifest, recovery_root):
+            and (
+                not _safe_target(desc.manifest, recovery_root)
+                or _is_quarantine_target(desc.manifest, recovery_root)
+            ):
         return {"outcome": "refused_containment", "artifact_id": desc.artifact_id,
                 "detail": str(desc.manifest)}
 
@@ -463,7 +481,16 @@ def _resume(recovery_root: Path, state: state_mod.State | None) -> dict:
         manifest = jdoc.get("manifest") or ""
         reason = str(jdoc.get("reason") or "resume")
         # Never resume through a symlink/escape (a tampered journal must not delete outside root).
-        if archive and not _safe_target(Path(archive), recovery_root):
+        if archive and (
+            not _safe_target(Path(archive), recovery_root)
+            or _is_quarantine_target(Path(archive), recovery_root)
+        ):
+            result["needs_repair"].append(str(journal))
+            continue
+        if manifest and (
+            not _safe_target(Path(manifest), recovery_root)
+            or _is_quarantine_target(Path(manifest), recovery_root)
+        ):
             result["needs_repair"].append(str(journal))
             continue
         ok = True
@@ -471,7 +498,7 @@ def _resume(recovery_root: Path, state: state_mod.State | None) -> dict:
             ok, _ = _unlink_retry(Path(archive))
         if not ok:
             continue   # leave the journal; the next pass retries (honest, never false success)
-        if manifest and _safe_target(Path(manifest), recovery_root):
+        if manifest:
             _unlink_retry(Path(manifest))
         if state is not None and aid:
             state.record_recovery_tombstone(
