@@ -218,8 +218,9 @@ def _stored_row(lease: dict | None) -> dict | None:
 
 def _action_for_observation(
     observation: lifecycle_reconcile._Observation,
+    policy=None,
 ) -> dict | None:
-    row = lifecycle_reconcile._classify_observation(observation)
+    row = lifecycle_reconcile._classify_observation(observation, policy)
     if row.classification == "retire_candidate":
         kind = "retire-bookkeeping"
     elif row.classification == "adopt_candidate":
@@ -272,7 +273,19 @@ def _action_for_observation(
     return action
 
 
-def _plan_from_actions(actions: list[dict]) -> dict:
+def _policy_evidence(policy) -> dict:
+    return {
+        "valid": policy.lifecycle_no_touch_valid,
+        "sha256": _digest(
+            {
+                "lifecycle_no_touch": policy.lifecycle_no_touch,
+                "valid": policy.lifecycle_no_touch_valid,
+            }
+        ),
+    }
+
+
+def _plan_from_actions(actions: list[dict], *, policy_evidence: dict | None = None) -> dict:
     canonical_actions = sorted(
         (json.loads(_json_bytes(action)) for action in actions),
         key=lambda action: (
@@ -282,7 +295,13 @@ def _plan_from_actions(actions: list[dict]) -> dict:
             action.get("action_id", ""),
         ),
     )
-    core = {"schema": PLAN_SCHEMA, "actions": canonical_actions}
+    if policy_evidence is None:
+        policy_evidence = _policy_evidence(lifecycle_reconcile._lifecycle_policy())
+    core = {
+        "schema": PLAN_SCHEMA,
+        "policy": policy_evidence,
+        "actions": canonical_actions,
+    }
     plan_digest = _digest(core)
     displayed = []
     for action in canonical_actions:
@@ -292,18 +311,20 @@ def _plan_from_actions(actions: list[dict]) -> dict:
     return {
         "schema": PLAN_SCHEMA,
         "plan_digest": plan_digest,
+        "policy": policy_evidence,
         "actions": displayed,
     }
 
 
 def build_plan() -> dict:
     """Build a deterministic read-only plan from the canonical lifecycle snapshot."""
+    policy = lifecycle_reconcile._lifecycle_policy()
     actions = []
     for observation in lifecycle_reconcile._observations():
-        action = _action_for_observation(observation)
+        action = _action_for_observation(observation, policy)
         if action is not None:
             actions.append(action)
-    return _plan_from_actions(actions)
+    return _plan_from_actions(actions, policy_evidence=_policy_evidence(policy))
 
 
 def _select_action(

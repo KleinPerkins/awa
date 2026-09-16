@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # dev-worktree.sh — policy-driven helper for agent worktree isolation (AWA kernel).
 #
-# The script intentionally owns only git/worktree mechanics. It cannot call Cursor
-# MCP tools itself, so `ensure` prints the exact move_agent_to_root instruction that
-# the agent must execute after the worktree exists.
+# The script intentionally owns only git/worktree mechanics. `ensure` records
+# metadata-only handoff intent, then tells the operator how to open the target
+# through Cursor's Agents Window. It never claims relocation or session success.
 #
 # ZERO-LINK: this script carries NO org/host literals. Repo classification (including
 # excluding a self-governed sibling repo) is decided GENERICALLY by kernel/lib/awa_policy.py
@@ -35,6 +35,7 @@ AWA_FINISH_LIB="${AWA_FINISH_LIB:-$KERNEL_DIR/lib/awa_finish.py}"
 # one in-worktree file only when the helper proves the private directory contains no other content
 # and the lease identity matches the live worktree path + branch + common dir.
 AWA_BOOKKEEPING_LIB="$KERNEL_DIR/lib/awa_bookkeeping.py"
+AWA_HANDOFF_LIB="${AWA_HANDOFF_LIB:-$KERNEL_DIR/lib/awa_handoff.py}"
 export AWA_ROOTS_LIB
 
 # X3: agent-created worktrees live on a DURABLE root, not ~/.cursor/worktrees (which Cursor
@@ -288,6 +289,7 @@ ensure_worktree() {
   else
     git worktree add -b "$branch" "$path" "$base"
   fi
+  path="$(cd "$path" && pwd -P)" || die "created worktree identity is unavailable"
   set +e
   run_worktree_setup "$top" "$path"
   local setup_rc=$?
@@ -308,14 +310,25 @@ ensure_worktree() {
     return "$setup_rc"
   fi
 
+  # M2.4 entry handoff: publish intent only after the exact created target and
+  # Git identity exist. The authority owns schema validation, private modes,
+  # its dedicated lock, monotonic generations, and the atomic durable replace.
+  # If intent cannot be recorded, do not print guidance that implies a usable
+  # handoff; preserve the created worktree for explicit operator inspection.
+  if [ ! -f "$AWA_HANDOFF_LIB" ] || [ ! -r "$AWA_HANDOFF_LIB" ] || \
+     ! python3 "$AWA_HANDOFF_LIB" create --root "$path" >/dev/null; then
+    die "worktree created but handoff intent could not be recorded; inspect and preserve: $path"
+  fi
+
   if [ "$json" -eq 1 ]; then
-    printf '{"action":"created","rootPath":"%s","branch":"%s","move_agent_to_root":{"rootPath":"%s"}}\n' \
-      "$(printf '%s' "$path" | json_escape)" "$(printf '%s' "$branch" | json_escape)" "$(printf '%s' "$path" | json_escape)"
+    printf '{"action":"created","rootPath":"%s","branch":"%s","handoff":"pending"}\n' \
+      "$(printf '%s' "$path" | json_escape)" "$(printf '%s' "$branch" | json_escape)"
   else
     note "created worktree: $path"
     note "branch: $branch"
-    printf '\nNEXT: call cursor-app-control move_agent_to_root with:\n'
-    printf '  {"rootPath":"%s"}\n' "$path"
+    printf '\nNEXT: open a new Cursor Agents Window session with Worktree selected:\n'
+    printf '  %s\n' "$path"
+    printf 'The new session will validate and close this pending handoff intent.\n'
   fi
 }
 

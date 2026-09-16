@@ -1,11 +1,11 @@
-# Current source-checker process-profile evidence — 2026-09-14
+# Current source-checker process-profile evidence — 2026-09-16
 
 ## Purpose
 
-This is the fresh bounded process observation required after M2.2 canonicalized
-the digest-bound expected common-dir guard. It replaces the prior observation at
-this canonical evidence path and does not alter the hypothesis-only timing or
-inventory fields in `performance-baseline.v1.json`.
+This is the fresh bounded process observation required after M2.4 changed the
+source checker and generic default policy. It replaces the prior observation at
+this canonical evidence path and does not alter the historical measured-subject,
+hypothesis-only timing, or inventory fields in `performance-baseline.v1.json`.
 
 ## Producer
 
@@ -16,21 +16,20 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B \
   -m engine.tests.guard_boundary_profile \
   --boundary source \
   --count-git \
-  --json-out /tmp/awa-m2-2-audit-alias-process-profile.json
+  --json-out /tmp/awa-m2-4-process-profile.json
 ```
 
-- Measured at: `2026-09-14T03:33:44Z`
-- Branch: `feat/awa-integrity-m2-2-repair`
-- Base HEAD: `9849e34dc46b9754914e52cb7b9b810a9f5f5f4f`
+- Measured at: `2026-09-16T19:20:29Z`
+- Branch: `feat/awa-integrity-m2-4-entry-handoff`
+- Base HEAD: `90e8d968a0f191691dd5f38dce5b5ac8bf5c6f13`
 - Platform: `macOS-26.6.2-arm64-arm-64bit-Mach-O`
 - Python: `3.14.6`
 - Git: `git version 2.50.1 (Apple Git-155)`
 
-The measurement used the candidate tracked working tree above that base HEAD.
-For reproducible provenance, the source-tree digest below hashes every tracked
-path and its current bytes in sorted order, each length-prefixed with eight
-big-endian bytes. It excludes only the generated baseline and this evidence
-record, so adding those two outputs cannot change the measured-subject identity.
+The process measurement used the candidate working tree above that base HEAD.
+The measured-subject count and digest below remain the explicitly historical
+baseline identity pinned by the verifier; current producer identities are
+separately rebound below.
 
 - Measured-subject files: `264`
 - Measured-subject SHA-256: `2131af9746b42b5f71fd02fbc9a43089082217837129ce1d9cca68fefab00b0e`
@@ -45,8 +44,8 @@ record, so adding those two outputs cannot change the measured-subject identity.
 - Combined performance producer: `da65feeb123cc1e8164d73009abc65a94202c50298b085eb29b88a49be3a5a7b`
 - Case manifest: `eb4e7662f096cecc6d0a99717d71e1868552596f22abe1db61536e61d4476435`
 - Source guard: `aeee0c147f08976f20ea600d6fd3c891030346554871bdf7f39b6bf1e42baedf`
-- Source checker: `de08a4ba9723f6d894da954dedbcbf80531bb757ec1570165850bac15121f4be`
-- Default policy: `dbc06510525f69a5cd51d6f7c8e9a0c9ea6d888e35a854f45a06bc4168337870`
+- Source checker: `561fc24fc7e6ba5fce39711b608fdc0cbdb9686cb5d49ee88d985fb2164c7daf`
+- Default policy: `ce971012c1c8c1ffb821c08b4b3a70853a83f06247b0b9a3b7fbb5909ff66c04`
 
 ## Result
 

@@ -2310,6 +2310,7 @@ def _quarantine_count() -> int:
 
 
 _ROOTS_MODULES: dict[Path, object] = {}
+_HANDOFF_MODULES: dict[Path, object] = {}
 
 
 def _roots_module(source: Path):
@@ -2333,6 +2334,33 @@ def _roots_module(source: Path):
     spec.loader.exec_module(module)
     _ROOTS_MODULES[resolved] = module
     return module
+
+
+def _handoff_state(source: Path) -> str:
+    """Bounded state-only adapter to the single kernel handoff authority."""
+    resolved = source.resolve()
+    module = _HANDOFF_MODULES.get(resolved)
+    if module is None:
+        module_path = resolved / "kernel" / "lib" / "awa_handoff.py"
+        module_name = (
+            "awa_handoff_for_integrity_"
+            + hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:12]
+        )
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, module_path)
+            if spec is None or spec.loader is None:
+                return "unknown"
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+        except Exception:
+            return "unknown"
+        _HANDOFF_MODULES[resolved] = module
+    try:
+        state = module.read_state()
+    except Exception:
+        return "unknown"
+    return state if state in {"absent", "pending", "closed", "unknown"} else "unknown"
 
 
 def _lifecycle_facts(source: Path) -> tuple[
@@ -2494,7 +2522,7 @@ def _collect_facts(
         sessions_dangling=sessions_dangling,
         husks=husks,
         disposition_map=disposition_map,
-        handoff_state="absent",
+        handoff_state=_handoff_state(source),
         launchd_last_success_age_s=_launchd_age(previous, now),
         delivered=_delivered(previous),
     )
