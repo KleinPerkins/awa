@@ -131,6 +131,64 @@ def cmd_lease_read(args: argparse.Namespace) -> int:
 
 
 def cmd_recover(args: argparse.Namespace) -> int:
+    if args.what != "quarantine" and (
+        getattr(args, "preview", False)
+        or getattr(args, "apply", False)
+        or getattr(args, "token", "")
+    ):
+        return _emit(
+            {
+                "ok": False,
+                "error": "quarantine flags require recover quarantine",
+            },
+            code=2,
+        )
+    if args.what == "quarantine":
+        preview = bool(getattr(args, "preview", False))
+        apply = bool(getattr(args, "apply", False))
+        token = str(getattr(args, "token", "") or "")
+        if not args.archive or preview == apply or (preview and token) or (apply and not token):
+            return _emit(
+                {
+                    "schema": recovery.QUARANTINE_SCHEMA,
+                    "action": "quarantine",
+                    "outcome": "refused",
+                    "mutated": False,
+                    "applied": False,
+                    "reason": "malformed_cli",
+                },
+                code=2,
+            )
+        try:
+            if preview:
+                return _emit(recovery.preview_quarantine(args.archive))
+            return _emit(recovery.apply_quarantine(args.archive, token))
+        except recovery.QuarantineAppliedIncomplete as exc:
+            return _emit(
+                {
+                    "schema": recovery.QUARANTINE_SCHEMA,
+                    "action": "quarantine",
+                    "outcome": "refused",
+                    "mutated": exc.mutated,
+                    "applied": exc.applied,
+                    "reason": "bookkeeping_incomplete",
+                    "quarantined_path": exc.quarantined_path,
+                    "error": str(exc),
+                },
+                code=3,
+            )
+        except recovery.QuarantineRefused as exc:
+            return _emit(
+                {
+                    "schema": recovery.QUARANTINE_SCHEMA,
+                    "action": "quarantine",
+                    "outcome": "refused",
+                    "mutated": False,
+                    "applied": False,
+                    "reason": exc.reason,
+                },
+                code=1,
+            )
     if args.what == "bundle":
         with state_mod.State(assert_local=False) as st:
             r = recovery.create_bundle(args.worktree, allow_secrets=args.allow_secrets, state=st)
@@ -487,9 +545,9 @@ def build_parser() -> argparse.ArgumentParser:
     lr.set_defaults(fn=cmd_lease_read)
 
     rc = sub.add_parser("recover",
-                        help="recovery manager (bundle/patch/archive/restore/list/prune/status)")
+                        help="recovery manager (bundle/patch/archive/quarantine/restore/list/prune/status)")
     rc.add_argument("what", choices=["bundle", "patch", "archive", "restore-patch",
-                                     "restore-bundle", "list", "prune", "status"])
+                                     "restore-bundle", "quarantine", "list", "prune", "status"])
     rc.add_argument("--worktree", default=".")
     rc.add_argument("--patch", default="")
     rc.add_argument("--archive", default="")
@@ -505,6 +563,22 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--opportunistic", action="store_true",
                     help="prune --maintenance: opportunistic trigger (sessionStart hook / daemon) — "
                          "throttled to <=1/24h and non-blocking (a concurrent pass simply skips)")
+    quarantine_mode = rc.add_mutually_exclusive_group()
+    quarantine_mode.add_argument(
+        "--preview",
+        action="store_true",
+        help="quarantine: print deterministic digest-bound evidence without mutation",
+    )
+    quarantine_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="quarantine: apply the explicit digest-bound migration",
+    )
+    rc.add_argument(
+        "--token",
+        default="",
+        help="quarantine --apply: exact digest emitted by --preview",
+    )
     rc.set_defaults(fn=cmd_recover)
 
     integrity = sub.add_parser(

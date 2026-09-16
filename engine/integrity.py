@@ -2299,6 +2299,16 @@ def _recovery_facts() -> tuple[str | None, int | None]:
     return last_status, needs_repair
 
 
+def _quarantine_count() -> int:
+    """Derive the current committed on-disk quarantine count every evaluation."""
+    from . import recovery
+
+    try:
+        return recovery.quarantine_count(paths.recovery_dir())
+    except Exception:  # noqa: BLE001 — corrupt/partial state never inflates the count.
+        return 0
+
+
 _ROOTS_MODULES: dict[Path, object] = {}
 
 
@@ -2630,9 +2640,6 @@ def evaluate(
     previous_orphans = (
         previous.get("orphans", {}) if isinstance(previous, dict) else {}
     )
-    previous_recovery = (
-        previous.get("recovery", {}) if isinstance(previous, dict) else {}
-    )
     return {
         "schema": SCHEMA,
         "generated_at": generated_at,
@@ -2656,11 +2663,7 @@ def evaluate(
         "recovery": {
             "last_status": facts.recovery_last_status or "unknown",
             "needs_repair": facts.needs_repair or 0,
-            "quarantine_count": int(
-                previous_recovery.get("quarantine_count", 0)
-            )
-            if isinstance(previous_recovery, dict)
-            else 0,
+            "quarantine_count": _quarantine_count(),
         },
         "alert": {
             "last_transition": (

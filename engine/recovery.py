@@ -22,14 +22,17 @@ their names never start with a dot (operators list them with a plain `ls`).
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
+import stat
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import gitutil, paths, retention, state as state_mod
+from . import gitutil, lock as lock_mod, paths, retention, state as state_mod
 
 # S1 secret denylist (basename patterns), mirroring .gitignore secret classes.
 _SECRET = re.compile(
@@ -41,6 +44,771 @@ _SECRET = re.compile(
 # Manifest `kind` for the protected whole-worktree archive (D2). `prune_artifacts` treats any
 # artifact whose manifest marks `protected: true` as never-deletable.
 WORKTREE_ARCHIVE_KIND = "worktree-archive"
+
+QUARANTINE_SCHEMA = "awa-recovery-quarantine/v1"
+QUARANTINE_JOURNAL_SCHEMA = "awa-recovery-quarantine-journal/v1"
+QUARANTINE_REVERSAL_SCHEMA = "awa-recovery-quarantine-reversal/v1"
+QUARANTINE_CRASH_POINTS = (
+    "journal_durable",
+    "permissions_tightened",
+    "renamed",
+    "source_dir_synced",
+    "destination_dir_synced",
+    "post_move_verified",
+    "metadata_committed",
+    "journal_removed",
+)
+
+
+class QuarantineRefused(RuntimeError):
+    """The requested quarantine transition did not satisfy its frozen evidence."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class QuarantineInjectedCrash(RuntimeError):
+    """Test-only abrupt cut point; production never constructs this exception."""
+
+
+class QuarantineAppliedIncomplete(RuntimeError):
+    """Bytes moved, but durable bookkeeping/finalization did not complete."""
+
+    def __init__(self, message: str, quarantined_path: str):
+        super().__init__(message)
+        self.applied = True
+        self.mutated = True
+        self.quarantined_path = quarantined_path
+
+
+def _quarantine_root(recovery_root: Path) -> Path:
+    return recovery_root / "quarantine"
+
+
+def _quarantine_dirs(recovery_root: Path) -> dict[str, Path]:
+    root = paths.ensure_dir(_quarantine_root(recovery_root))
+    result = {
+        "root": root,
+        "artifacts": paths.ensure_dir(root / "artifacts"),
+        "metadata": paths.ensure_dir(root / "metadata"),
+        "journals": paths.ensure_dir(root / "journals"),
+        "reversals": paths.ensure_dir(root / "reversals"),
+    }
+    for directory in result.values():
+        try:
+            os.chmod(directory, paths.DIR_MODE)
+        except OSError:
+            pass
+    return result
+
+
+def _fsync_dir(directory: Path) -> None:
+    fd = os.open(
+        str(directory),
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_all(fd: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    written = 0
+    while written < len(view):
+        count = os.write(fd, view[written:])
+        if count <= 0:
+            raise OSError("short write made no progress")
+        written += count
+
+
+def _atomic_private_write(target: Path, document: dict) -> None:
+    paths.ensure_dir(target.parent)
+    payload = (
+        json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    temporary = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
+    fd = os.open(
+        str(temporary),
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        paths.FILE_MODE,
+    )
+    try:
+        _write_all(fd, payload)
+        os.fchmod(fd, paths.FILE_MODE)
+        os.fsync(fd)
+    except BaseException:
+        os.close(fd)
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+    else:
+        os.close(fd)
+    try:
+        os.replace(str(temporary), str(target))
+        _fsync_dir(target.parent)
+    except BaseException:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _durable_unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    _fsync_dir(path.parent)
+
+
+def _contained(path: Path, root: Path) -> bool:
+    try:
+        resolved_root = root.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+    except (FileNotFoundError, OSError, RuntimeError, ValueError):
+        return False
+    return resolved != resolved_root
+
+
+def _fingerprint_open(
+    path: Path,
+    recovery_root: Path,
+    *,
+    allow_quarantine: bool = False,
+) -> tuple[str, dict]:
+    """Open without following the leaf, hash through that fd, then re-lstat."""
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise QuarantineRefused("archive_unavailable") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise QuarantineRefused("archive_not_regular")
+    if not _contained(path, recovery_root):
+        raise QuarantineRefused("archive_outside_recovery_root")
+    if (
+        not allow_quarantine
+        and retention._is_quarantine_target(path, recovery_root)
+    ):
+        raise QuarantineRefused("archive_already_quarantined")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(str(path), flags)
+    except OSError as exc:
+        raise QuarantineRefused("archive_open_refused") from exc
+    digest = hashlib.sha256()
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise QuarantineRefused("archive_not_regular")
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise QuarantineRefused("archive_identity_drift")
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after_open = os.fstat(fd)
+    finally:
+        os.close(fd)
+    try:
+        after_path = path.lstat()
+    except OSError as exc:
+        raise QuarantineRefused("archive_path_swap") from exc
+    authoritative = (
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_size,
+        opened.st_mtime_ns,
+    )
+    if (
+        (
+            after_open.st_dev,
+            after_open.st_ino,
+            after_open.st_size,
+            after_open.st_mtime_ns,
+        )
+        != authoritative
+        or (
+            after_path.st_dev,
+            after_path.st_ino,
+            after_path.st_size,
+            after_path.st_mtime_ns,
+        )
+        != authoritative
+    ):
+        raise QuarantineRefused("archive_evidence_drift")
+    return str(path.resolve(strict=True)), {
+        "sha256": digest.hexdigest(),
+        "size": opened.st_size,
+        "mtime_ns": opened.st_mtime_ns,
+        "device": opened.st_dev,
+        "inode": opened.st_ino,
+    }
+
+
+def _token_for(canonical_path: str, fingerprint: dict) -> str:
+    evidence = {
+        "canonical_path": canonical_path,
+        "sha256": fingerprint["sha256"],
+        "size": fingerprint["size"],
+        "mtime_ns": fingerprint["mtime_ns"],
+        "device": fingerprint["device"],
+        "inode": fingerprint["inode"],
+    }
+    return hashlib.sha256(
+        json.dumps(
+            evidence,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _destination_for(
+    canonical_path: str,
+    fingerprint: dict,
+    recovery_root: Path,
+) -> Path:
+    basename = _slug(Path(canonical_path).name)
+    return (
+        _quarantine_root(recovery_root)
+        / "artifacts"
+        / f"{fingerprint['sha256']}-{basename}"
+    )
+
+
+def preview_quarantine(
+    archive: str,
+    *,
+    recovery_dir: Path | None = None,
+) -> dict:
+    """Return deterministic, read-only evidence for one explicitly named archive."""
+    recovery_root = (
+        Path(recovery_dir) if recovery_dir is not None else paths.recovery_dir()
+    )
+    candidate = Path(os.path.abspath(os.path.expanduser(archive)))
+    canonical, fingerprint = _fingerprint_open(candidate, recovery_root)
+    token = _token_for(canonical, fingerprint)
+    return {
+        "schema": QUARANTINE_SCHEMA,
+        "action": "quarantine",
+        "outcome": "previewed",
+        "mutated": False,
+        "applied": False,
+        "archive": canonical,
+        "destination": str(
+            _destination_for(canonical, fingerprint, recovery_root)
+        ),
+        "fingerprint": fingerprint,
+        "token": token,
+    }
+
+
+def _read_json(path: Path) -> dict | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _operation_token(document: dict) -> str | None:
+    source = document.get("original_path")
+    fingerprint = document.get("fingerprint")
+    if not isinstance(source, str) or not isinstance(fingerprint, dict):
+        return None
+    required = {"sha256", "size", "mtime_ns", "device", "inode"}
+    if set(fingerprint) != required:
+        return None
+    try:
+        return _token_for(source, fingerprint)
+    except (KeyError, TypeError):
+        return None
+
+
+def _valid_operation_document(
+    document: dict,
+    recovery_root: Path,
+    *,
+    committed: bool,
+) -> bool:
+    expected_schema = QUARANTINE_SCHEMA if committed else QUARANTINE_JOURNAL_SCHEMA
+    expected_state = "committed" if committed else "prepared"
+    operation_id = document.get("operation_id")
+    original = document.get("original_path")
+    destination = document.get("quarantined_path")
+    fingerprint = document.get("fingerprint")
+    if (
+        document.get("schema") != expected_schema
+        or document.get("state") != expected_state
+        or not isinstance(operation_id, str)
+        or re.fullmatch(r"[0-9a-f]{32}", operation_id) is None
+        or not isinstance(original, str)
+        or not Path(original).is_absolute()
+        or not isinstance(destination, str)
+        or not isinstance(fingerprint, dict)
+        or set(fingerprint) != {"sha256", "size", "mtime_ns", "device", "inode"}
+        or not isinstance(fingerprint.get("sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", fingerprint["sha256"]) is None
+        or any(
+            type(fingerprint.get(key)) is not int or fingerprint[key] < 0
+            for key in ("size", "mtime_ns", "device", "inode")
+        )
+    ):
+        return False
+    try:
+        root = recovery_root.resolve(strict=True)
+        source_parent = Path(original).parent.resolve(strict=True)
+        source_parent.relative_to(root)
+        expected_destination = _destination_for(
+            original, fingerprint, recovery_root
+        )
+        observed_destination = Path(destination)
+        return (
+            observed_destination == expected_destination
+            and observed_destination.parent.resolve(strict=True)
+            == (_quarantine_root(recovery_root) / "artifacts").resolve(strict=True)
+        )
+    except (FileNotFoundError, OSError, RuntimeError, ValueError):
+        return False
+
+
+def _find_operation(
+    recovery_root: Path,
+    original_path: str,
+    token: str,
+) -> tuple[Path, dict, bool] | None:
+    root = _quarantine_root(recovery_root)
+    for child, committed in (("metadata", True), ("journals", False)):
+        directory = root / child
+        if not directory.is_dir() or directory.is_symlink():
+            continue
+        for candidate in sorted(directory.glob("*.json")):
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            document = _read_json(candidate)
+            if (
+                document is not None
+                and _valid_operation_document(
+                    document, recovery_root, committed=committed
+                )
+                and document.get("original_path") == original_path
+                and _operation_token(document) == token
+            ):
+                return candidate, document, committed
+    return None
+
+
+def _verified_destination(document: dict, recovery_root: Path) -> Path:
+    destination_raw = document.get("quarantined_path")
+    fingerprint = document.get("fingerprint")
+    if (
+        not isinstance(destination_raw, str)
+        or not isinstance(fingerprint, dict)
+        or not _valid_operation_document(
+            document, recovery_root, committed=True
+        )
+    ):
+        raise QuarantineRefused("quarantine_record_malformed")
+    destination = Path(destination_raw)
+    expected_parent = _quarantine_root(recovery_root) / "artifacts"
+    try:
+        if destination.parent.resolve(strict=True) != expected_parent.resolve(strict=True):
+            raise QuarantineRefused("quarantine_destination_escape")
+    except (FileNotFoundError, OSError, RuntimeError):
+        raise QuarantineRefused("quarantine_destination_unavailable")
+    canonical, observed = _fingerprint_open(
+        destination,
+        recovery_root,
+        allow_quarantine=True,
+    )
+    if canonical != str(destination.resolve(strict=True)) or observed != fingerprint:
+        raise QuarantineRefused("quarantine_fingerprint_drift")
+    return destination
+
+
+def _committed_result(metadata_path: Path, document: dict, *, replay: bool) -> dict:
+    return {
+        "schema": QUARANTINE_SCHEMA,
+        "action": "quarantine",
+        "outcome": "already_quarantined" if replay else "quarantined",
+        "mutated": not replay,
+        "applied": True,
+        "archive": document["original_path"],
+        "quarantined_path": document["quarantined_path"],
+        "metadata_path": str(metadata_path),
+        "fingerprint": document["fingerprint"],
+    }
+
+
+def _commit_quarantine_metadata(path: Path, document: dict) -> None:
+    if os.path.lexists(path):
+        raise QuarantineRefused("metadata_collision")
+    _atomic_private_write(path, document)
+
+
+def _fault(fault, point: str) -> None:
+    if fault is not None:
+        fault(point)
+
+
+def _move_verified_source(
+    source: Path,
+    destination: Path,
+    fingerprint: dict,
+    *,
+    fault=None,
+) -> None:
+    """Re-open/no-follow and keep the verified file descriptor across rename."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(str(source), flags)
+    except OSError as exc:
+        raise QuarantineRefused("archive_open_refused") from exc
+    try:
+        opened = os.fstat(fd)
+        identity = {
+            "size": opened.st_size,
+            "mtime_ns": opened.st_mtime_ns,
+            "device": opened.st_dev,
+            "inode": opened.st_ino,
+        }
+        if any(identity[key] != fingerprint[key] for key in identity):
+            raise QuarantineRefused("archive_identity_drift")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        if digest.hexdigest() != fingerprint["sha256"]:
+            raise QuarantineRefused("archive_content_drift")
+        os.fchmod(fd, paths.FILE_MODE)
+        _fault(fault, "permissions_tightened")
+        named = source.lstat()
+        if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
+            raise QuarantineRefused("archive_path_swap")
+        if destination.parent.stat().st_dev != opened.st_dev:
+            raise QuarantineRefused("cross_filesystem_destination")
+        os.rename(str(source), str(destination))
+        _fault(fault, "renamed")
+        moved = os.fstat(fd)
+        if (moved.st_dev, moved.st_ino) != (opened.st_dev, opened.st_ino):
+            raise QuarantineRefused("archive_identity_drift")
+    finally:
+        os.close(fd)
+
+
+def apply_quarantine(
+    archive: str,
+    token: str,
+    *,
+    recovery_dir: Path | None = None,
+    fault=None,
+) -> dict:
+    """Apply or resume one token-bound, same-filesystem quarantine transition."""
+    if not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{64}", token) is None:
+        raise QuarantineRefused("token_invalid")
+    recovery_root = (
+        Path(recovery_dir) if recovery_dir is not None else paths.recovery_dir()
+    )
+    input_path = Path(os.path.abspath(os.path.expanduser(archive)))
+    try:
+        original_input = str(input_path.resolve(strict=False))
+    except (OSError, RuntimeError):
+        original_input = str(input_path)
+    moved = False
+    destination: Path | None = None
+    try:
+        with lock_mod.state_root_lock(blocking=True, timeout=30.0):
+            existing = _find_operation(recovery_root, original_input, token)
+            if existing is not None:
+                record_path, document, committed = existing
+                if committed and document.get("state") == "committed":
+                    if os.path.lexists(original_input):
+                        raise QuarantineRefused("original_path_reappeared")
+                    _verified_destination(document, recovery_root)
+                    return _committed_result(record_path, document, replay=True)
+            else:
+                record_path = None
+                document = None
+                committed = False
+
+            source = Path(original_input)
+            if document is None:
+                canonical, fingerprint = _fingerprint_open(source, recovery_root)
+                if canonical != original_input:
+                    original_input = canonical
+                if _token_for(canonical, fingerprint) != token:
+                    raise QuarantineRefused("evidence_drift")
+                dirs = _quarantine_dirs(recovery_root)
+                destination = _destination_for(canonical, fingerprint, recovery_root)
+                if os.path.lexists(destination):
+                    raise QuarantineRefused("destination_collision")
+                operation_id = uuid.uuid4().hex
+                journal_path = dirs["journals"] / f"{operation_id}.json"
+                document = {
+                    "schema": QUARANTINE_JOURNAL_SCHEMA,
+                    "operation_id": operation_id,
+                    "state": "prepared",
+                    "original_path": canonical,
+                    "quarantined_path": str(destination),
+                    "fingerprint": fingerprint,
+                }
+                _atomic_private_write(journal_path, document)
+                record_path = journal_path
+                _fault(fault, "journal_durable")
+            else:
+                journal_path = record_path
+                destination = Path(str(document["quarantined_path"]))
+                dirs = _quarantine_dirs(recovery_root)
+
+            assert document is not None
+            assert destination is not None
+            fingerprint = document["fingerprint"]
+            source_exists = os.path.lexists(source)
+            destination_exists = os.path.lexists(destination)
+            if source_exists and destination_exists:
+                raise QuarantineRefused("destination_collision")
+            if source_exists:
+                canonical, observed = _fingerprint_open(source, recovery_root)
+                if (
+                    canonical != document["original_path"]
+                    or observed != fingerprint
+                    or _token_for(canonical, observed) != token
+                ):
+                    raise QuarantineRefused("evidence_drift")
+                try:
+                    _move_verified_source(
+                        source,
+                        destination,
+                        fingerprint,
+                        fault=fault,
+                    )
+                finally:
+                    moved = destination.exists() and not source.exists()
+                _fsync_dir(source.parent)
+                _fault(fault, "source_dir_synced")
+                _fsync_dir(destination.parent)
+                _fault(fault, "destination_dir_synced")
+            elif destination_exists:
+                moved = True
+            else:
+                raise QuarantineRefused("archive_missing")
+
+            canonical_destination, observed = _fingerprint_open(
+                destination,
+                recovery_root,
+                allow_quarantine=True,
+            )
+            if (
+                canonical_destination != str(destination.resolve(strict=True))
+                or observed != fingerprint
+            ):
+                raise QuarantineRefused("post_move_verification_failed")
+            _fault(fault, "post_move_verified")
+
+            committed_document = {
+                "schema": QUARANTINE_SCHEMA,
+                "operation_id": document["operation_id"],
+                "state": "committed",
+                "original_path": document["original_path"],
+                "quarantined_path": document["quarantined_path"],
+                "fingerprint": fingerprint,
+            }
+            metadata_path = (
+                dirs["metadata"] / f"{document['operation_id']}.json"
+            )
+            _commit_quarantine_metadata(metadata_path, committed_document)
+            _fault(fault, "metadata_committed")
+            _durable_unlink(journal_path)
+            _fault(fault, "journal_removed")
+            return _committed_result(
+                metadata_path, committed_document, replay=False
+            )
+    except QuarantineInjectedCrash:
+        raise
+    except QuarantineRefused as exc:
+        if moved and destination is not None and destination.exists():
+            raise QuarantineAppliedIncomplete(
+                f"quarantine bytes moved; bookkeeping incomplete: {exc}",
+                str(destination),
+            ) from exc
+        raise
+    except Exception as exc:
+        if moved and destination is not None and destination.exists():
+            raise QuarantineAppliedIncomplete(
+                f"quarantine bytes moved; bookkeeping incomplete: {exc}",
+                str(destination),
+            ) from exc
+        raise QuarantineRefused("quarantine_apply_failed") from exc
+
+
+def _reverse_quarantine(
+    metadata_path: str | Path,
+    *,
+    recovery_dir: Path | None = None,
+) -> dict:
+    """Internal guarded reversal; intentionally not exposed as a public CLI verb."""
+    recovery_root = (
+        Path(recovery_dir) if recovery_dir is not None else paths.recovery_dir()
+    )
+    metadata = Path(metadata_path)
+    with lock_mod.state_root_lock(blocking=True, timeout=30.0):
+        try:
+            if (
+                metadata.is_symlink()
+                or not metadata.is_file()
+                or metadata.parent.resolve(strict=True)
+                != (
+                    _quarantine_root(recovery_root) / "metadata"
+                ).resolve(strict=True)
+            ):
+                raise QuarantineRefused("quarantine_metadata_invalid")
+        except (FileNotFoundError, OSError, RuntimeError):
+            raise QuarantineRefused("quarantine_metadata_invalid")
+        document = _read_json(metadata)
+        if (
+            document is None
+            or not _valid_operation_document(
+                document, recovery_root, committed=True
+            )
+        ):
+            raise QuarantineRefused("quarantine_metadata_invalid")
+        dirs = _quarantine_dirs(recovery_root)
+        operation_id = document.get("operation_id")
+        if not isinstance(operation_id, str) or not operation_id:
+            raise QuarantineRefused("quarantine_metadata_invalid")
+        reversal_path = dirs["reversals"] / f"{operation_id}.json"
+        pending_path = dirs["reversals"] / f"{operation_id}.pending.json"
+        reversal = _read_json(reversal_path)
+        pending = _read_json(pending_path)
+        original = Path(str(document["original_path"]))
+        quarantined = Path(str(document["quarantined_path"]))
+        if (
+            isinstance(reversal, dict)
+            and reversal.get("schema") == QUARANTINE_REVERSAL_SCHEMA
+            and reversal.get("state") == "restored"
+            and original.exists()
+            and not quarantined.exists()
+        ):
+            return {
+                "schema": QUARANTINE_REVERSAL_SCHEMA,
+                "outcome": "already_restored",
+                "mutated": False,
+                "applied": True,
+                "restored_path": str(original),
+            }
+        if (
+            isinstance(pending, dict)
+            and pending.get("schema") == QUARANTINE_REVERSAL_SCHEMA
+            and pending.get("operation_id") == operation_id
+            and pending.get("state") == "prepared"
+            and pending.get("original_path") == str(original)
+            and pending.get("quarantined_path") == str(quarantined)
+            and pending.get("fingerprint") == document["fingerprint"]
+            and original.exists()
+            and not quarantined.exists()
+        ):
+            canonical, observed = _fingerprint_open(original, recovery_root)
+            if canonical != str(original) or observed != document["fingerprint"]:
+                raise QuarantineRefused("restored_fingerprint_drift")
+            completed = dict(pending)
+            completed["state"] = "restored"
+            _atomic_private_write(reversal_path, completed)
+            _durable_unlink(pending_path)
+            return {
+                "schema": QUARANTINE_REVERSAL_SCHEMA,
+                "outcome": "already_restored",
+                "mutated": False,
+                "applied": True,
+                "restored_path": str(original),
+            }
+        if os.path.lexists(original):
+            raise QuarantineRefused("original_destination_collision")
+        _verified_destination(document, recovery_root)
+        reversal_intent = {
+            "schema": QUARANTINE_REVERSAL_SCHEMA,
+            "operation_id": operation_id,
+            "state": "prepared",
+            "original_path": str(original),
+            "quarantined_path": str(quarantined),
+            "fingerprint": document["fingerprint"],
+        }
+        if os.path.lexists(pending_path):
+            raise QuarantineRefused("reversal_journal_collision")
+        _atomic_private_write(pending_path, reversal_intent)
+        os.rename(str(quarantined), str(original))
+        try:
+            _fsync_dir(quarantined.parent)
+            _fsync_dir(original.parent)
+            canonical, observed = _fingerprint_open(original, recovery_root)
+            if canonical != document["original_path"] or observed != document["fingerprint"]:
+                raise QuarantineAppliedIncomplete(
+                    "reverse bytes moved; bookkeeping incomplete",
+                    str(original),
+                )
+            reversal = dict(reversal_intent)
+            reversal["state"] = "restored"
+        except QuarantineAppliedIncomplete:
+            raise
+        except Exception as exc:
+            raise QuarantineAppliedIncomplete(
+                f"reverse bytes moved; bookkeeping incomplete: {exc}",
+                str(original),
+            ) from exc
+        if os.path.lexists(reversal_path):
+            raise QuarantineAppliedIncomplete(
+                "reverse bytes moved; reversal bookkeeping collision",
+                str(original),
+            )
+        try:
+            _atomic_private_write(reversal_path, reversal)
+            _durable_unlink(pending_path)
+        except Exception as exc:
+            raise QuarantineAppliedIncomplete(
+                f"reverse bytes moved; reversal bookkeeping incomplete: {exc}",
+                str(original),
+            ) from exc
+        return {
+            "schema": QUARANTINE_REVERSAL_SCHEMA,
+            "outcome": "restored",
+            "mutated": True,
+            "applied": True,
+            "restored_path": str(original),
+        }
+
+
+def quarantine_count(recovery_dir: Path | None = None) -> int:
+    """Count only committed records whose referenced artifact still matches."""
+    recovery_root = (
+        Path(recovery_dir) if recovery_dir is not None else paths.recovery_dir()
+    )
+    metadata_dir = _quarantine_root(recovery_root) / "metadata"
+    if not metadata_dir.is_dir() or metadata_dir.is_symlink():
+        return 0
+    count = 0
+    for metadata in sorted(metadata_dir.glob("*.json")):
+        document = _read_json(metadata)
+        if (
+            document is None
+            or document.get("schema") != QUARANTINE_SCHEMA
+            or document.get("state") != "committed"
+        ):
+            continue
+        try:
+            _verified_destination(document, recovery_root)
+        except QuarantineRefused:
+            continue
+        count += 1
+    return count
 
 
 def _prune_on_creation(state: state_mod.State | None, recovery_dir: Path) -> None:

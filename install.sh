@@ -462,6 +462,7 @@ from pathlib import Path
 root = Path(os.environ["STATE_DIR"])
 protected_retain = root / "protected-retain"   # kernel Retain artifacts (already protected)
 recovery = root / "recovery"                    # engine recovery artifacts (some protected)
+quarantine = recovery / "quarantine"            # explicit digest-bound preservation namespace
 
 
 def protected_recovery_files(recovery_dir):
@@ -492,10 +493,13 @@ keep = protected_recovery_files(recovery)
 for child in list(root.iterdir()):
     if child == protected_retain:
         continue
-    if child == recovery and keep:
-        # Prune ONLY ordinary artifacts; preserve every protected archive + manifest.
+    if child == recovery and (keep or quarantine.is_dir()):
+        # Prune ONLY ordinary artifacts; preserve protected artifacts and the complete quarantine
+        # subtree byte-identically, including any crash-resume journal.
         for f in list(recovery.rglob("*")):
             if f.is_dir() or f.is_symlink():
+                continue
+            if quarantine == f or quarantine in f.parents:
                 continue
             if str(f.resolve()) in keep:
                 continue
@@ -504,6 +508,8 @@ for child in list(root.iterdir()):
             except OSError:
                 pass
         for d in sorted((p for p in recovery.rglob("*") if p.is_dir()), reverse=True):
+            if d == quarantine or quarantine in d.parents:
+                continue
             try:
                 d.rmdir()
             except OSError:
