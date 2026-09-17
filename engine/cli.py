@@ -243,10 +243,10 @@ def _integrity_exit_code(status: dict) -> int:
     )
 
 
-def _open_console(path: Path) -> bool:
+def _open_console(target: Path | str) -> bool:
     try:
         result = subprocess.run(
-            ["open", str(path)],
+            ["open", str(target)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -342,6 +342,30 @@ def cmd_integrity(args: argparse.Namespace) -> int:
         return _emit(committed, code=_integrity_exit_code(committed))
 
     if args.what == "console":
+        if getattr(args, "serve", False):
+            from . import integrity_server
+
+            def started(url: str) -> None:
+                print(url, flush=True)
+                if getattr(args, "open", False):
+                    try:
+                        opened = _open_console(url)
+                    except Exception:
+                        opened = False
+                    if not opened:
+                        _note(
+                            "browser could not be opened; "
+                            "use the printed console URL"
+                        )
+
+            result = integrity_server.serve(on_started=started)
+            if result.reason == "idle":
+                return 0
+            if result.reason == "interrupted":
+                return 130
+            _note("private console server stopped after an error")
+            return 3
+
         status = integrity_mod.read_status()
         if status is None:
             return _emit(
@@ -618,7 +642,12 @@ def build_parser() -> argparse.ArgumentParser:
     integrity_console.add_argument(
         "--open",
         action="store_true",
-        help="open the referenced private HTML file with the host default",
+        help="open the referenced private HTML file or served capability URL",
+    )
+    integrity_console.add_argument(
+        "--serve",
+        action="store_true",
+        help="serve ephemerally on a token-gated IPv4 loopback URL",
     )
     integrity_console.set_defaults(fn=cmd_integrity)
     integrity_repair = integrity_sub.add_parser(

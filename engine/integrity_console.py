@@ -7,6 +7,7 @@ import hashlib
 import html
 import json
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import integrity
 
@@ -109,19 +110,76 @@ def clock_state(
     }
 
 
-def render(projection: dict) -> str:
-    """Render a byte-stable page from a closed public projection."""
-    model = _closed_projection(projection)
+def _served_form_csp(action: str | None, form_action: str | None) -> str:
+    if action is None and form_action is None:
+        return "'none'"
+    if action != "run-checks-now" or not isinstance(form_action, str):
+        raise ValueError("invalid served console form action")
+    parsed = urlsplit(form_action)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "127.0.0.1"
+        or parsed.port is None
+        or parsed.port < 1
+        or parsed.username is not None
+        or parsed.password is not None
+        or not parsed.path.startswith("/")
+        or not parsed.path.endswith("/run-checks-now")
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("invalid served console form CSP")
+    return form_action
+
+
+def _csp(form_action: str) -> str:
     script_hash = _csp_hash(_CLOCK_SCRIPT)
     style_hash = _csp_hash(_STYLE)
-    csp = (
+    return (
         "default-src 'none'; "
         f"script-src 'sha256-{script_hash}'; "
         f"style-src 'sha256-{style_hash}'; "
         "img-src 'none'; connect-src 'none'; font-src 'none'; "
         "object-src 'none'; media-src 'none'; frame-src 'none'; "
-        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        f"base-uri 'none'; form-action {form_action}; frame-ancestors 'none'"
     )
+
+
+def served_csp(form_action: str) -> str:
+    """Return the exact CSP shared by the served page meta tag and header."""
+    return _csp(_served_form_csp("run-checks-now", form_action))
+
+
+def render_no_status() -> str:
+    """Render a token-free served-only first-run recovery page."""
+    return (
+        "<!doctype html>\n"
+        "<html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<meta name=\"color-scheme\" content=\"dark\">"
+        "<title>AWA integrity — NO STATUS YET</title>"
+        f"<style>{_STYLE}</style></head>"
+        "<body><main><header><div><h1>AWA integrity</h1>"
+        "<p>No integrity status yet.</p></div></header>"
+        "<section class=\"verdict\" aria-labelledby=\"overall-status\">"
+        "<div class=\"status\" id=\"overall-status\">NO STATUS YET</div>"
+        "<p>Run checks now to create the first private integrity status.</p>"
+        "</section><form method=\"post\" action=\"run-checks-now\">"
+        "<button type=\"submit\">Run checks now</button></form>"
+        "</main></body></html>\n"
+    )
+
+
+def render(
+    projection: dict,
+    *,
+    serve_action: str | None = None,
+    served_form_action: str | None = None,
+) -> str:
+    """Render a byte-stable page from a closed public projection."""
+    model = _closed_projection(projection)
+    form_csp = _served_form_csp(serve_action, served_form_action)
+    csp = _csp(form_csp)
 
     overall = model["overall"]
     generated_at = model.get("generated_at") or ""
@@ -146,6 +204,12 @@ def render(projection: dict) -> str:
     )
     orphans = model["orphans"]
     recovery = model["recovery"]
+    form = (
+        "<form method=\"post\" action=\"run-checks-now\">"
+        "<button type=\"submit\">Run checks now</button></form>"
+        if serve_action is not None
+        else ""
+    )
 
     return (
         "<!doctype html>\n"
@@ -159,7 +223,7 @@ def render(projection: dict) -> str:
         f"data-generated-at=\"{html.escape(generated_at, quote=True)}\" "
         f"data-fresh-until=\"{html.escape(fresh_until, quote=True)}\">"
         "<header><div><h1>AWA integrity</h1>"
-        f"<p>Private snapshot · generation {model['generation']}</p></div></header>"
+        f"<p>Private snapshot · generation {model['generation']}</p></div></header>{form}"
         "<section class=\"verdict\" aria-labelledby=\"overall-status\">"
         f"<div class=\"status\" id=\"overall-status\">{html.escape(overall.upper())}</div>"
         "<p>Last checked <span id=\"checked-age\">0s ago</span>"
