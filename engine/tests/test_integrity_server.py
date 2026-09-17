@@ -483,6 +483,273 @@ class TestIntegrityServer(EngineTestCase):
         self.assertEqual(result[0].reason, "error")
         self.assertTrue(server.closed)
 
+    def test_failed_browser_open_warns_then_live_get_post_still_work(self):
+        self._commit_status()
+        evaluator = mock.Mock(return_value=self._status())
+        committer = mock.Mock(return_value=2)
+        holder = {}
+        ready = threading.Event()
+        output_ready = threading.Event()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        result = []
+
+        def run_server(*, on_started):
+            server = integrity_server.IntegrityConsoleServer(
+                idle_timeout_s=0.35,
+                evaluator=evaluator,
+                committer=committer,
+            )
+            holder["server"] = server
+            ready.set()
+            return server.serve(on_started=on_started)
+
+        def run_cli():
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(
+                stderr
+            ):
+                result.append(
+                    cli.main(["integrity", "console", "--serve", "--open"])
+                )
+                output_ready.set()
+
+        with mock.patch.object(
+            integrity_server,
+            "serve",
+            side_effect=run_server,
+        ), mock.patch.object(
+            cli,
+            "_open_console",
+            return_value=False,
+        ):
+            thread = threading.Thread(target=run_cli)
+            thread.start()
+            self.assertTrue(ready.wait(timeout=2))
+            server = holder["server"]
+            deadline = time.monotonic() + 2
+            while "\n" not in stdout.getvalue() and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertEqual(
+                stdout.getvalue(),
+                server.capability_url + "\n",
+            )
+            self.assertEqual(
+                self._request(
+                    server,
+                    "GET",
+                    server.capability_path,
+                )[0],
+                200,
+            )
+            self.assertEqual(
+                self._request(
+                    server,
+                    "POST",
+                    server.capability_path + "run-checks-now",
+                    headers={
+                        "Origin": server.origin,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                    body=b"",
+                )[0],
+                303,
+            )
+            thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(output_ready.is_set())
+        self.assertEqual(result, [0])
+        self.assertEqual(stdout.getvalue().count(server.capability_url), 1)
+        self.assertEqual(
+            stderr.getvalue(),
+            "awa: browser could not be opened; use the printed console URL\n",
+        )
+        self.assertNotIn(server.token, stderr.getvalue())
+        evaluator.assert_called_once_with("deep", trigger="cli")
+        committer.assert_called_once()
+        self.assertTrue(server.closed)
+
+    def test_absent_status_get_then_post_then_valid_get(self):
+        server, thread, _result = self._start(
+            idle_timeout_s=1,
+            evaluator=mock.Mock(return_value=self._status()),
+            committer=integrity._commit,
+        )
+        status, _headers, body = self._request(
+            server,
+            "GET",
+            server.capability_path,
+        )
+        page = body.decode("utf-8")
+        self.assertEqual(status, 200)
+        self.assertIn("NO STATUS YET", page)
+        self.assertIn("No integrity status yet", page)
+        self.assertIn(
+            '<form method="post" action="run-checks-now">',
+            page,
+        )
+        self.assertNotIn("GREEN", page)
+        self.assertNotIn("Recent history", page)
+        self.assertNotIn("Invariants", page)
+        self.assertNotIn(server.token, page)
+        self.assertTrue(thread.is_alive())
+
+        status, headers, body = self._request(
+            server,
+            "POST",
+            server.capability_path + "run-checks-now",
+            headers={
+                "Origin": server.origin,
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body=b"",
+        )
+        self.assertEqual(status, 303)
+        self.assertEqual(headers["Location"], "./")
+        self.assertEqual(body, b"")
+        status, _headers, body = self._request(
+            server,
+            "GET",
+            server.capability_path,
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("generation 1", body.decode("utf-8"))
+        self.assertIn("GREEN", body.decode("utf-8"))
+
+    def test_corrupt_get_is_request_local_and_post_recovers(self):
+        root = paths.ensure_dir(paths.integrity_dir())
+        paths.integrity_status_path().write_text(
+            '{"schema":"corrupt","secret":"DO NOT LEAK"}\n',
+            encoding="utf-8",
+        )
+        server, thread, _result = self._start(
+            idle_timeout_s=1,
+            evaluator=mock.Mock(return_value=self._status()),
+            committer=integrity._commit,
+        )
+        status, _headers, body = self._request(
+            server,
+            "GET",
+            server.capability_path,
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(body, b"Integrity status unavailable.\n")
+        self.assertNotIn(b"DO NOT LEAK", body)
+        self.assertNotIn(server.token.encode(), body)
+        self.assertTrue(thread.is_alive())
+        paths.integrity_status_path().unlink()
+        self.assertEqual(
+            self._request(
+                server,
+                "POST",
+                server.capability_path + "run-checks-now",
+                headers={
+                    "Origin": server.origin,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                body=b"",
+            )[0],
+            303,
+        )
+        self.assertEqual(
+            self._request(
+                server,
+                "GET",
+                server.capability_path,
+            )[0],
+            200,
+        )
+        self.assertTrue(root.is_dir())
+
+    def test_transient_projection_read_error_is_request_local(self):
+        self._commit_status()
+        server, thread, _result = self._start()
+        with mock.patch.object(
+            integrity,
+            "read_status",
+            side_effect=OSError("SECRET transient path"),
+        ):
+            status, _headers, body = self._request(
+                server,
+                "GET",
+                server.capability_path,
+            )
+        self.assertEqual(status, 503)
+        self.assertEqual(body, b"Integrity status unavailable.\n")
+        self.assertNotIn(b"SECRET", body)
+        self.assertNotIn(server.token.encode(), body)
+        self.assertTrue(thread.is_alive())
+        self.assertEqual(
+            self._request(
+                server,
+                "GET",
+                server.capability_path,
+            )[0],
+            200,
+        )
+
+    def test_malformed_parse_request_is_local_then_valid_get_works(self):
+        self._commit_status()
+        server, thread, _result = self._start()
+        malformed = (
+            b"GET /"
+            + b"x" * 70_000
+            + b" HTTP/1.1\r\n"
+            + f"Host: {server.authority}\r\n\r\n".encode()
+        )
+        status, raw = self._raw_request(server, malformed)
+        self.assertEqual(status, 404)
+        self.assertNotIn(server.token.encode(), raw)
+        self.assertTrue(thread.is_alive())
+        self.assertEqual(
+            self._request(
+                server,
+                "GET",
+                server.capability_path,
+            )[0],
+            200,
+        )
+
+    def test_http_server_handle_error_is_request_local(self):
+        self._commit_status()
+        server, thread, _result = self._start()
+        server._httpd.handle_error(None, None)
+        self.assertFalse(server._fatal)
+        self.assertTrue(thread.is_alive())
+        self.assertEqual(
+            self._request(
+                server,
+                "GET",
+                server.capability_path,
+            )[0],
+            200,
+        )
+
+    def test_ambiguous_request_targets_reject_without_idle_reset(self):
+        self._commit_status()
+        evaluator = mock.Mock()
+        server, _thread, _result = self._start(evaluator=evaluator)
+        before = server._last_activity
+        targets = (
+            server.capability_url,
+            server.capability_path[:-1] + "\\/",
+            f"/{server.token}prefix/",
+        )
+        responses = []
+        for target in targets:
+            status, _headers, body = self._request(
+                server,
+                "GET",
+                target,
+            )
+            responses.append((status, body))
+            self.assertNotIn(server.token.encode(), body)
+        self.assertEqual(
+            responses,
+            [(404, b"Request rejected.\n")] * 3,
+        )
+        self.assertEqual(server._last_activity, before)
+        evaluator.assert_not_called()
+
     def test_rejected_traffic_does_not_extend_idle(self):
         server, thread, result = self._start(idle_timeout_s=0.18)
         started = time.monotonic()
@@ -617,6 +884,36 @@ class TestIntegrityServer(EngineTestCase):
         opener.assert_called_once_with(
             "http://127.0.0.1:54321/capability/"
         )
+
+    def test_cli_opener_exception_warns_without_aborting_server(self):
+        def fake_serve(*, on_started):
+            on_started("http://127.0.0.1:54321/capability/")
+            return integrity_server.ServeResult("idle", 54321)
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(
+            integrity_server,
+            "serve",
+            side_effect=fake_serve,
+        ), mock.patch.object(
+            cli,
+            "_open_console",
+            side_effect=RuntimeError("SECRET capability failure"),
+        ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(
+            stderr
+        ):
+            code = cli.main(["integrity", "console", "--serve", "--open"])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            stdout.getvalue(),
+            "http://127.0.0.1:54321/capability/\n",
+        )
+        self.assertEqual(
+            stderr.getvalue(),
+            "awa: browser could not be opened; use the printed console URL\n",
+        )
+        self.assertNotIn("SECRET", stderr.getvalue())
 
     def test_cli_server_error_is_generic(self):
         stderr = io.StringIO()

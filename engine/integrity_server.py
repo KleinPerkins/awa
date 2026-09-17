@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import http.server
 import json
+import os
 import secrets
 import socket
 import socketserver
@@ -26,6 +27,7 @@ REQUEST_TIMEOUT_S = 2.0
 _FORM_CONTENT_TYPE = "application/x-www-form-urlencoded"
 _GENERIC_BODY = b"Request rejected.\n"
 _ERROR_BODY = b"Integrity check failed.\n"
+_STATUS_UNAVAILABLE_BODY = b"Integrity status unavailable.\n"
 _GENERIC_CSP = (
     "default-src 'none'; base-uri 'none'; form-action 'none'; "
     "frame-ancestors 'none'"
@@ -36,6 +38,14 @@ _GENERIC_CSP = (
 class ServeResult:
     reason: str
     port: int
+
+
+class _StatusAbsent(Exception):
+    pass
+
+
+class _ProjectionUnavailable(Exception):
+    pass
 
 
 class _LoopbackHTTPServer(http.server.HTTPServer):
@@ -54,9 +64,7 @@ class _LoopbackHTTPServer(http.server.HTTPServer):
         return request, client_address
 
     def handle_error(self, request, client_address) -> None:
-        owner = getattr(self, "owner", None)
-        if owner is not None:
-            owner._fatal = True
+        return
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -171,7 +179,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def _read_projection(self) -> dict:
         status = integrity.read_status()
         if not isinstance(status, dict):
-            raise RuntimeError("integrity status unavailable")
+            if not os.path.lexists(paths.integrity_status_path()):
+                raise _StatusAbsent
+            raise _ProjectionUnavailable
         artifacts = status.get("artifacts")
         reference = (
             artifacts.get("public") if isinstance(artifacts, dict) else None
@@ -179,15 +189,15 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if not isinstance(reference, dict) or not isinstance(
             reference.get("path"), str
         ):
-            raise RuntimeError("integrity projection unavailable")
+            raise _ProjectionUnavailable
         target = paths.integrity_dir() / Path(reference["path"])
         with target.open("rb") as handle:
             raw = handle.read(MAX_PUBLIC_BYTES + 1)
         if len(raw) > MAX_PUBLIC_BYTES:
-            raise RuntimeError("integrity projection unavailable")
+            raise _ProjectionUnavailable
         value = json.loads(raw.decode("utf-8"))
         if not isinstance(value, dict):
-            raise RuntimeError("integrity projection unavailable")
+            raise _ProjectionUnavailable
         return value
 
     def _dispatch_get(self) -> None:
@@ -198,12 +208,23 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         ):
             self._reject()
             return
-        projection = self._read_projection()
-        page = integrity_console.render(
-            projection,
-            serve_action="run-checks-now",
-            served_form_action=self._owner.form_action_url,
-        ).encode("utf-8")
+        try:
+            projection = self._read_projection()
+            page = integrity_console.render(
+                projection,
+                serve_action="run-checks-now",
+                served_form_action=self._owner.form_action_url,
+            ).encode("utf-8")
+        except _StatusAbsent:
+            page = integrity_console.render_no_status().encode("utf-8")
+        except Exception:
+            self._respond(
+                503,
+                _STATUS_UNAVAILABLE_BODY,
+                content_type="text/plain; charset=utf-8",
+            )
+            self._owner._touch()
+            return
         self._respond(
             200,
             page,
@@ -247,17 +268,28 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         try:
             self._dispatch(method)
         except (BrokenPipeError, ConnectionError, OSError):
-            self._owner._fatal = True
+            if method == "POST":
+                self._owner._fatal = True
         except Exception:
-            try:
-                self._respond(
-                    500,
-                    _ERROR_BODY,
-                    content_type="text/plain; charset=utf-8",
-                )
-            except (BrokenPipeError, ConnectionError, OSError):
-                pass
-            self._owner._fatal = True
+            if method == "POST":
+                try:
+                    self._respond(
+                        500,
+                        _ERROR_BODY,
+                        content_type="text/plain; charset=utf-8",
+                    )
+                except (BrokenPipeError, ConnectionError, OSError):
+                    pass
+                self._owner._fatal = True
+            else:
+                try:
+                    self._respond(
+                        503,
+                        _STATUS_UNAVAILABLE_BODY,
+                        content_type="text/plain; charset=utf-8",
+                    )
+                except (BrokenPipeError, ConnectionError, OSError):
+                    pass
 
     def do_GET(self) -> None:
         self._dispatch_safely("GET")

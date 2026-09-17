@@ -197,6 +197,20 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertNotIn("<button", page)
         self.assertIn("form-action 'none'", html.unescape(page))
 
+    def test_served_no_status_page_is_closed_and_token_free(self):
+        page = integrity_console.render_no_status()
+        self.assertIn("NO STATUS YET", page)
+        self.assertIn("No integrity status yet", page)
+        self.assertIn(
+            '<form method="post" action="run-checks-now">',
+            page,
+        )
+        self.assertNotIn("capability-token", page)
+        self.assertNotIn("GREEN", page)
+        self.assertNotIn("Recent history", page)
+        self.assertNotIn("Invariants", page)
+        self.assertNotIn("<script", page)
+
     def test_script_injection_escaped(self):
         projection = self._projection()
         projection["invariants"][1]["redacted_reason"] = (

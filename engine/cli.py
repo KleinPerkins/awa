@@ -347,8 +347,16 @@ def cmd_integrity(args: argparse.Namespace) -> int:
 
             def started(url: str) -> None:
                 print(url, flush=True)
-                if getattr(args, "open", False) and not _open_console(url):
-                    raise RuntimeError("private console could not be opened")
+                if getattr(args, "open", False):
+                    try:
+                        opened = _open_console(url)
+                    except Exception:
+                        opened = False
+                    if not opened:
+                        _note(
+                            "browser could not be opened; "
+                            "use the printed console URL"
+                        )
 
             result = integrity_server.serve(on_started=started)
             if result.reason == "idle":

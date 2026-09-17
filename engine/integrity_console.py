@@ -150,6 +150,26 @@ def served_csp(form_action: str) -> str:
     return _csp(_served_form_csp("run-checks-now", form_action))
 
 
+def render_no_status() -> str:
+    """Render a token-free served-only first-run recovery page."""
+    return (
+        "<!doctype html>\n"
+        "<html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<meta name=\"color-scheme\" content=\"dark\">"
+        "<title>AWA integrity — NO STATUS YET</title>"
+        f"<style>{_STYLE}</style></head>"
+        "<body><main><header><div><h1>AWA integrity</h1>"
+        "<p>No integrity status yet.</p></div></header>"
+        "<section class=\"verdict\" aria-labelledby=\"overall-status\">"
+        "<div class=\"status\" id=\"overall-status\">NO STATUS YET</div>"
+        "<p>Run checks now to create the first private integrity status.</p>"
+        "</section><form method=\"post\" action=\"run-checks-now\">"
+        "<button type=\"submit\">Run checks now</button></form>"
+        "</main></body></html>\n"
+    )
+
+
 def render(
     projection: dict,
     *,
