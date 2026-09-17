@@ -140,6 +140,10 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertEqual(first, second)
         self.assertTrue(first.startswith("<!doctype html>"))
         self.assertTrue(first.endswith("\n"))
+        self.assertEqual(
+            hashlib.sha256(first.encode("utf-8")).hexdigest(),
+            "63afc7c317e79494e1b6d3adf2b814a9b00c40f7e69e036920bdde08aaa0c0dc",
+        )
 
     def test_self_contained_no_remote_assets(self):
         page = integrity_console.render(self._projection())
@@ -160,6 +164,38 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertIn("connect-src 'none'", csp)
         self.assertIn("form-action 'none'", csp)
         self.assertNotIn("'unsafe-inline'", csp)
+
+    def test_served_mode_adds_only_post_form_and_exact_form_csp(self):
+        action = "http://127.0.0.1:54321/capability-token/run-checks-now"
+        page = integrity_console.render(
+            self._projection(),
+            serve_action="run-checks-now",
+            served_form_action=action,
+        )
+        script, csp = self._script_and_csp(page)
+        self.assertIn(
+            '<form method="post" action="run-checks-now">',
+            page,
+        )
+        self.assertIn('<button type="submit">Run checks now</button>', page)
+        self.assertIn(f"form-action {action}", csp)
+        self.assertNotIn("form-action 'none'", csp)
+        self.assertIn("Date.now()", script)
+        for forbidden in (
+            "fetch(",
+            "XMLHttpRequest",
+            "WebSocket",
+            "document.cookie",
+        ):
+            self.assertNotIn(forbidden, page)
+
+    def test_static_mode_remains_action_free_and_token_free(self):
+        token = "capability-token-must-not-persist"
+        page = integrity_console.render(self._projection())
+        self.assertNotIn(token, page)
+        self.assertNotIn("<form", page)
+        self.assertNotIn("<button", page)
+        self.assertIn("form-action 'none'", html.unescape(page))
 
     def test_script_injection_escaped(self):
         projection = self._projection()
@@ -348,6 +384,9 @@ class TestIntegrityConsole(EngineTestCase):
         )
         self.assertTrue(
             (runtime / "engine" / "integrity_console.py").is_file()
+        )
+        self.assertTrue(
+            (runtime / "engine" / "integrity_server.py").is_file()
         )
         self.assertFalse(trace.exists())
         self.assertEqual(hooks.read_bytes(), before)
