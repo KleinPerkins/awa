@@ -750,6 +750,66 @@ class TestIntegrityServer(EngineTestCase):
         self.assertEqual(server._last_activity, before)
         evaluator.assert_not_called()
 
+    def test_non_ascii_get_target_is_generic_and_request_local(self):
+        self._commit_status()
+        server, thread, _result = self._start()
+        raw_request = (
+            b"GET /\xff/ HTTP/1.1\r\n"
+            + f"Host: {server.authority}\r\n".encode()
+            + f"Origin: {server.origin}\r\n\r\n".encode()
+        )
+        status, raw = self._raw_request(server, raw_request)
+        self.assertEqual(status, 404)
+        self.assertTrue(raw.endswith(b"Request rejected.\n"))
+        self.assertNotIn(server.token.encode(), raw)
+        self.assertTrue(thread.is_alive())
+        self.assertEqual(
+            self._request(
+                server,
+                "GET",
+                server.capability_path,
+            )[0],
+            200,
+        )
+
+    def test_non_ascii_post_target_is_generic_then_valid_post_works(self):
+        self._commit_status()
+        evaluator = mock.Mock(return_value=self._status())
+        committer = mock.Mock(return_value=2)
+        server, thread, _result = self._start(
+            evaluator=evaluator,
+            committer=committer,
+        )
+        raw_request = (
+            b"POST /\xff/ HTTP/1.1\r\n"
+            + f"Host: {server.authority}\r\n".encode()
+            + f"Origin: {server.origin}\r\n".encode()
+            + b"Content-Type: application/x-www-form-urlencoded\r\n"
+            + b"Content-Length: 0\r\n\r\n"
+        )
+        status, raw = self._raw_request(server, raw_request)
+        self.assertEqual(status, 404)
+        self.assertTrue(raw.endswith(b"Request rejected.\n"))
+        self.assertNotIn(server.token.encode(), raw)
+        evaluator.assert_not_called()
+        committer.assert_not_called()
+        self.assertTrue(thread.is_alive())
+        self.assertEqual(
+            self._request(
+                server,
+                "POST",
+                server.capability_path + "run-checks-now",
+                headers={
+                    "Origin": server.origin,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                body=b"",
+            )[0],
+            303,
+        )
+        evaluator.assert_called_once_with("deep", trigger="cli")
+        committer.assert_called_once()
+
     def test_rejected_traffic_does_not_extend_idle(self):
         server, thread, result = self._start(idle_timeout_s=0.18)
         started = time.monotonic()

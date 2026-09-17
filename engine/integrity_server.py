@@ -125,6 +125,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         return True
 
     def _route(self) -> str | None:
+        if not isinstance(self.path, str) or not self.path.isascii():
+            return None
         parts = self.path.split("/")
         if len(parts) not in {3, 4} or parts[0] != "":
             return None
