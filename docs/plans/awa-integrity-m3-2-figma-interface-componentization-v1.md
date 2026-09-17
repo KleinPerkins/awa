@@ -143,16 +143,19 @@ Execution uses the Figma integration only after plan acceptance and explicit imp
 Every state gets desktop and narrow Figma frames, a deterministic synthetic fixture, semantic output
 assertions, and explicit action/recovery behavior.
 
+The **normative restart command** is `awa-engine integrity console --serve --open`. Every reference
+to restart guidance below means that exact command text, never a capability URL or token.
+
 | State | Primary message | Action and recovery contract |
 |---|---|---|
 | No status / first run | “No status yet” | Show `Run checks now`; never imply green; explain that the first check creates local status. |
 | Healthy | “AWA is healthy” | Show freshness and last-check time; action remains available in served mode. |
 | Degraded / warning | “AWA needs attention” | Explain affected checks in plain language; keep technical id secondary; offer only `Run checks now`. |
 | Critical | “AWA needs immediate attention” | Distinct icon/text/heading, not color-only; never expose repair/destructive action. |
-| Check request failed | “Checks could not complete” | Generic request-local 500 page; no exception/token; instruct retry or local restart. Server closes after evaluator/commit failure as today. |
-| Status unavailable/corrupt | “Status cannot be read” | Generic request-local 503 HTML state; server remains available; offer `Run checks now` because a valid POST can recover. |
+| Fatal check failure | “Checks could not complete” | HTTP 500 after evaluator/commit failure; send a token-free page with no action form, then close the server as M3.1 does. Show exactly `Restart the console, then run checks again.` and the normative restart command. |
+| Status unavailable/corrupt | “Status cannot be read” | Recoverable request-local HTTP 503; keep the server available and retain the relative `Run checks now` form so a valid POST can recover in-session. |
 | Stale | “Status is stale / critical” | Existing clock-only script forces effective red after `fresh_until`; explain that a new check is required. |
-| Console idle shutdown | “This console closes after 5 minutes idle” | Persistent guidance on served pages gives the exact generic restart command; never embed the current token URL. After shutdown, browser connection failure is expected and no daemon restarts it. |
+| Console idle shutdown | “This console closes after 5 minutes idle” | Persistent guidance on every served console page shows the normative restart command. Never embed the current capability URL/token. After shutdown, browser connection failure is expected and no daemon restarts it. |
 | Static snapshot | “Private snapshot” | No form/button/restart action, no token, and no behavior beyond clock-only staleness. |
 
 There is no deterministic rendered “check running” state. The existing synchronous empty-body form
@@ -259,14 +262,17 @@ M3.1 server; warning/error paths remain functional through existing rendering.
 1. Design degraded, critical, stale, request-failure, unavailable/corrupt, and static
    variants from M3.2-A primitives at desktop/narrow widths.
 2. **Owner checkpoint 2:** approve all state hierarchy, copy, actions, and non-color cues.
-3. Implement variants as pure renderer helpers. Convert request-local 500/503 text responses to
-   generic deterministic HTML pages without changing status codes, server fatal/request-local
-   behavior, evaluator calls, or token handling.
+3. Implement variants as pure renderer helpers. Convert the existing 500/503 text responses to
+   deterministic HTML pages without changing status codes, evaluator calls, token handling, or M3.1's
+   split behavior: fatal 500 closes the server and has no form; recoverable request-local 503 keeps the
+   server and relative `Run checks now` form.
 4. Add the §5 persistent synchronous-submission copy beside the served action. Treat browser-native
    loading as sufficient pending feedback; add no rendered running state, new script, route,
    background worker, or persisted state.
-5. Add one focused test per state plus redaction, status code, retry/recovery, static action-free,
-   no-destructive-route, and idle/restart-guidance coverage.
+5. Add one focused test per state plus redaction and status-code coverage. Assert fatal 500 closes the
+   server, has no form, and contains the exact recovery sentence plus normative restart command;
+   assert recoverable 503 keeps the server and relative `Run checks now` form and permits a successful
+   in-session POST; assert static output has no restart action and no destructive route.
 6. Open one Draft PR with the §10 reproducibility record; run Bugbot and security review; leave
    unarmed.
 
@@ -301,13 +307,14 @@ protected. The §12 rollout gates remain deferred.
 | Concern | Required proof |
 |---|---|
 | State completeness | One synthetic deterministic fixture and exact heading/action/recovery assertions for every §5 state. |
-| Static/served parity | Shared visual components; static has no action/token; served has only the relative empty-body POST form. |
+| Static/served parity | Shared visual components; static has no action/token. Interactive served states use only the relative empty-body POST form; fatal 500 has no form. |
 | Security | Existing loopback/token/Host/Origin/no-CORS/proxy/body/method/destructive-route tests stay green; error bodies leak nothing. |
 | CSP/redaction | Exact header/meta CSP relationship, hashes, no remote assets, escaped JSON/HTML, no path/secret/token fixtures. |
+| Failure recovery | Fatal 500: exact recovery sentence + normative restart command, no form, server closes. Recoverable request-local 503: relative `Run checks now` form remains, server stays available, valid POST recovers in-session. |
 | Accessibility | Automated semantic assertions plus recorded keyboard/zoom/screen-reader-structure review; AA token contrast calculation. |
 | Responsive | Synthetic 320 px/desktop/200% evidence for every state, long copy, large counts, and responsive table/list behavior. |
 | Determinism | Same normalized projection/mode yields byte-identical HTML; generated artifact remains `0600` and status-referenced. |
-| Lifecycle | Fresh port/token per launch; rejected traffic does not extend idle; valid activity does; shutdown closes socket; restart copy is generic. |
+| Lifecycle | Fresh port/token per launch; rejected traffic does not extend idle; valid activity does; shutdown closes socket. Every served idle-shutdown guidance surface and fatal-500 page contains the exact normative restart command; static output contains no restart action. |
 | Pending feedback | Served action shows the persistent “Checks may take a moment” copy; synchronous POST/303 behavior stays; no rendered running state or added script. |
 
 Every implementation Draft PR description must include a reproducibility record with:
