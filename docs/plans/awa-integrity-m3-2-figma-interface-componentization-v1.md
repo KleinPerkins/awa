@@ -49,9 +49,11 @@ automation. No GitHub Actions runner or recurring infrastructure.
   empty-body HTML form; no `fetch`, XHR, WebSocket, cookies, local storage, analytics, or telemetry.
 - Preserve compatibility: Python 3.9, no frontend build step, no runtime dependency, no new service,
   no paid runner, no performance SLA, and no `chaos-scheduler` or Cursor Canvas use.
-- Treat Figma Code Connect as optional and capability-gated. Use it only if the available integration
-  can map approved Figma components directly to the Python/server-rendered source boundaries. Do not
-  introduce React or another frontend toolchain solely to obtain Code Connect.
+- Treat Figma Code Connect as optional and capability-gated. Its templates are UI/framework-agnostic
+  but require JavaScript/TypeScript authoring. Direct mapping may be unavailable or not configured in
+  the authorized environment; use it only when both available and configured. Do not add
+  JavaScript/TypeScript, package tooling, React, or another frontend stack solely to obtain Code
+  Connect.
 
 ## 1. Current state and roadmap boundary
 
@@ -64,18 +66,14 @@ automation. No GitHub Actions runner or recurring infrastructure.
   evaluator failure, idle shutdown, and browser-open failure without leaking the token;
 - tests pin loopback/token/Host/Origin/CORS/form/CSP/redaction/idle behavior.
 
-The original active AWA implementation roadmap is complete: 13 of 13 task bodies from M1-A.1 through
-M3.1 are merged. The frozen plan body remains byte-identical; its mutable index row carries that
-closeout. This does **not** claim release, installation, host wiring, or live Desktop UAT:
-
-- the frozen plan's “Cross-repo PR sequencing,” M1 completion, acceptance, and rollback sections
-  already assign host wiring and activation to separate `~/dev` and release/install work;
-- live Desktop UAT remains an explicit operator checkpoint in M2.4 and the M1 acceptance path;
-- the accepted priority addendum already removes M4/Quickhost export from the active sequence
-  indefinitely and leaves Slack activation opted out.
+All 13 active AWA implementation task bodies from M1-A.1 through M3.1 are merged. This is
+**implementation completion, not rollout completion**: the frozen plan body remains byte-identical,
+its mutable index row records the 13/13 implementation status, and §12 is the canonical ledger for
+deferred rollout gates. The accepted priority addendum separately keeps M4/Quickhost export outside
+the active sequence and Slack activation opted out.
 
 M3.2 is a new, separate milestone. It neither reopens those completed implementation bodies nor
-silently completes the deferred rollout/UAT gates.
+silently completes the §12 rollout gates.
 
 ## 2. Operator outcome
 
@@ -104,33 +102,40 @@ secondary detail, but the primary hierarchy and copy are operator-facing.
 
 ### Non-goals
 
-- React, JSX, TypeScript, npm, a bundler, client routing, hydration, or a design-system framework.
+- React, JSX, JavaScript/TypeScript application code, npm, a bundler, client routing, hydration, or a
+  design-system framework; specifically, no JS/TS or package tooling solely for Code Connect.
 - Figma Code Connect as a prerequisite, generated application code, or Figma as a runtime dependency.
 - New evaluator fields, lifecycle actions, destructive controls, repair/quarantine UI, or exports.
 - Persistent server, background daemon, auto-refresh/polling, notifications, remote assets, telemetry,
   multi-machine access, Quickhost, or a broad AWA UI redesign.
-- Host wiring, release/tag/pin, installation, Slack activation, or live Desktop UAT.
+- Any rollout activity in the canonical deferred-gates ledger (§12).
 - Performance budgets or screenshot pixel identity across browser/OS font-rendering engines.
 
 ## 4. Figma-first workflow
 
 Execution uses the Figma integration only after plan acceptance and explicit implementation GO:
 
-1. Search the connected design system and available libraries first. Record the selected existing
+1. **Figma Gate 0:** before any discovery or design mutation, the owner identifies an authorized
+   existing destination file or explicitly authorizes creation of one empty destination file. Record
+   the file key and authorization basis in the Draft PR without secrets or tokenized URLs.
+2. If a new destination is authorized, create only the blank file first. Then, for either an existing
+   or new destination, search the connected design system and available libraries before creating any
+   frame or component. Record the selected existing
    components, variables, and styles; if no suitable system is accessible, use the minimum local
    primitives required by this plan rather than inventing a broad library.
-2. Import no production data, tokenized URL, host path, username, machine identifier, or secret.
+3. Import no production data, tokenized URL, host path, username, machine identifier, or secret.
    Figma fixtures use synthetic counts, timestamps, reasons, and generations.
-3. Design the minimum end-to-end slice first: shell, status summary, freshness, primary action,
+4. Design the minimum end-to-end slice first: shell, status summary, freshness, primary action,
    no-status recovery, and healthy state at desktop and narrow widths.
-4. Review that slice with the owner before implementation. Then design the remaining warning,
-   critical, running, failure, unavailable, and shutdown-guidance states using the approved primitives.
-5. Define component variants and responsive behavior, including focus, disabled/unavailable action,
+5. Review that slice with the owner before implementation. Then design the remaining warning,
+   critical, failure, unavailable, and shutdown-guidance states using the approved primitives.
+6. Define component variants and responsive behavior, including focus, disabled/unavailable action,
    long copy, large counts, and 200% zoom. Avoid decorative variants with no runtime state.
-6. Attempt Code Connect only after the source boundaries exist and only if Python/server-rendered
-   mapping is directly supported. Otherwise record “not supported for this implementation language”
-   in the PR evidence and use the explicit mapping in §6; do not add a frontend stack.
-7. Treat owner-approved Figma frames as the visual specification. Runtime HTML is still generated
+7. Attempt Code Connect only after the source boundaries exist and only if direct mapping is available
+   and configured in the authorized environment. If it is unavailable or unconfigured, record that
+   capability state in the PR and use §6 plus tests; do not add its required JS/TS authoring or package
+   tooling solely to enable it.
+8. Treat owner-approved Figma frames as the visual specification. Runtime HTML is still generated
    only from reviewed repository source; no Figma export writes production source automatically.
 
 ## 5. Required state contract
@@ -144,16 +149,17 @@ assertions, and explicit action/recovery behavior.
 | Healthy | “AWA is healthy” | Show freshness and last-check time; action remains available in served mode. |
 | Degraded / warning | “AWA needs attention” | Explain affected checks in plain language; keep technical id secondary; offer only `Run checks now`. |
 | Critical | “AWA needs immediate attention” | Distinct icon/text/heading, not color-only; never expose repair/destructive action. |
-| Check running | “Running checks…” | Use browser-native form-navigation progress plus a clear pressed/focus treatment and persistent “this may take a moment” copy; do not add client polling or claim completion before the POST returns and redirects. |
 | Check request failed | “Checks could not complete” | Generic request-local 500 page; no exception/token; instruct retry or local restart. Server closes after evaluator/commit failure as today. |
 | Status unavailable/corrupt | “Status cannot be read” | Generic request-local 503 HTML state; server remains available; offer `Run checks now` because a valid POST can recover. |
 | Stale | “Status is stale / critical” | Existing clock-only script forces effective red after `fresh_until`; explain that a new check is required. |
 | Console idle shutdown | “This console closes after 5 minutes idle” | Persistent guidance on served pages gives the exact generic restart command; never embed the current token URL. After shutdown, browser connection failure is expected and no daemon restarts it. |
 | Static snapshot | “Private snapshot” | No form/button/restart action, no token, and no behavior beyond clock-only staleness. |
 
-The check-running contract deliberately avoids a second client script. If owner review finds
-browser-native pending feedback insufficient, STOP and reassess ADR 0020 before adding asynchronous
-state, polling, or script behavior.
+There is no deterministic rendered “check running” state. The existing synchronous empty-body form
+submission remains sufficient for this ephemeral local console: every served action area persistently
+says **“Checks may take a moment; this page returns when complete,”** and the browser's native loading
+indication is the pending feedback until the POST completes and redirects. Add no asynchronous state,
+polling, background work, or second client script.
 
 ## 6. Component and token taxonomy
 
@@ -195,7 +201,7 @@ copied explicitly; no generated token pipeline or synchronization service is add
 - Works at 320 CSS px, common desktop width, 200% browser zoom, long invariant names/reasons, and
   large counts without horizontal page scrolling. Data tables may become stacked labeled rows.
 - Source order matches reading order. No hover-only information. System fonts only.
-- Check-running and failure copy does not overpromise completion, safety, delivery, or recovery.
+- Pending-submission and failure copy does not overpromise completion, safety, delivery, or recovery.
 
 ## 8. Determinism, security, and source-of-truth rules
 
@@ -220,15 +226,19 @@ copied explicitly; no generated token pipeline or synchronization service is add
 
 - [ ] Owner accepts this plan.
 - [ ] Owner separately says GO for M3.2 execution.
+- [ ] Owner identifies an authorized existing Figma destination file, or explicitly authorizes
+  creating one empty destination file.
 
-Without both checks, stop before Figma mutation or code changes.
+Without all three checks, stop before Figma mutation or code changes. Record the destination file key
+and authorization basis without secrets; if a new file is authorized, create it blank and then perform
+library/design-system discovery before any frame or component.
 
 ### M3.2-A — minimum end-to-end Figma-to-Python slice
 
 **Outcome:** approved shell/tokens plus production no-status and healthy states, while all existing
 other states continue to render.
 
-1. Search the existing Figma design system/libraries and record reuse choices.
+1. After Figma Gate 0, search the existing Figma design system/libraries and record reuse choices.
 2. Build synthetic desktop/narrow frames for shell, no-status, healthy, freshness, action, metrics,
    focus, and idle/restart guidance.
 3. **Owner checkpoint 1:** approve the visual direction, component names, copy, and responsive behavior.
@@ -236,7 +246,8 @@ other states continue to render.
    action/metric helpers; implement the approved no-status and healthy variants.
 5. Keep the closed projection, static/served split, CSP, token, routes, methods, and HTTP semantics
    unchanged. Add focused deterministic, state-copy, token-free, CSP, semantic, and narrow-markup tests.
-6. Open one Draft PR; run Bugbot and security review; leave unarmed.
+6. Open one Draft PR with the §10 reproducibility record; run Bugbot and security review; leave
+   unarmed.
 
 **Production step:** first-run and healthy operators receive the approved interface on the existing
 M3.1 server; warning/error paths remain functional through existing rendering.
@@ -245,17 +256,19 @@ M3.1 server; warning/error paths remain functional through existing rendering.
 
 **Outcome:** every state in §5 uses the approved component vocabulary and recovery copy.
 
-1. Design degraded, critical, stale, check-running, request-failure, unavailable/corrupt, and static
+1. Design degraded, critical, stale, request-failure, unavailable/corrupt, and static
    variants from M3.2-A primitives at desktop/narrow widths.
 2. **Owner checkpoint 2:** approve all state hierarchy, copy, actions, and non-color cues.
 3. Implement variants as pure renderer helpers. Convert request-local 500/503 text responses to
    generic deterministic HTML pages without changing status codes, server fatal/request-local
    behavior, evaluator calls, or token handling.
-4. Implement check-running only through the §5 browser-native form contract. Add no new script,
-   route, background worker, or persisted state.
+4. Add the §5 persistent synchronous-submission copy beside the served action. Treat browser-native
+   loading as sufficient pending feedback; add no rendered running state, new script, route,
+   background worker, or persisted state.
 5. Add one focused test per state plus redaction, status code, retry/recovery, static action-free,
    no-destructive-route, and idle/restart-guidance coverage.
-6. Open one Draft PR; run Bugbot and security review; leave unarmed.
+6. Open one Draft PR with the §10 reproducibility record; run Bugbot and security review; leave
+   unarmed.
 
 **Production step:** every reachable operator state is coherent and recoverable without technical
 knowledge, while server behavior remains M3.1-compatible.
@@ -266,20 +279,22 @@ knowledge, while server behavior remains M3.1-compatible.
 
 1. Exercise all synthetic fixtures at 320 px, desktop, and 200% zoom; keyboard-only and screen-reader
    structure; long text/counts; forced stale clock; static and served modes.
-2. Compare deterministic local renders with owner-approved Figma frames. Record state-by-state
-   screenshots as review evidence only, using synthetic data and no live token. Do not make
-   cross-browser pixel equality a CI gate.
+2. Compare deterministic local renders with owner-approved Figma frames using synthetic data and no
+   live token. Record the reproducible review facts required by §10; any ephemeral screenshots used
+   during review are discarded, not committed. Do not make cross-browser pixel equality a CI gate.
 3. Add stable regression checks for DOM landmarks/headings, component/state presence, token names,
    contrast values, no horizontal page overflow in the chosen local browser check, CSP hashes,
    deterministic HTML, redaction, and all M3.1 HTTP/security invariants.
-4. Attempt direct Python Code Connect mapping only if the supported capability exists; otherwise
-   record the capability gap and rely on §6 plus tests. Do not change architecture.
+4. Attempt Code Connect only if direct mapping is available and configured in the authorized
+   environment. Otherwise record that state and rely on §6 plus tests; do not add JS/TS authoring,
+   package tooling, or change architecture solely for it.
 5. Remove superseded CSS/markup helpers only after all fixtures and tests prove parity.
 6. **Owner checkpoint 3:** approve visual parity and operator usability from synthetic local evidence.
-7. Open one Draft PR; run Bugbot and security review; leave unarmed.
+7. Open one Draft PR with the §10 reproducibility record; run Bugbot and security review; leave
+   unarmed.
 
 **Production step:** the full interface is accessible, responsive, deterministic, and regression
-protected. Release/install/live Desktop UAT remain separately unauthorized.
+protected. The §12 rollout gates remain deferred.
 
 ## 10. Focused test and acceptance matrix
 
@@ -293,6 +308,19 @@ protected. Release/install/live Desktop UAT remain separately unauthorized.
 | Responsive | Synthetic 320 px/desktop/200% evidence for every state, long copy, large counts, and responsive table/list behavior. |
 | Determinism | Same normalized projection/mode yields byte-identical HTML; generated artifact remains `0600` and status-referenced. |
 | Lifecycle | Fresh port/token per launch; rejected traffic does not extend idle; valid activity does; shutdown closes socket; restart copy is generic. |
+| Pending feedback | Served action shows the persistent “Checks may take a moment” copy; synchronous POST/303 behavior stays; no rendered running state or added script. |
+
+Every implementation Draft PR description must include a reproducibility record with:
+
+- authorized Figma file and relevant node links;
+- reused library assets/components/variables;
+- synthetic fixture ids used for each reviewed state;
+- browser name and exact version;
+- viewport dimensions and zoom for each review pass;
+- horizontal-overflow result (`pass` or an exact failing state/width).
+
+Commit no screenshot, Figma export, generated HTML, or other generated UI review artifact. If an
+ephemeral screenshot is used during review, discard it before commit.
 
 Per Draft PR, run the smallest relevant tests first:
 
@@ -303,7 +331,7 @@ VERIFY_BASE=origin/main make verify-docs
 ```
 
 For code-bearing M3.2 PRs, also run the repository's authoritative `make verify` before review.
-Do not run release/install/live-host commands unless separately authorized.
+Do not execute any §12 deferred rollout gate unless separately authorized.
 
 ## 11. Migration and rollback
 
@@ -318,10 +346,12 @@ Do not run release/install/live-host commands unless separately authorized.
   frontend build, projection field, or remote asset, stop and draft a new architecture decision
   before proceeding.
 
-## 12. Deferred gates and final owner decision
+## 12. Canonical deferred rollout-gates ledger
 
 M3.2 completion means the reviewed repository implementation and synthetic local evidence are ready.
-It does not mean the feature is released or active on the operator's machine.
+It does not mean the original roadmap or M3.2 is released or active on the operator's machine. This
+is the single M3.2 ledger for deferred host/release activity; earlier sections reference it rather
+than restating it.
 
 Deferred until separate explicit authorization:
 
@@ -331,12 +361,12 @@ Deferred until separate explicit authorization:
 - live Cursor Desktop UAT, including real browser launch and operator walkthrough;
 - Slack activation and M4 export/Quickhost work.
 
-Before this plan can move from DRAFT to ACCEPTED, the owner must decide whether browser-native
-form-navigation feedback is sufficient for “check running,” preserving ADR 0020's clock-only-script
-rule.
-
 If the later authorized Figma search finds more than one suitable library/design system, selecting
 the preferred one is part of owner checkpoint 1; it does not block plan acceptance now.
+
+No unresolved architecture or interaction decision remains before plan acceptance. The ordinary
+owner acceptance, separate implementation GO, and Figma Gate 0 destination authorization remain
+explicit execution gates in §9.
 
 ## 13. ADR assessment
 
