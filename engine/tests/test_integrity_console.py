@@ -298,6 +298,92 @@ class TestIntegrityConsole(EngineTestCase):
             no_status,
         )
 
+    def test_degraded_state_uses_approved_warning_contract(self):
+        page = integrity_console.render(
+            self._projection(overall="degraded"),
+            serve_action="run-checks-now",
+            served_form_action=(
+                "http://127.0.0.1:54321/synthetic-token/run-checks-now"
+            ),
+        )
+        self.assertIn("AWA needs attention", page)
+        self.assertIn(
+            "A check needs attention. Technical id: "
+            "surveillance_freshness. "
+            "Run checks again to refresh this private status.",
+            page,
+        )
+        self.assertIn('data-effective-overall="degraded"', page)
+        self.assertIn(">!</span>", page)
+        self.assertIn("Run checks now", page)
+
+    def test_critical_state_uses_approved_non_color_contract(self):
+        page = integrity_console.render(
+            self._projection(overall="red"),
+            serve_action="run-checks-now",
+            served_form_action=(
+                "http://127.0.0.1:54321/synthetic-token/run-checks-now"
+            ),
+        )
+        self.assertIn("AWA needs immediate attention", page)
+        self.assertIn(
+            "A critical integrity check failed. Technical id: "
+            "integrity status. Run checks again before continuing.",
+            page,
+        )
+        self.assertIn('data-effective-overall="red"', page)
+        self.assertIn(">!</span>", page)
+        self.assertNotIn('action="repair"', page)
+        self.assertNotIn("Repair now", page)
+
+    def test_stale_clock_uses_approved_critical_copy(self):
+        page = integrity_console.render(self._projection(overall="green"))
+        script, _csp = self._script_and_csp(page)
+        self.assertIn('status.textContent="Status is stale / critical"', script)
+        self.assertIn(
+            'detail.textContent="The previous result has expired. '
+            'A new check is required before relying on this status."',
+            script,
+        )
+        self.assertIn('root.dataset.effectiveOverall="red"', script)
+
+    def test_fatal_check_failure_page_has_exact_recovery_without_action(self):
+        page = integrity_console.render_fatal_check_failure()
+        self.assertIn("Checks could not complete", page)
+        self.assertIn("Restart the console, then run checks again.", page)
+        self.assertIn(
+            "awa-engine integrity console --serve --open",
+            page,
+        )
+        self.assertNotIn('data-component="ActionForm"', page)
+        self.assertNotIn("<form", page)
+        self.assertIn('data-component="Notice"', page)
+
+    def test_status_unavailable_page_is_recoverable_and_token_free(self):
+        page = integrity_console.render_status_unavailable()
+        self.assertIn("Status cannot be read", page)
+        self.assertIn(
+            "The saved status is unavailable or corrupt. "
+            "Run checks now to recover in this console.",
+            page,
+        )
+        self.assertIn('<form method="post" action="run-checks-now">', page)
+        self.assertIn("Checks may take a moment", page)
+        self.assertIn('data-component="Notice"', page)
+        self.assertNotIn("synthetic-token", page)
+
+    def test_static_snapshot_uses_approved_action_free_contract(self):
+        page = integrity_console.render(self._projection(overall="green"))
+        self.assertIn("Private snapshot", page)
+        self.assertIn(
+            "Saved integrity status. This action-free snapshot can become "
+            "critical when freshness expires.",
+            page,
+        )
+        self.assertNotIn('data-component="ActionForm"', page)
+        self.assertNotIn('data-component="Notice"', page)
+        self.assertNotIn("awa-engine integrity console --serve --open", page)
+
     def test_component_content_is_escaped(self):
         card = integrity_console._render_metric_card(
             "<label>",
@@ -459,13 +545,16 @@ class TestIntegrityConsole(EngineTestCase):
         page = integrity_console.render(projection)
         script, _csp = self._script_and_csp(page)
         self.assertIn("Date.now()", script)
-        self.assertIn("STALE / RED", script)
+        self.assertIn("Status is stale / critical", script)
         self.assertIn(
             'document.querySelector("[data-component=StatusIcon]")',
             script,
         )
         self.assertIn('icon.textContent="!"', script)
-        self.assertIn('document.title="AWA integrity — STALE / RED"', script)
+        self.assertIn(
+            'document.title="AWA integrity — Status is stale / critical"',
+            script,
+        )
         self.assertIn(
             '[data-effective-overall="green"] .status-summary{'
             "border-left-color:var(--color-healthy)}",
