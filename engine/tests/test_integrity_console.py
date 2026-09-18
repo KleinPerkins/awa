@@ -225,6 +225,77 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertIn("@media (prefers-reduced-motion:reduce)", page)
         self.assertNotIn("@keyframes", page)
 
+    def test_approved_m32c_responsive_geometry_contract(self):
+        page = integrity_console.render(
+            self._projection(overall="degraded"),
+            serve_action="run-checks-now",
+            served_form_action=(
+                "http://127.0.0.1:54321/synthetic-token/run-checks-now"
+            ),
+        )
+        self.assertIn(
+            ".status-summary{display:grid;"
+            "grid-template-columns:40px minmax(0,1fr);"
+            "gap:var(--spacing-12);align-items:center;"
+            "min-height:260px;",
+            page,
+        )
+        self.assertIn(
+            "padding:var(--spacing-16);"
+            "margin-bottom:var(--spacing-24);"
+            "background:var(--color-elevated)}",
+            page,
+        )
+        self.assertIn(
+            ".metrics{display:grid;"
+            "grid-template-columns:repeat(4,minmax(0,1fr));"
+            "gap:var(--spacing-16);",
+            page,
+        )
+        self.assertIn(
+            ".card{min-height:88px;"
+            "border:var(--border-width-default) solid var(--color-border);",
+            page,
+        )
+        self.assertIn(
+            ".action-form{display:grid;gap:var(--spacing-12);",
+            page,
+        )
+        self.assertIn(
+            ".action-form form{padding:var(--spacing-16);"
+            "border:var(--border-width-default) solid var(--color-border);"
+            "border-radius:var(--radius-12);"
+            "background:var(--color-surface)}",
+            page,
+        )
+        self.assertIn(
+            "button{width:100%;min-height:48px;",
+            page,
+        )
+        self.assertIn(
+            ".notice{display:flex;flex-direction:column;"
+            "gap:var(--spacing-12);min-height:200px;",
+            page,
+        )
+        self.assertIn(
+            "@media (max-width:520px){"
+            "body{padding:var(--spacing-8)}",
+            page,
+        )
+        self.assertIn(
+            ".metrics{grid-template-columns:1fr;"
+            "gap:var(--spacing-12)}",
+            page,
+        )
+
+    def test_fatal_notice_uses_approved_recovery_geometry_variant(self):
+        page = integrity_console.render_fatal_check_failure()
+        self.assertIn(
+            '<aside class="notice notice-fatal" data-component="Notice" ',
+            page,
+        )
+        self.assertIn(".notice-fatal{min-height:240px}", page)
+
     def test_semantic_text_colors_meet_aa_contrast(self):
         def luminance(value: str) -> float:
             channels = [
