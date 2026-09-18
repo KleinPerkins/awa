@@ -320,6 +320,7 @@ def render_fatal_check_failure() -> str:
         content=content,
         served=False,
         csp=_csp("'none'"),
+        data_attributes=' data-effective-overall="red"',
     )
 
 
@@ -349,6 +350,7 @@ def render_status_unavailable(
         content=content,
         served=True,
         csp=csp,
+        data_attributes=' data-effective-overall="degraded"',
     )
 
 
@@ -400,7 +402,7 @@ def render(
     recovery = model["recovery"]
     served = serve_action is not None
     if overall == "green":
-        heading = "AWA is healthy"
+        heading = "AWA is healthy" if served else "Private snapshot"
         supporting_copy = (
             ""
             if served
