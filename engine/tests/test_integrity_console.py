@@ -350,6 +350,12 @@ class TestIntegrityConsole(EngineTestCase):
     def test_fatal_check_failure_page_has_exact_recovery_without_action(self):
         page = integrity_console.render_fatal_check_failure()
         self.assertIn("Checks could not complete", page)
+        self.assertIn('<main data-effective-overall="red">', page)
+        self.assertIn(
+            '<span class="status-icon" data-component="StatusIcon" '
+            'aria-hidden="true">!</span>',
+            page,
+        )
         self.assertIn("Restart the console, then run checks again.", page)
         self.assertIn(
             "awa-engine integrity console --serve --open",
@@ -362,6 +368,12 @@ class TestIntegrityConsole(EngineTestCase):
     def test_status_unavailable_page_is_recoverable_and_token_free(self):
         page = integrity_console.render_status_unavailable()
         self.assertIn("Status cannot be read", page)
+        self.assertIn('<main data-effective-overall="degraded">', page)
+        self.assertIn(
+            '<span class="status-icon" data-component="StatusIcon" '
+            'aria-hidden="true">!</span>',
+            page,
+        )
         self.assertIn(
             "The saved status is unavailable or corrupt. "
             "Run checks now to recover in this console.",
@@ -374,7 +386,14 @@ class TestIntegrityConsole(EngineTestCase):
 
     def test_static_snapshot_uses_approved_action_free_contract(self):
         page = integrity_console.render(self._projection(overall="green"))
-        self.assertIn("Private snapshot", page)
+        self.assertIn(
+            '<h2 class="status" id="overall-status">Private snapshot</h2>',
+            page,
+        )
+        self.assertNotIn(
+            '<h2 class="status" id="overall-status">AWA is healthy</h2>',
+            page,
+        )
         self.assertIn(
             "Saved integrity status. This action-free snapshot can become "
             "critical when freshness expires.",
