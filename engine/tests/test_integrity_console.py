@@ -87,6 +87,46 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertIsNotNone(csp_match)
         return script_matches[0], html.unescape(csp_match.group(1))
 
+    def _reduced_projection(
+        self,
+        severities: dict[str, str],
+        *,
+        fresh: bool = True,
+        reverse_input: bool = False,
+    ) -> dict:
+        invariant_ids = [
+            invariant_id
+            for invariant_id, (_, required, _safety, _profiles)
+            in integrity.REGISTRY.items()
+            if required
+        ]
+        if reverse_input:
+            invariant_ids.reverse()
+        invariants = [
+            {
+                "id": invariant_id,
+                "severity": severities.get(invariant_id, "green"),
+                "redacted_reason": (
+                    f"{invariant_id} is "
+                    f"{severities.get(invariant_id, 'green')}"
+                ),
+            }
+            for invariant_id in invariant_ids
+        ]
+        triggers = {
+            "launchd": {
+                "last_success": (
+                    integrity._now_iso()
+                    if fresh
+                    else "2020-01-01T00:00:00Z"
+                ),
+            },
+        }
+        return self._projection(
+            overall=integrity.reduce(invariants, triggers),
+            invariants=invariants,
+        )
+
     def _status(self) -> dict:
         generated = integrity._now_iso()
         fresh = integrity._iso_at(time.time() + 3600)
@@ -335,6 +375,87 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertIn(">!</span>", page)
         self.assertNotIn('action="repair"', page)
         self.assertNotIn("Repair now", page)
+
+    def test_safety_unknown_red_names_reducer_driving_invariant(self):
+        page = integrity_console.render(
+            self._reduced_projection({"guard_safety": "unknown"}),
+        )
+        self.assertIn(
+            "A critical integrity check failed. Technical id: "
+            "guard_safety. Run checks again before continuing.",
+            page,
+        )
+        self.assertNotIn("Technical id: integrity status.", page)
+
+    def test_noncritical_unknown_degraded_names_reducer_driver(self):
+        page = integrity_console.render(
+            self._reduced_projection({"hooks": "unknown"}),
+        )
+        self.assertIn(
+            "A check needs attention. Technical id: hooks. "
+            "Run checks again to refresh this private status.",
+            page,
+        )
+        self.assertNotIn("Technical id: integrity status.", page)
+
+    def test_red_driver_wins_over_earlier_lower_severity(self):
+        page = integrity_console.render(
+            self._reduced_projection(
+                {
+                    "entry_handshake": "degraded",
+                    "release_identity": "red",
+                },
+            ),
+        )
+        self.assertIn(
+            "A critical integrity check failed. Technical id: "
+            "release_identity. Run checks again before continuing.",
+            page,
+        )
+        self.assertNotIn("Technical id: entry_handshake.", page)
+
+    def test_multiple_unknowns_follow_reducer_registry_order(self):
+        cases = (
+            (
+                {"parity": "unknown", "guard_safety": "unknown"},
+                "A critical integrity check failed. Technical id: "
+                "guard_safety. Run checks again before continuing.",
+            ),
+            (
+                {"hooks": "unknown", "entry_handshake": "unknown"},
+                "A check needs attention. Technical id: entry_handshake. "
+                "Run checks again to refresh this private status.",
+            ),
+        )
+        for severities, expected in cases:
+            with self.subTest(severities=severities):
+                page = integrity_console.render(
+                    self._reduced_projection(
+                        severities,
+                        reverse_input=True,
+                    ),
+                )
+                self.assertIn(expected, page)
+                self.assertNotIn("Technical id: integrity status.", page)
+
+    def test_trigger_only_red_uses_generic_and_green_uses_no_fallback(self):
+        trigger_red = integrity_console.render(
+            self._reduced_projection({}, fresh=False),
+        )
+        self.assertIn(
+            "A critical integrity check failed. Technical id: "
+            "integrity status. Run checks again before continuing.",
+            trigger_red,
+        )
+        healthy = integrity_console.render(
+            self._reduced_projection({}),
+            serve_action="run-checks-now",
+            served_form_action=(
+                "http://127.0.0.1:54321/synthetic-token/run-checks-now"
+            ),
+        )
+        self.assertIn("AWA is healthy", healthy)
+        self.assertNotIn("Technical id:", healthy)
 
     def test_stale_clock_uses_approved_critical_copy(self):
         page = integrity_console.render(self._projection(overall="green"))
