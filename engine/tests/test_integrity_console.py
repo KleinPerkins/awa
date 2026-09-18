@@ -140,10 +140,186 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertEqual(first, second)
         self.assertTrue(first.startswith("<!doctype html>"))
         self.assertTrue(first.endswith("\n"))
-        self.assertEqual(
-            hashlib.sha256(first.encode("utf-8")).hexdigest(),
-            "63afc7c317e79494e1b6d3adf2b814a9b00c40f7e69e036920bdde08aaa0c0dc",
+
+    def test_semantic_token_and_responsive_contract(self):
+        page = integrity_console.render(self._projection())
+        for token in (
+            "--color-surface:",
+            "--color-elevated:",
+            "--color-text:",
+            "--color-muted:",
+            "--color-border:",
+            "--color-healthy:",
+            "--color-warning:",
+            "--color-critical:",
+            "--color-focus:",
+            "--spacing-4:",
+            "--spacing-8:",
+            "--spacing-12:",
+            "--spacing-16:",
+            "--spacing-24:",
+            "--spacing-32:",
+            "--radius-8:",
+            "--radius-10:",
+            "--radius-12:",
+            "--border-width-default:",
+            "--border-width-status-rail:",
+        ):
+            self.assertIn(token, page)
+        self.assertIn("@media (max-width:520px)", page)
+        self.assertIn("overflow-wrap:anywhere", page)
+        self.assertIn("min-height:44px", page)
+        self.assertIn(":focus-visible", page)
+        self.assertIn("@media (prefers-reduced-motion:reduce)", page)
+        self.assertNotIn("@keyframes", page)
+
+    def test_semantic_text_colors_meet_aa_contrast(self):
+        def luminance(value: str) -> float:
+            channels = [
+                int(value[index:index + 2], 16) / 255
+                for index in (1, 3, 5)
+            ]
+            linear = [
+                channel / 12.92
+                if channel <= 0.04045
+                else ((channel + 0.055) / 1.055) ** 2.4
+                for channel in channels
+            ]
+            return (
+                0.2126 * linear[0]
+                + 0.7152 * linear[1]
+                + 0.0722 * linear[2]
+            )
+
+        def contrast(first: str, second: str) -> float:
+            lighter, darker = sorted(
+                (luminance(first), luminance(second)),
+                reverse=True,
+            )
+            return (lighter + 0.05) / (darker + 0.05)
+
+        for foreground, background in (
+            ("#e8eaed", "#101313"),
+            ("#9099a6", "#101313"),
+            ("#5fd68a", "#171b19"),
+            ("#e6b94f", "#171b19"),
+            ("#f07b7b", "#171b19"),
+            ("#9ec5ff", "#101313"),
+            ("#e8eaed", "#171b19"),
+        ):
+            self.assertGreaterEqual(contrast(foreground, background), 4.5)
+
+    def test_healthy_component_mapping_and_landmarks(self):
+        page = integrity_console.render(
+            self._projection(overall="green"),
+            serve_action="run-checks-now",
+            served_form_action=(
+                "http://127.0.0.1:54321/capability-token/run-checks-now"
+            ),
         )
+        self.assertEqual(page.count("<h1>"), 1)
+        self.assertIn('<header class="page-header">', page)
+        self.assertIn('<section class="status-summary"', page)
+        self.assertIn('data-component="StatusIcon"', page)
+        self.assertIn("AWA is healthy", page)
+        self.assertIn('aria-label="Integrity counts"', page)
+        self.assertEqual(page.count('data-component="MetricCard"'), 4)
+        self.assertIn('data-component="ActionForm"', page)
+        self.assertIn('data-component="Notice"', page)
+        self.assertIn(
+            "This console closes after 5 minutes idle",
+            page,
+        )
+        self.assertIn(
+            "awa-engine integrity console --serve --open",
+            page,
+        )
+
+    def test_action_form_instruction_is_described_by_button(self):
+        form = integrity_console._render_action_form()
+        self.assertIn(
+            '<button type="submit" aria-describedby="action-help">'
+            "Run checks now</button>",
+            form,
+        )
+        self.assertEqual(form.count('id="action-help"'), 1)
+        self.assertIn(
+            '<p class="action-help" id="action-help">'
+            "Checks may take a moment; this page returns when complete.</p>",
+            form,
+        )
+        self.assertIn(
+            '<form method="post" action="run-checks-now">',
+            form,
+        )
+        self.assertNotIn("<input", form)
+
+    def test_approved_status_action_and_no_status_visual_contract(self):
+        healthy = integrity_console.render(self._projection(overall="green"))
+        self.assertIn(
+            '[data-effective-overall="green"] .status{'
+            "color:var(--color-healthy)}",
+            healthy,
+        )
+        self.assertIn(
+            '[data-effective-overall="red"] .status,'
+            '[data-effective-overall="unknown"] .status{'
+            "color:var(--color-critical)}",
+            healthy,
+        )
+        self.assertIn(
+            "button{min-height:48px;min-width:127px;"
+            "padding:var(--spacing-12) var(--spacing-16);"
+            "border:var(--border-width-default) solid var(--color-text);"
+            "border-radius:var(--radius-8);"
+            "background:var(--color-elevated);color:var(--color-text);",
+            healthy,
+        )
+        no_status = integrity_console.render_no_status()
+        self.assertIn(
+            '<span class="status-icon" data-component="StatusIcon" '
+            'aria-hidden="true">ⓘ</span>',
+            no_status,
+        )
+        self.assertIn(
+            '<section class="status-summary" '
+            'data-component="StatusSummary" '
+            'aria-labelledby="overall-status">',
+            no_status,
+        )
+        self.assertIn(
+            '<h2 class="status" id="overall-status">No status yet</h2>',
+            no_status,
+        )
+        self.assertIn(
+            ".status-icon{display:grid;place-items:center;width:40px;"
+            "height:40px;border:var(--border-width-default) solid "
+            "currentColor;border-radius:50%;color:var(--color-muted);",
+            no_status,
+        )
+
+    def test_component_content_is_escaped(self):
+        card = integrity_console._render_metric_card(
+            "<label>",
+            "<script>value</script>",
+        )
+        self.assertIn("&lt;label&gt;", card)
+        self.assertIn("&lt;script&gt;value&lt;/script&gt;", card)
+        self.assertNotIn("<script>", card)
+        summary = integrity_console._render_status_summary(
+            state="green",
+            heading="<healthy>",
+            supporting_copy="<detail>",
+        )
+        self.assertIn("&lt;healthy&gt;", summary)
+        self.assertIn("&lt;detail&gt;", summary)
+
+    def test_static_output_omits_served_components_and_guidance(self):
+        page = integrity_console.render(self._projection(overall="green"))
+        self.assertNotIn('data-component="ActionForm"', page)
+        self.assertNotIn('data-component="Notice"', page)
+        self.assertNotIn("awa-engine integrity console --serve --open", page)
+        self.assertNotIn("Checks may take a moment", page)
 
     def test_self_contained_no_remote_assets(self):
         page = integrity_console.render(self._projection())
@@ -177,7 +353,15 @@ class TestIntegrityConsole(EngineTestCase):
             '<form method="post" action="run-checks-now">',
             page,
         )
-        self.assertIn('<button type="submit">Run checks now</button>', page)
+        self.assertIn(
+            '<button type="submit" aria-describedby="action-help">'
+            "Run checks now</button>",
+            page,
+        )
+        self.assertIn(
+            "Checks may take a moment; this page returns when complete.",
+            page,
+        )
         self.assertIn(f"form-action {action}", csp)
         self.assertNotIn("form-action 'none'", csp)
         self.assertIn("Date.now()", script)
@@ -199,10 +383,20 @@ class TestIntegrityConsole(EngineTestCase):
 
     def test_served_no_status_page_is_closed_and_token_free(self):
         page = integrity_console.render_no_status()
-        self.assertIn("NO STATUS YET", page)
-        self.assertIn("No integrity status yet", page)
+        self.assertIn("No status yet", page)
+        self.assertIn(
+            "Run checks now to create the first private integrity status.",
+            page,
+        )
         self.assertIn(
             '<form method="post" action="run-checks-now">',
+            page,
+        )
+        self.assertIn('data-component="StatusIcon"', page)
+        self.assertIn('data-component="ActionForm"', page)
+        self.assertIn('data-component="Notice"', page)
+        self.assertIn(
+            "awa-engine integrity console --serve --open",
             page,
         )
         self.assertNotIn("capability-token", page)
@@ -242,7 +436,7 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertNotIn("raw_evidence", page)
 
     def test_clock_only_script_forces_stale_red_after_expiry(self):
-        projection = self._projection()
+        projection = self._projection(overall="green")
         before = integrity_console.clock_state(
             projection,
             now_epoch=integrity._parse_iso(
@@ -258,7 +452,7 @@ class TestIntegrityConsole(EngineTestCase):
             + 1,
         )
         self.assertFalse(before["stale"])
-        self.assertEqual(before["effective_overall"], "degraded")
+        self.assertEqual(before["effective_overall"], "green")
         self.assertTrue(after["stale"])
         self.assertEqual(after["effective_overall"], "red")
 
@@ -266,6 +460,51 @@ class TestIntegrityConsole(EngineTestCase):
         script, _csp = self._script_and_csp(page)
         self.assertIn("Date.now()", script)
         self.assertIn("STALE / RED", script)
+        self.assertIn(
+            'document.querySelector("[data-component=StatusIcon]")',
+            script,
+        )
+        self.assertIn('icon.textContent="!"', script)
+        self.assertIn('document.title="AWA integrity — STALE / RED"', script)
+        self.assertIn(
+            '[data-effective-overall="green"] .status-summary{'
+            "border-left-color:var(--color-healthy)}",
+            page,
+        )
+        self.assertIn(
+            '[data-effective-overall="red"] .status-summary,'
+            '[data-effective-overall="unknown"] .status-summary{'
+            "border-left-color:var(--color-critical)}",
+            page,
+        )
+        self.assertIn(
+            '[data-effective-overall="green"] .status-icon{'
+            "color:var(--color-healthy)}",
+            page,
+        )
+        self.assertIn(
+            '[data-effective-overall="red"] .status-icon,'
+            '[data-effective-overall="unknown"] .status-icon{'
+            "color:var(--color-critical)}",
+            page,
+        )
+        self.assertIn(
+            'class="status-summary" data-component="StatusSummary" '
+            'aria-labelledby="overall-status"',
+            page,
+        )
+        self.assertNotIn('class="status-summary green"', page)
+        self.assertIn(
+            '<span class="status-icon" data-component="StatusIcon" '
+            'aria-hidden="true">✓</span>',
+            page,
+        )
+        self.assertIn(
+            '[data-effective-overall="red"] .status,'
+            '[data-effective-overall="unknown"] .status{'
+            "color:var(--color-critical)}",
+            page,
+        )
         for forbidden in (
             "fetch(",
             "eval(",

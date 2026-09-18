@@ -12,32 +12,53 @@ from urllib.parse import urlsplit
 from . import integrity
 
 
-_CLOCK_SCRIPT = """(()=>{"use strict";const root=document.getElementById("integrity");const status=document.getElementById("overall-status");const age=document.getElementById("checked-age");const generated=Date.parse(root.dataset.generatedAt||"");const fresh=Date.parse(root.dataset.freshUntil||"");const now=Date.now();if(Number.isFinite(generated)){age.textContent=String(Math.max(0,Math.floor((now-generated)/1000)))+"s ago";}else{age.textContent="unknown";}if(!Number.isFinite(fresh)||now>fresh){root.dataset.effectiveOverall="red";status.textContent="STALE / RED";document.title="AWA integrity — STALE / RED";}})();"""
+_CLOCK_SCRIPT = """(()=>{"use strict";const root=document.getElementById("integrity");const status=document.getElementById("overall-status");const icon=document.querySelector("[data-component=StatusIcon]");const age=document.getElementById("checked-age");const generated=Date.parse(root.dataset.generatedAt||"");const fresh=Date.parse(root.dataset.freshUntil||"");const now=Date.now();if(Number.isFinite(generated)){age.textContent=String(Math.max(0,Math.floor((now-generated)/1000)))+"s ago";}else{age.textContent="unknown";}if(!Number.isFinite(fresh)||now>fresh){root.dataset.effectiveOverall="red";icon.textContent="!";status.textContent="STALE / RED";document.title="AWA integrity — STALE / RED";}})();"""
 
 _STYLE = """
-:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101313;color:#f5f7f6}
+:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--color-surface:#101313;--color-elevated:#171b19;--color-text:#e8eaed;--color-muted:#9099a6;--color-border:#2e3140;--color-healthy:#5fd68a;--color-warning:#e6b94f;--color-critical:#f07b7b;--color-focus:#9ec5ff;--spacing-4:4px;--spacing-8:8px;--spacing-12:12px;--spacing-16:16px;--spacing-24:24px;--spacing-32:32px;--radius-8:8px;--radius-10:10px;--radius-12:12px;--border-width-default:1px;--border-width-status-rail:6px;background:var(--color-surface);color:var(--color-text)}
 *{box-sizing:border-box}
-body{margin:0;padding:32px;background:#101313}
-main{max-width:980px;margin:0 auto}
-header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:24px}
-h1{font-size:26px;line-height:1.2;margin:0 0 6px}
-h2{font-size:16px;margin:0 0 12px}
-p{margin:0;color:#b8c1bd}
-.verdict{border:1px solid #38413d;border-left:6px solid #b98500;border-radius:12px;padding:20px;margin-bottom:18px;background:#171b19}
-[data-effective-overall="green"] .verdict{border-left-color:#3da66f}
-[data-effective-overall="red"] .verdict{border-left-color:#e25858}
-.status{font-size:28px;font-weight:750;letter-spacing:.02em;margin-bottom:7px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin-bottom:18px}
-.card{border:1px solid #303936;border-radius:10px;padding:16px;background:#171b19}
-.metric{font-size:24px;font-weight:700;margin-top:8px}
+body{margin:0;padding:var(--spacing-32);background:var(--color-surface);color:var(--color-text);font-size:16px;line-height:1.5}
+main{max-width:980px;margin:0 auto;overflow-wrap:anywhere}
+.page-header{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--spacing-24);margin-bottom:var(--spacing-24)}
+h1{font-size:26px;line-height:32px;margin:0 0 var(--spacing-4)}
+h2{font-size:16px;line-height:24px;margin:0 0 var(--spacing-12)}
+p{margin:0;color:var(--color-muted)}
+.status-summary{display:grid;grid-template-columns:40px minmax(0,1fr);gap:var(--spacing-16);align-items:center;border:var(--border-width-default) solid var(--color-border);border-left:var(--border-width-status-rail) solid var(--color-muted);border-radius:var(--radius-12);padding:var(--spacing-24);margin-bottom:var(--spacing-24);background:var(--color-elevated)}
+[data-effective-overall="green"] .status-summary{border-left-color:var(--color-healthy)}
+[data-effective-overall="degraded"] .status-summary{border-left-color:var(--color-warning)}
+[data-effective-overall="red"] .status-summary,[data-effective-overall="unknown"] .status-summary{border-left-color:var(--color-critical)}
+.status-icon{display:grid;place-items:center;width:40px;height:40px;border:var(--border-width-default) solid currentColor;border-radius:50%;color:var(--color-muted);font-size:22px;font-weight:700}
+[data-effective-overall="green"] .status-icon{color:var(--color-healthy)}
+[data-effective-overall="degraded"] .status-icon{color:var(--color-warning)}
+[data-effective-overall="red"] .status-icon,[data-effective-overall="unknown"] .status-icon{color:var(--color-critical)}
+.status{font-size:28px;line-height:34px;font-weight:800;margin:0 0 var(--spacing-4)}
+[data-effective-overall="green"] .status{color:var(--color-healthy)}
+[data-effective-overall="degraded"] .status{color:var(--color-warning)}
+[data-effective-overall="red"] .status,[data-effective-overall="unknown"] .status{color:var(--color-critical)}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--spacing-12);margin-bottom:var(--spacing-24)}
+.card{border:var(--border-width-default) solid var(--color-border);border-radius:var(--radius-10);padding:var(--spacing-16);background:var(--color-elevated)}
+.metric-label{color:var(--color-muted);font-size:13px;line-height:18px;font-weight:600}
+.metric{font-size:28px;line-height:34px;font-weight:800;margin-top:var(--spacing-4)}
+.action-form{display:grid;gap:var(--spacing-8);margin:0 0 var(--spacing-24)}
+button{min-height:48px;min-width:127px;padding:var(--spacing-12) var(--spacing-16);border:var(--border-width-default) solid var(--color-text);border-radius:var(--radius-8);background:var(--color-elevated);color:var(--color-text);font:inherit;font-weight:700;cursor:pointer}
+button:focus-visible{outline:3px solid var(--color-focus);outline-offset:3px}
+.action-help{font-size:13px;line-height:18px}
+.notice{border:var(--border-width-default) solid var(--color-border);border-radius:var(--radius-10);padding:var(--spacing-16);margin:var(--spacing-24) 0 0;background:var(--color-elevated)}
+.notice h2{margin-bottom:var(--spacing-8)}
+code{display:block;margin-top:var(--spacing-8);padding:var(--spacing-12);border-radius:var(--radius-8);background:var(--color-surface);color:var(--color-text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:normal}
 table{width:100%;border-collapse:collapse;font-size:14px}
-th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #303936;vertical-align:top}
-th{color:#b8c1bd;font-weight:600}
+th,td{text-align:left;padding:10px 8px;border-bottom:var(--border-width-default) solid var(--color-border);vertical-align:top}
+th{color:var(--color-muted);font-weight:600}
 .severity{font-weight:700;text-transform:uppercase}
-.green{color:#73cf9c}.degraded{color:#e6b94f}.red,.unknown{color:#f07b7b}
-.history{margin-top:18px}
-.muted{color:#8e9994;font-size:13px}
+.severity.green{color:var(--color-healthy)}.severity.degraded{color:var(--color-warning)}.severity.red,.severity.unknown{color:var(--color-critical)}
+.history{margin-top:var(--spacing-24)}
+.muted{color:var(--color-muted);font-size:13px}
+@media (max-width:520px){body{padding:var(--spacing-16)}.page-header{display:block}.status-summary{grid-template-columns:40px minmax(0,1fr);padding:var(--spacing-16)}.metrics{grid-template-columns:1fr}.action-form button{width:100%;min-height:44px}table,thead,tbody,tr,th,td{display:block}thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}tr{padding:var(--spacing-8) 0;border-bottom:var(--border-width-default) solid var(--color-border)}td{display:grid;grid-template-columns:minmax(92px,35%) minmax(0,1fr);gap:var(--spacing-8);border:0;padding:var(--spacing-4) 0}td::before{content:attr(data-label);color:var(--color-muted);font-weight:600}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important}}
 """.strip()
+
+_RESTART_COMMAND = "awa-engine integrity console --serve --open"
+_ACTION_HELP = "Checks may take a moment; this page returns when complete."
 
 
 def _csp_hash(text: str) -> str:
@@ -150,23 +171,117 @@ def served_csp(form_action: str) -> str:
     return _csp(_served_form_csp("run-checks-now", form_action))
 
 
-def render_no_status() -> str:
-    """Render a token-free served-only first-run recovery page."""
+def _render_status_icon(state: str) -> str:
+    glyph = "✓" if state == "green" else "ⓘ" if state == "no-status" else "!"
+    return (
+        '<span class="status-icon" data-component="StatusIcon" '
+        f'aria-hidden="true">{glyph}</span>'
+    )
+
+
+def _render_status_summary(
+    *,
+    state: str,
+    heading: object,
+    supporting_copy: object,
+    fresh_until: object | None = None,
+) -> str:
+    detail = (
+        '<p class="freshness">Checked <span id="checked-age">0s ago</span>'
+        f" · Fresh until {html.escape(str(fresh_until))}</p>"
+        if fresh_until is not None
+        else f"<p>{html.escape(str(supporting_copy))}</p>"
+    )
+    return (
+        '<section class="status-summary" '
+        'data-component="StatusSummary" aria-labelledby="overall-status">'
+        f"{_render_status_icon(state)}"
+        '<div class="status-content">'
+        f'<h2 class="status" id="overall-status">{html.escape(str(heading))}</h2>'
+        f"{detail}"
+        "</div></section>"
+    )
+
+
+def _render_action_form() -> str:
+    return (
+        '<div class="action-form" data-component="ActionForm">'
+        '<form method="post" action="run-checks-now">'
+        '<button type="submit" aria-describedby="action-help">Run checks now</button>'
+        "</form>"
+        f'<p class="action-help" id="action-help">{_ACTION_HELP}</p>'
+        "</div>"
+    )
+
+
+def _render_metric_card(label: object, value: object) -> str:
+    return (
+        '<article class="card metric-card" data-component="MetricCard">'
+        f'<div class="metric-label">{html.escape(str(label))}</div>'
+        f'<div class="metric">{html.escape(str(value))}</div>'
+        "</article>"
+    )
+
+
+def _render_notice() -> str:
+    return (
+        '<aside class="notice" data-component="Notice" aria-labelledby="idle-title">'
+        '<h2 id="idle-title">This console closes after 5 minutes idle</h2>'
+        "<p>Restart the console with:</p>"
+        f"<code>{_RESTART_COMMAND}</code>"
+        "</aside>"
+    )
+
+
+def _render_page(
+    *,
+    title: str,
+    subtitle: str,
+    content: str,
+    served: bool,
+    csp: str | None = None,
+    data_attributes: str = "",
+    clock_script: bool = False,
+) -> str:
+    csp_meta = (
+        '<meta http-equiv="Content-Security-Policy" '
+        f'content="{html.escape(csp, quote=True)}">'
+        if csp is not None
+        else ""
+    )
+    script = f"<script>{_CLOCK_SCRIPT}</script>" if clock_script else ""
+    notice = _render_notice() if served else ""
     return (
         "<!doctype html>\n"
-        "<html lang=\"en\"><head><meta charset=\"utf-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<meta name=\"color-scheme\" content=\"dark\">"
-        "<title>AWA integrity — NO STATUS YET</title>"
-        f"<style>{_STYLE}</style></head>"
-        "<body><main><header><div><h1>AWA integrity</h1>"
-        "<p>No integrity status yet.</p></div></header>"
-        "<section class=\"verdict\" aria-labelledby=\"overall-status\">"
-        "<div class=\"status\" id=\"overall-status\">NO STATUS YET</div>"
-        "<p>Run checks now to create the first private integrity status.</p>"
-        "</section><form method=\"post\" action=\"run-checks-now\">"
-        "<button type=\"submit\">Run checks now</button></form>"
-        "</main></body></html>\n"
+        '<html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<meta name="color-scheme" content="dark">'
+        f"{csp_meta}<title>{html.escape(title)}</title>"
+        f"<style>{_STYLE}</style></head><body>"
+        f'<main{data_attributes}><header class="page-header"><div>'
+        "<h1>AWA integrity</h1>"
+        f"<p>{html.escape(subtitle)}</p></div></header>"
+        f"{content}{notice}{script}</main></body></html>\n"
+    )
+
+
+def render_no_status() -> str:
+    """Render a token-free served-only first-run recovery page."""
+    content = (
+        _render_status_summary(
+            state="no-status",
+            heading="No status yet",
+            supporting_copy=(
+                "Run checks now to create the first private integrity status."
+            ),
+        )
+        + _render_action_form()
+    )
+    return _render_page(
+        title="AWA integrity — No status yet",
+        subtitle="Private console",
+        content=content,
+        served=True,
     )
 
 
@@ -186,61 +301,66 @@ def render(
     fresh_until = model.get("fresh_until") or ""
     invariants = "".join(
         "<tr>"
-        f"<td>{html.escape(item['id'])}</td>"
-        f"<td class=\"severity {html.escape(item['severity'])}\">"
+        f'<td data-label="Invariant">{html.escape(item["id"])}</td>'
+        f'<td data-label="Severity" class="severity {html.escape(item["severity"])}">'
         f"{html.escape(item['severity'])}</td>"
-        f"<td>{html.escape(item['redacted_reason'])}</td>"
+        f'<td data-label="Reason">{html.escape(item["redacted_reason"])}</td>'
         "</tr>"
         for item in model["invariants"]
     )
     history = "".join(
         "<tr>"
-        f"<td>{item['generation']}</td>"
-        f"<td class=\"severity {html.escape(item['overall'])}\">"
+        f'<td data-label="Generation">{item["generation"]}</td>'
+        f'<td data-label="Overall" class="severity {html.escape(item["overall"])}">'
         f"{html.escape(item['overall'])}</td>"
-        f"<td>{html.escape(item.get('generated_at') or 'unknown')}</td>"
+        f'<td data-label="Generated">{html.escape(item.get("generated_at") or "unknown")}</td>'
         "</tr>"
         for item in model["recent_history"]
     )
     orphans = model["orphans"]
     recovery = model["recovery"]
-    form = (
-        "<form method=\"post\" action=\"run-checks-now\">"
-        "<button type=\"submit\">Run checks now</button></form>"
-        if serve_action is not None
-        else ""
+    served = serve_action is not None
+    heading = "AWA is healthy" if overall == "green" else overall.upper()
+    summary = _render_status_summary(
+        state=overall,
+        heading=heading,
+        supporting_copy="",
+        fresh_until=fresh_until or "unknown",
     )
-
-    return (
-        "<!doctype html>\n"
-        "<html lang=\"en\"><head><meta charset=\"utf-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<meta name=\"color-scheme\" content=\"dark\">"
-        f"<meta http-equiv=\"Content-Security-Policy\" content=\"{html.escape(csp, quote=True)}\">"
-        f"<title>AWA integrity — {html.escape(overall.upper())}</title>"
-        f"<style>{_STYLE}</style></head>"
-        f"<body><main id=\"integrity\" data-effective-overall=\"{html.escape(overall)}\" "
-        f"data-generated-at=\"{html.escape(generated_at, quote=True)}\" "
-        f"data-fresh-until=\"{html.escape(fresh_until, quote=True)}\">"
-        "<header><div><h1>AWA integrity</h1>"
-        f"<p>Private snapshot · generation {model['generation']}</p></div></header>{form}"
-        "<section class=\"verdict\" aria-labelledby=\"overall-status\">"
-        f"<div class=\"status\" id=\"overall-status\">{html.escape(overall.upper())}</div>"
-        "<p>Last checked <span id=\"checked-age\">0s ago</span>"
-        f" · fresh until {html.escape(fresh_until or 'unknown')}</p></section>"
-        "<section class=\"grid\" aria-label=\"Integrity counts\">"
-        f"<article class=\"card\"><h2>Worktrees</h2><div class=\"metric\">{orphans['worktrees']}</div></article>"
-        f"<article class=\"card\"><h2>Unreconciled leases</h2><div class=\"metric\">{orphans['leases_unreconciled']}</div></article>"
-        f"<article class=\"card\"><h2>Dangling sessions</h2><div class=\"metric\">{orphans['sessions_dangling']}</div></article>"
-        f"<article class=\"card\"><h2>Recovery repairs</h2><div class=\"metric\">{recovery['needs_repair']}</div></article>"
+    metrics = (
+        '<section class="metrics" aria-label="Integrity counts">'
+        f"{_render_metric_card('Worktrees', orphans['worktrees'])}"
+        f"{_render_metric_card('Unreconciled leases', orphans['leases_unreconciled'])}"
+        f"{_render_metric_card('Dangling sessions', orphans['sessions_dangling'])}"
+        f"{_render_metric_card('Recovery repairs', recovery['needs_repair'])}"
         "</section>"
-        "<section class=\"card\"><h2>Invariants</h2><table>"
+    )
+    action_form = _render_action_form() if served else ""
+    content = (
+        f"{summary}{metrics}{action_form}"
+        '<section class="card"><h2>Invariants</h2><table>'
         "<thead><tr><th>Invariant</th><th>Severity</th><th>Reason</th></tr></thead>"
         f"<tbody>{invariants}</tbody></table></section>"
-        "<section class=\"card history\"><h2>Recent history</h2><table>"
+        '<section class="card history"><h2>Recent history</h2><table>'
         "<thead><tr><th>Generation</th><th>Overall</th><th>Generated</th></tr></thead>"
         f"<tbody>{history}</tbody></table></section>"
-        f"<pre id=\"projection-data\" hidden>{_json_embed(model)}</pre>"
-        f"<script>{_CLOCK_SCRIPT}</script>"
-        "</main></body></html>\n"
+        f'<pre id="projection-data" hidden>{_json_embed(model)}</pre>'
+    )
+    data_attributes = (
+        f' id="integrity" data-effective-overall="{html.escape(overall)}" '
+        f"data-generated-at=\"{html.escape(generated_at, quote=True)}\" "
+        f'data-fresh-until="{html.escape(fresh_until, quote=True)}"'
+    )
+    subtitle = (
+        f"{'Private console' if served else 'Private snapshot'}"
+        f" · generation {model['generation']}"
+    )
+    return _render_page(
+        title=f"AWA integrity — {overall.upper()}",
+        subtitle=subtitle,
+        content=content,
+        served=served,
+        csp=csp,
+        data_attributes=data_attributes,
+        clock_script=True,
     )
