@@ -489,7 +489,7 @@ class TestIntegrityConsole(EngineTestCase):
             page,
         )
         self.assertIn('data-effective-overall="degraded"', page)
-        self.assertIn(">!</span>", page)
+        self.assertIn(">ⓘ</span>", page)
         self.assertIn("Run checks now", page)
 
     def test_critical_state_uses_approved_non_color_contract(self):
@@ -507,7 +507,7 @@ class TestIntegrityConsole(EngineTestCase):
             page,
         )
         self.assertIn('data-effective-overall="red"', page)
-        self.assertIn(">!</span>", page)
+        self.assertIn(">ⓘ</span>", page)
         self.assertNotIn('action="repair"', page)
         self.assertNotIn("Repair now", page)
 
@@ -609,7 +609,7 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertIn('<main data-effective-overall="red">', page)
         self.assertIn(
             '<span class="status-icon" data-component="StatusIcon" '
-            'aria-hidden="true">!</span>',
+            'aria-hidden="true">ⓘ</span>',
             page,
         )
         self.assertIn("Restart the console, then run checks again.", page)
@@ -634,7 +634,8 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertIn(
             '[data-effective-overall="degraded"] .status-icon,'
             '[data-effective-overall="yellow"] .status-icon{'
-            "color:var(--color-warning)}",
+            "border:0;border-radius:0;color:var(--color-surface);"
+            "background:var(--color-warning)}",
             page,
         )
         self.assertIn(
@@ -645,7 +646,7 @@ class TestIntegrityConsole(EngineTestCase):
         )
         self.assertIn(
             '<span class="status-icon" data-component="StatusIcon" '
-            'aria-hidden="true">!</span>',
+            'aria-hidden="true">ⓘ</span>',
             page,
         )
         self.assertIn(
@@ -867,7 +868,8 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertIn(
             '[data-effective-overall="red"] .status-icon,'
             '[data-effective-overall="unknown"] .status-icon{'
-            "color:var(--color-critical)}",
+            "border:0;border-radius:0;color:var(--color-surface);"
+            "background:var(--color-critical)}",
             page,
         )
         self.assertIn(

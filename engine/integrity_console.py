@@ -12,10 +12,10 @@ from urllib.parse import urlsplit
 from . import integrity
 
 
-_CLOCK_SCRIPT = """(()=>{"use strict";const root=document.getElementById("integrity");const status=document.getElementById("overall-status");const detail=document.getElementById("overall-detail");const icon=document.querySelector("[data-component=StatusIcon]");const age=document.getElementById("checked-age");const generated=Date.parse(root.dataset.generatedAt||"");const fresh=Date.parse(root.dataset.freshUntil||"");const now=Date.now();if(age){if(Number.isFinite(generated)){age.textContent=String(Math.max(0,Math.floor((now-generated)/1000)))+"s ago";}else{age.textContent="unknown";}}if(!Number.isFinite(fresh)||now>fresh){root.dataset.effectiveOverall="red";icon.textContent="!";status.textContent="Status is stale / critical";detail.textContent="The previous result has expired. A new check is required before relying on this status.";document.title="AWA integrity — Status is stale / critical";}})();"""
+_CLOCK_SCRIPT = """(()=>{"use strict";const root=document.getElementById("integrity");const status=document.getElementById("overall-status");const detail=document.getElementById("overall-detail");const icon=document.querySelector("[data-component=StatusIcon]");const age=document.getElementById("checked-age");const generated=Date.parse(root.dataset.generatedAt||"");const fresh=Date.parse(root.dataset.freshUntil||"");const now=Date.now();if(age){if(Number.isFinite(generated)){age.textContent=String(Math.max(0,Math.floor((now-generated)/1000)))+"s ago";}else{age.textContent="unknown";}}if(!Number.isFinite(fresh)||now>fresh){root.dataset.effectiveOverall="red";icon.textContent="ⓘ";status.textContent="Status is stale / critical";detail.textContent="The previous result has expired. A new check is required before relying on this status.";document.title="AWA integrity — Status is stale / critical";}})();"""
 
 _STYLE = """
-:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--color-surface:#101313;--color-elevated:#171b19;--color-text:#e8eaed;--color-muted:#9099a6;--color-border:#2e3140;--color-healthy:#5fd68a;--color-warning:#e6b94f;--color-critical:#f07b7b;--color-focus:#9ec5ff;--spacing-4:4px;--spacing-8:8px;--spacing-12:12px;--spacing-16:16px;--spacing-24:24px;--spacing-32:32px;--radius-8:8px;--radius-10:10px;--radius-12:12px;--border-width-default:1px;--border-width-status-rail:6px;background:var(--color-surface);color:var(--color-text)}
+:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--color-surface:#101313;--color-elevated:#171b19;--color-text:#e8eaed;--color-muted:#9099a6;--color-border:#2e3140;--color-healthy:#5fd68a;--color-warning:#fbbc04;--color-critical:#f28b82;--color-focus:#9ec5ff;--spacing-4:4px;--spacing-8:8px;--spacing-12:12px;--spacing-16:16px;--spacing-24:24px;--spacing-32:32px;--radius-8:8px;--radius-10:10px;--radius-12:12px;--border-width-default:1px;--border-width-status-rail:6px;background:var(--color-surface);color:var(--color-text)}
 *{box-sizing:border-box}
 body{margin:0;padding:var(--spacing-32);background:var(--color-surface);color:var(--color-text);font-size:16px;line-height:1.5}
 main{max-width:980px;margin:0 auto;overflow-wrap:anywhere}
@@ -29,8 +29,8 @@ p{margin:0;color:var(--color-muted)}
 [data-effective-overall="red"] .status-summary,[data-effective-overall="unknown"] .status-summary{border-left-color:var(--color-critical)}
 .status-icon{display:grid;place-items:center;width:40px;height:40px;border:var(--border-width-default) solid currentColor;border-radius:50%;color:var(--color-muted);font-size:22px;font-weight:700}
 [data-effective-overall="green"] .status-icon{color:var(--color-healthy)}
-[data-effective-overall="degraded"] .status-icon,[data-effective-overall="yellow"] .status-icon{color:var(--color-warning)}
-[data-effective-overall="red"] .status-icon,[data-effective-overall="unknown"] .status-icon{color:var(--color-critical)}
+[data-effective-overall="degraded"] .status-icon,[data-effective-overall="yellow"] .status-icon{border:0;border-radius:0;color:var(--color-surface);background:var(--color-warning)}
+[data-effective-overall="red"] .status-icon,[data-effective-overall="unknown"] .status-icon{border:0;border-radius:0;color:var(--color-surface);background:var(--color-critical)}
 .status{font-size:28px;line-height:34px;font-weight:800;margin:0 0 var(--spacing-4)}
 [data-effective-overall="green"] .status{color:var(--color-healthy)}
 [data-effective-overall="degraded"] .status,[data-effective-overall="yellow"] .status{color:var(--color-warning)}
@@ -42,7 +42,7 @@ p{margin:0;color:var(--color-muted)}
 .action-form{display:grid;gap:var(--spacing-12);margin:0 0 var(--spacing-24)}
 .action-form form{padding:var(--spacing-16);border:var(--border-width-default) solid var(--color-border);border-radius:var(--radius-12);background:var(--color-surface)}
 button{width:100%;min-height:48px;padding:var(--spacing-12) var(--spacing-16);border:var(--border-width-default) solid var(--color-border);border-radius:var(--radius-10);background:var(--color-elevated);color:var(--color-text);font:inherit;font-size:13px;line-height:18px;font-weight:700;cursor:pointer}
-button:focus-visible{outline:3px solid var(--color-focus);outline-offset:3px}
+button:focus-visible{outline:none;border-color:var(--color-focus)}
 .action-help{font-size:16px;line-height:24px}
 .notice{display:flex;flex-direction:column;gap:var(--spacing-12);min-height:200px;border:var(--border-width-default) solid var(--color-border);border-radius:var(--radius-12);padding:var(--spacing-16);margin:var(--spacing-24) 0 0;background:var(--color-elevated)}
 .notice-fatal{min-height:240px}
@@ -174,7 +174,7 @@ def served_csp(form_action: str) -> str:
 
 
 def _render_status_icon(state: str) -> str:
-    glyph = "✓" if state == "green" else "ⓘ" if state == "no-status" else "!"
+    glyph = "✓" if state == "green" else "ⓘ"
     return (
         '<span class="status-icon" data-component="StatusIcon" '
         f'aria-hidden="true">{glyph}</span>'
