@@ -220,7 +220,7 @@ class TestIntegrityConsole(EngineTestCase):
             self.assertIn(token, page)
         self.assertIn("@media (max-width:520px)", page)
         self.assertIn("overflow-wrap:anywhere", page)
-        self.assertIn("min-height:44px", page)
+        self.assertIn("min-height:48px", page)
         self.assertIn(":focus-visible", page)
         self.assertIn("@media (prefers-reduced-motion:reduce)", page)
         self.assertNotIn("@keyframes", page)
@@ -391,10 +391,10 @@ class TestIntegrityConsole(EngineTestCase):
             healthy,
         )
         self.assertIn(
-            "button{min-height:48px;min-width:127px;"
+            "button{width:100%;min-height:48px;"
             "padding:var(--spacing-12) var(--spacing-16);"
-            "border:var(--border-width-default) solid var(--color-text);"
-            "border-radius:var(--radius-8);"
+            "border:var(--border-width-default) solid var(--color-border);"
+            "border-radius:var(--radius-10);"
             "background:var(--color-elevated);color:var(--color-text);",
             healthy,
         )
