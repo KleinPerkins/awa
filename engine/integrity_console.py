@@ -359,11 +359,11 @@ def error_csp() -> str:
     return _csp("'none'")
 
 
-def _affected_invariant(model: dict, severity: str) -> str:
-    for item in model["invariants"]:
-        if item["severity"] == severity:
-            return item["id"]
-    return "integrity status"
+def _affected_invariant(model: dict) -> str:
+    return (
+        integrity.reduction_driver(model["invariants"], model["overall"])
+        or "integrity status"
+    )
 
 
 def render(
@@ -416,7 +416,7 @@ def render(
         heading = "AWA needs attention"
         supporting_copy = (
             "A check needs attention. Technical id: "
-            f"{_affected_invariant(model, 'degraded')}. "
+            f"{_affected_invariant(model)}. "
             "Run checks again to refresh this private status."
         )
         summary_fresh_until = None
@@ -424,7 +424,7 @@ def render(
         heading = "AWA needs immediate attention"
         supporting_copy = (
             "A critical integrity check failed. Technical id: "
-            f"{_affected_invariant(model, 'red')}. "
+            f"{_affected_invariant(model)}. "
             "Run checks again before continuing."
         )
         summary_fresh_until = None

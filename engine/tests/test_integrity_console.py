@@ -43,6 +43,18 @@ class TestIntegrityConsole(EngineTestCase):
                     "severity": "degraded",
                     "redacted_reason": "surveillance_freshness is degraded",
                 },
+                *[
+                    {
+                        "id": invariant_id,
+                        "severity": "green",
+                        "redacted_reason": f"{invariant_id} is green",
+                    }
+                    for invariant_id, (_, required, _safety, _profiles)
+                    in integrity.REGISTRY.items()
+                    if required
+                    and invariant_id
+                    not in {"guard_safety", "surveillance_freshness"}
+                ],
             ],
             "orphans": {
                 "worktrees": 2,
