@@ -25,15 +25,15 @@ h2{font-size:16px;line-height:24px;margin:0 0 var(--spacing-12)}
 p{margin:0;color:var(--color-muted)}
 .status-summary{display:grid;grid-template-columns:40px minmax(0,1fr);gap:var(--spacing-16);align-items:center;border:var(--border-width-default) solid var(--color-border);border-left:var(--border-width-status-rail) solid var(--color-muted);border-radius:var(--radius-12);padding:var(--spacing-24);margin-bottom:var(--spacing-24);background:var(--color-elevated)}
 [data-effective-overall="green"] .status-summary{border-left-color:var(--color-healthy)}
-[data-effective-overall="degraded"] .status-summary{border-left-color:var(--color-warning)}
+[data-effective-overall="degraded"] .status-summary,[data-effective-overall="yellow"] .status-summary{border-left-color:var(--color-warning)}
 [data-effective-overall="red"] .status-summary,[data-effective-overall="unknown"] .status-summary{border-left-color:var(--color-critical)}
 .status-icon{display:grid;place-items:center;width:40px;height:40px;border:var(--border-width-default) solid currentColor;border-radius:50%;color:var(--color-muted);font-size:22px;font-weight:700}
 [data-effective-overall="green"] .status-icon{color:var(--color-healthy)}
-[data-effective-overall="degraded"] .status-icon{color:var(--color-warning)}
+[data-effective-overall="degraded"] .status-icon,[data-effective-overall="yellow"] .status-icon{color:var(--color-warning)}
 [data-effective-overall="red"] .status-icon,[data-effective-overall="unknown"] .status-icon{color:var(--color-critical)}
 .status{font-size:28px;line-height:34px;font-weight:800;margin:0 0 var(--spacing-4)}
 [data-effective-overall="green"] .status{color:var(--color-healthy)}
-[data-effective-overall="degraded"] .status{color:var(--color-warning)}
+[data-effective-overall="degraded"] .status,[data-effective-overall="yellow"] .status{color:var(--color-warning)}
 [data-effective-overall="red"] .status,[data-effective-overall="unknown"] .status{color:var(--color-critical)}
 .metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--spacing-12);margin-bottom:var(--spacing-24)}
 .card{border:var(--border-width-default) solid var(--color-border);border-radius:var(--radius-10);padding:var(--spacing-16);background:var(--color-elevated)}
@@ -350,7 +350,7 @@ def render_status_unavailable(
         content=content,
         served=True,
         csp=csp,
-        data_attributes=' data-effective-overall="degraded"',
+        data_attributes=' data-effective-overall="yellow"',
     )
 
 
