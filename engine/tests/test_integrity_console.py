@@ -225,6 +225,55 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertIn("@media (prefers-reduced-motion:reduce)", page)
         self.assertNotIn("@keyframes", page)
 
+    def test_approved_semantic_color_and_status_icon_parity_contract(self):
+        degraded = integrity_console.render(
+            self._projection(overall="degraded"),
+        )
+        critical = integrity_console.render(
+            self._projection(overall="red"),
+        )
+        self.assertIn("--color-warning:#fbbc04;", degraded)
+        self.assertIn("--color-critical:#f28b82;", critical)
+        self.assertIn(
+            '[data-effective-overall="degraded"] .status-icon,'
+            '[data-effective-overall="yellow"] .status-icon{'
+            "border:0;border-radius:0;color:var(--color-surface);"
+            "background:var(--color-warning)}",
+            degraded,
+        )
+        self.assertIn(
+            '[data-effective-overall="red"] .status-icon,'
+            '[data-effective-overall="unknown"] .status-icon{'
+            "border:0;border-radius:0;color:var(--color-surface);"
+            "background:var(--color-critical)}",
+            critical,
+        )
+        self.assertIn(
+            '<span class="status-icon" data-component="StatusIcon" '
+            'aria-hidden="true">ⓘ</span>',
+            degraded,
+        )
+        self.assertIn(
+            '<span class="status-icon" data-component="StatusIcon" '
+            'aria-hidden="true">ⓘ</span>',
+            critical,
+        )
+        self.assertNotIn(">!</span>", degraded)
+        self.assertNotIn(">!</span>", critical)
+
+    def test_approved_action_focus_uses_focus_colored_control_border(self):
+        page = integrity_console.render_no_status()
+        self.assertIn(
+            "button:focus-visible{outline:none;"
+            "border-color:var(--color-focus)}",
+            page,
+        )
+        self.assertNotIn(
+            "button:focus-visible{outline:3px solid var(--color-focus);"
+            "outline-offset:3px}",
+            page,
+        )
+
     def test_approved_m32c_responsive_geometry_contract(self):
         page = integrity_console.render(
             self._projection(overall="degraded"),
@@ -325,9 +374,12 @@ class TestIntegrityConsole(EngineTestCase):
             ("#e8eaed", "#101313"),
             ("#9099a6", "#101313"),
             ("#5fd68a", "#171b19"),
-            ("#e6b94f", "#171b19"),
-            ("#f07b7b", "#171b19"),
+            ("#fbbc04", "#171b19"),
+            ("#f28b82", "#171b19"),
             ("#9ec5ff", "#101313"),
+            ("#9ec5ff", "#171b19"),
+            ("#101313", "#fbbc04"),
+            ("#101313", "#f28b82"),
             ("#e8eaed", "#171b19"),
         ):
             self.assertGreaterEqual(contrast(foreground, background), 4.5)
@@ -791,7 +843,7 @@ class TestIntegrityConsole(EngineTestCase):
             'document.querySelector("[data-component=StatusIcon]")',
             script,
         )
-        self.assertIn('icon.textContent="!"', script)
+        self.assertIn('icon.textContent="ⓘ"', script)
         self.assertIn(
             'document.title="AWA integrity — Status is stale / critical"',
             script,
