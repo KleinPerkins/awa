@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from . import integrity
 
 
-_CLOCK_SCRIPT = """(()=>{"use strict";const root=document.getElementById("integrity");const status=document.getElementById("overall-status");const age=document.getElementById("checked-age");const generated=Date.parse(root.dataset.generatedAt||"");const fresh=Date.parse(root.dataset.freshUntil||"");const now=Date.now();if(Number.isFinite(generated)){age.textContent=String(Math.max(0,Math.floor((now-generated)/1000)))+"s ago";}else{age.textContent="unknown";}if(!Number.isFinite(fresh)||now>fresh){root.dataset.effectiveOverall="red";status.textContent="STALE / RED";document.title="AWA integrity — STALE / RED";}})();"""
+_CLOCK_SCRIPT = """(()=>{"use strict";const root=document.getElementById("integrity");const status=document.getElementById("overall-status");const icon=document.querySelector("[data-component=StatusIcon]");const age=document.getElementById("checked-age");const generated=Date.parse(root.dataset.generatedAt||"");const fresh=Date.parse(root.dataset.freshUntil||"");const now=Date.now();if(Number.isFinite(generated)){age.textContent=String(Math.max(0,Math.floor((now-generated)/1000)))+"s ago";}else{age.textContent="unknown";}if(!Number.isFinite(fresh)||now>fresh){root.dataset.effectiveOverall="red";icon.textContent="!";status.textContent="STALE / RED";document.title="AWA integrity — STALE / RED";}})();"""
 
 _STYLE = """
 :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--color-surface:#101313;--color-elevated:#171b19;--color-text:#e8eaed;--color-muted:#9099a6;--color-border:#2e3140;--color-healthy:#5fd68a;--color-warning:#e6b94f;--color-critical:#f07b7b;--color-focus:#9ec5ff;--spacing-4:4px;--spacing-8:8px;--spacing-12:12px;--spacing-16:16px;--spacing-24:24px;--spacing-32:32px;--radius-8:8px;--radius-10:10px;--radius-12:12px;--border-width-default:1px;--border-width-status-rail:6px;background:var(--color-surface);color:var(--color-text)}
@@ -24,11 +24,11 @@ h1{font-size:26px;line-height:32px;margin:0 0 var(--spacing-4)}
 h2{font-size:16px;line-height:24px;margin:0 0 var(--spacing-12)}
 p{margin:0;color:var(--color-muted)}
 .status-summary{display:grid;grid-template-columns:40px minmax(0,1fr);gap:var(--spacing-16);align-items:center;border:var(--border-width-default) solid var(--color-border);border-left:var(--border-width-status-rail) solid var(--color-warning);border-radius:var(--radius-12);padding:var(--spacing-24);margin-bottom:var(--spacing-24);background:var(--color-elevated)}
-.status-summary.green{border-left-color:var(--color-healthy)}
-.status-summary.red,.status-summary.unknown{border-left-color:var(--color-critical)}
+[data-effective-overall="green"] .status-summary{border-left-color:var(--color-healthy)}
+[data-effective-overall="red"] .status-summary,[data-effective-overall="unknown"] .status-summary{border-left-color:var(--color-critical)}
 .status-icon{display:grid;place-items:center;width:40px;height:40px;border:var(--border-width-default) solid currentColor;border-radius:50%;color:var(--color-warning);font-size:22px;font-weight:700}
-.status-summary.green .status-icon{color:var(--color-healthy)}
-.status-summary.red .status-icon,.status-summary.unknown .status-icon{color:var(--color-critical)}
+[data-effective-overall="green"] .status-icon{color:var(--color-healthy)}
+[data-effective-overall="red"] .status-icon,[data-effective-overall="unknown"] .status-icon{color:var(--color-critical)}
 .status{font-size:28px;line-height:34px;font-weight:800;margin:0 0 var(--spacing-4)}
 .metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--spacing-12);margin-bottom:var(--spacing-24)}
 .card{border:var(--border-width-default) solid var(--color-border);border-radius:var(--radius-10);padding:var(--spacing-16);background:var(--color-elevated)}
@@ -181,7 +181,6 @@ def _render_status_summary(
     supporting_copy: object,
     fresh_until: object | None = None,
 ) -> str:
-    safe_state = html.escape(str(state), quote=True)
     detail = (
         '<p class="freshness">Checked <span id="checked-age">0s ago</span>'
         f" · Fresh until {html.escape(str(fresh_until))}</p>"
@@ -189,7 +188,7 @@ def _render_status_summary(
         else f"<p>{html.escape(str(supporting_copy))}</p>"
     )
     return (
-        f'<section class="status-summary {safe_state}" '
+        '<section class="status-summary" '
         'data-component="StatusSummary" aria-labelledby="overall-status">'
         f"{_render_status_icon(state)}"
         '<div class="status-content">'

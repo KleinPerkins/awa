@@ -219,7 +219,7 @@ class TestIntegrityConsole(EngineTestCase):
         )
         self.assertEqual(page.count("<h1>"), 1)
         self.assertIn('<header class="page-header">', page)
-        self.assertIn('<section class="status-summary green"', page)
+        self.assertIn('<section class="status-summary"', page)
         self.assertIn('data-component="StatusIcon"', page)
         self.assertIn("AWA is healthy", page)
         self.assertIn('aria-label="Integrity counts"', page)
@@ -369,7 +369,7 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertNotIn("raw_evidence", page)
 
     def test_clock_only_script_forces_stale_red_after_expiry(self):
-        projection = self._projection()
+        projection = self._projection(overall="green")
         before = integrity_console.clock_state(
             projection,
             now_epoch=integrity._parse_iso(
@@ -385,7 +385,7 @@ class TestIntegrityConsole(EngineTestCase):
             + 1,
         )
         self.assertFalse(before["stale"])
-        self.assertEqual(before["effective_overall"], "degraded")
+        self.assertEqual(before["effective_overall"], "green")
         self.assertTrue(after["stale"])
         self.assertEqual(after["effective_overall"], "red")
 
@@ -393,6 +393,45 @@ class TestIntegrityConsole(EngineTestCase):
         script, _csp = self._script_and_csp(page)
         self.assertIn("Date.now()", script)
         self.assertIn("STALE / RED", script)
+        self.assertIn(
+            'document.querySelector("[data-component=StatusIcon]")',
+            script,
+        )
+        self.assertIn('icon.textContent="!"', script)
+        self.assertIn('document.title="AWA integrity — STALE / RED"', script)
+        self.assertIn(
+            '[data-effective-overall="green"] .status-summary{'
+            "border-left-color:var(--color-healthy)}",
+            page,
+        )
+        self.assertIn(
+            '[data-effective-overall="red"] .status-summary,'
+            '[data-effective-overall="unknown"] .status-summary{'
+            "border-left-color:var(--color-critical)}",
+            page,
+        )
+        self.assertIn(
+            '[data-effective-overall="green"] .status-icon{'
+            "color:var(--color-healthy)}",
+            page,
+        )
+        self.assertIn(
+            '[data-effective-overall="red"] .status-icon,'
+            '[data-effective-overall="unknown"] .status-icon{'
+            "color:var(--color-critical)}",
+            page,
+        )
+        self.assertIn(
+            'class="status-summary" data-component="StatusSummary" '
+            'aria-labelledby="overall-status"',
+            page,
+        )
+        self.assertNotIn('class="status-summary green"', page)
+        self.assertIn(
+            '<span class="status-icon" data-component="StatusIcon" '
+            'aria-hidden="true">✓</span>',
+            page,
+        )
         for forbidden in (
             "fetch(",
             "eval(",
