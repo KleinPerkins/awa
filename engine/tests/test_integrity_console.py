@@ -198,16 +198,16 @@ class TestIntegrityConsole(EngineTestCase):
             )
             return (lighter + 0.05) / (darker + 0.05)
 
-        surface = "#101313"
-        for foreground in (
-            "#e8eaed",
-            "#9099a6",
-            "#5fd68a",
-            "#e6b94f",
-            "#f07b7b",
-            "#9ec5ff",
+        for foreground, background in (
+            ("#e8eaed", "#101313"),
+            ("#9099a6", "#101313"),
+            ("#5fd68a", "#171b19"),
+            ("#e6b94f", "#171b19"),
+            ("#f07b7b", "#171b19"),
+            ("#9ec5ff", "#101313"),
+            ("#e8eaed", "#171b19"),
         ):
-            self.assertGreaterEqual(contrast(foreground, surface), 4.5)
+            self.assertGreaterEqual(contrast(foreground, background), 4.5)
 
     def test_healthy_component_mapping_and_landmarks(self):
         page = integrity_console.render(
@@ -233,6 +233,69 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertIn(
             "awa-engine integrity console --serve --open",
             page,
+        )
+
+    def test_action_form_instruction_is_described_by_button(self):
+        form = integrity_console._render_action_form()
+        self.assertIn(
+            '<button type="submit" aria-describedby="action-help">'
+            "Run checks now</button>",
+            form,
+        )
+        self.assertEqual(form.count('id="action-help"'), 1)
+        self.assertIn(
+            '<p class="action-help" id="action-help">'
+            "Checks may take a moment; this page returns when complete.</p>",
+            form,
+        )
+        self.assertIn(
+            '<form method="post" action="run-checks-now">',
+            form,
+        )
+        self.assertNotIn("<input", form)
+
+    def test_approved_status_action_and_no_status_visual_contract(self):
+        healthy = integrity_console.render(self._projection(overall="green"))
+        self.assertIn(
+            '[data-effective-overall="green"] .status{'
+            "color:var(--color-healthy)}",
+            healthy,
+        )
+        self.assertIn(
+            '[data-effective-overall="red"] .status,'
+            '[data-effective-overall="unknown"] .status{'
+            "color:var(--color-critical)}",
+            healthy,
+        )
+        self.assertIn(
+            "button{min-height:48px;min-width:127px;"
+            "padding:var(--spacing-12) var(--spacing-16);"
+            "border:var(--border-width-default) solid var(--color-text);"
+            "border-radius:var(--radius-8);"
+            "background:var(--color-elevated);color:var(--color-text);",
+            healthy,
+        )
+        no_status = integrity_console.render_no_status()
+        self.assertIn(
+            '<span class="status-icon" data-component="StatusIcon" '
+            'aria-hidden="true">ⓘ</span>',
+            no_status,
+        )
+        self.assertIn(
+            '<section class="status-summary" '
+            'data-component="StatusSummary" '
+            'aria-labelledby="overall-status">',
+            no_status,
+        )
+        self.assertIn(
+            '<h2 class="status" id="overall-status">No status yet</h2>',
+            no_status,
+        )
+        self.assertIn(
+            ".status-icon{display:grid;place-items:center;width:40px;"
+            "height:40px;border:var(--border-width-default) solid "
+            "currentColor;border-radius:50%;color:var(--color-muted);",
+            no_status,
         )
 
     def test_component_content_is_escaped(self):
@@ -290,7 +353,11 @@ class TestIntegrityConsole(EngineTestCase):
             '<form method="post" action="run-checks-now">',
             page,
         )
-        self.assertIn('<button type="submit">Run checks now</button>', page)
+        self.assertIn(
+            '<button type="submit" aria-describedby="action-help">'
+            "Run checks now</button>",
+            page,
+        )
         self.assertIn(
             "Checks may take a moment; this page returns when complete.",
             page,
@@ -430,6 +497,12 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertIn(
             '<span class="status-icon" data-component="StatusIcon" '
             'aria-hidden="true">✓</span>',
+            page,
+        )
+        self.assertIn(
+            '[data-effective-overall="red"] .status,'
+            '[data-effective-overall="unknown"] .status{'
+            "color:var(--color-critical)}",
             page,
         )
         for forbidden in (

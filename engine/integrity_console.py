@@ -23,19 +23,24 @@ main{max-width:980px;margin:0 auto;overflow-wrap:anywhere}
 h1{font-size:26px;line-height:32px;margin:0 0 var(--spacing-4)}
 h2{font-size:16px;line-height:24px;margin:0 0 var(--spacing-12)}
 p{margin:0;color:var(--color-muted)}
-.status-summary{display:grid;grid-template-columns:40px minmax(0,1fr);gap:var(--spacing-16);align-items:center;border:var(--border-width-default) solid var(--color-border);border-left:var(--border-width-status-rail) solid var(--color-warning);border-radius:var(--radius-12);padding:var(--spacing-24);margin-bottom:var(--spacing-24);background:var(--color-elevated)}
+.status-summary{display:grid;grid-template-columns:40px minmax(0,1fr);gap:var(--spacing-16);align-items:center;border:var(--border-width-default) solid var(--color-border);border-left:var(--border-width-status-rail) solid var(--color-muted);border-radius:var(--radius-12);padding:var(--spacing-24);margin-bottom:var(--spacing-24);background:var(--color-elevated)}
 [data-effective-overall="green"] .status-summary{border-left-color:var(--color-healthy)}
+[data-effective-overall="degraded"] .status-summary{border-left-color:var(--color-warning)}
 [data-effective-overall="red"] .status-summary,[data-effective-overall="unknown"] .status-summary{border-left-color:var(--color-critical)}
-.status-icon{display:grid;place-items:center;width:40px;height:40px;border:var(--border-width-default) solid currentColor;border-radius:50%;color:var(--color-warning);font-size:22px;font-weight:700}
+.status-icon{display:grid;place-items:center;width:40px;height:40px;border:var(--border-width-default) solid currentColor;border-radius:50%;color:var(--color-muted);font-size:22px;font-weight:700}
 [data-effective-overall="green"] .status-icon{color:var(--color-healthy)}
+[data-effective-overall="degraded"] .status-icon{color:var(--color-warning)}
 [data-effective-overall="red"] .status-icon,[data-effective-overall="unknown"] .status-icon{color:var(--color-critical)}
 .status{font-size:28px;line-height:34px;font-weight:800;margin:0 0 var(--spacing-4)}
+[data-effective-overall="green"] .status{color:var(--color-healthy)}
+[data-effective-overall="degraded"] .status{color:var(--color-warning)}
+[data-effective-overall="red"] .status,[data-effective-overall="unknown"] .status{color:var(--color-critical)}
 .metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--spacing-12);margin-bottom:var(--spacing-24)}
 .card{border:var(--border-width-default) solid var(--color-border);border-radius:var(--radius-10);padding:var(--spacing-16);background:var(--color-elevated)}
 .metric-label{color:var(--color-muted);font-size:13px;line-height:18px;font-weight:600}
 .metric{font-size:28px;line-height:34px;font-weight:800;margin-top:var(--spacing-4)}
 .action-form{display:grid;gap:var(--spacing-8);margin:0 0 var(--spacing-24)}
-button{min-height:48px;min-width:127px;padding:var(--spacing-12) var(--spacing-16);border:var(--border-width-default) solid var(--color-border);border-radius:var(--radius-8);background:var(--color-text);color:var(--color-surface);font:inherit;font-weight:700;cursor:pointer}
+button{min-height:48px;min-width:127px;padding:var(--spacing-12) var(--spacing-16);border:var(--border-width-default) solid var(--color-text);border-radius:var(--radius-8);background:var(--color-elevated);color:var(--color-text);font:inherit;font-weight:700;cursor:pointer}
 button:focus-visible{outline:3px solid var(--color-focus);outline-offset:3px}
 .action-help{font-size:13px;line-height:18px}
 .notice{border:var(--border-width-default) solid var(--color-border);border-radius:var(--radius-10);padding:var(--spacing-16);margin:var(--spacing-24) 0 0;background:var(--color-elevated)}
@@ -167,7 +172,7 @@ def served_csp(form_action: str) -> str:
 
 
 def _render_status_icon(state: str) -> str:
-    glyph = "✓" if state == "green" else "?" if state == "no-status" else "!"
+    glyph = "✓" if state == "green" else "ⓘ" if state == "no-status" else "!"
     return (
         '<span class="status-icon" data-component="StatusIcon" '
         f'aria-hidden="true">{glyph}</span>'
@@ -202,7 +207,7 @@ def _render_action_form() -> str:
     return (
         '<div class="action-form" data-component="ActionForm">'
         '<form method="post" action="run-checks-now">'
-        '<button type="submit">Run checks now</button>'
+        '<button type="submit" aria-describedby="action-help">Run checks now</button>'
         "</form>"
         f'<p class="action-help" id="action-help">{_ACTION_HELP}</p>'
         "</div>"
