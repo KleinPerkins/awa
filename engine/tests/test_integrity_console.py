@@ -368,7 +368,25 @@ class TestIntegrityConsole(EngineTestCase):
     def test_status_unavailable_page_is_recoverable_and_token_free(self):
         page = integrity_console.render_status_unavailable()
         self.assertIn("Status cannot be read", page)
-        self.assertIn('<main data-effective-overall="degraded">', page)
+        self.assertIn('<main data-effective-overall="yellow">', page)
+        self.assertIn(
+            '[data-effective-overall="degraded"] .status-summary,'
+            '[data-effective-overall="yellow"] .status-summary{'
+            "border-left-color:var(--color-warning)}",
+            page,
+        )
+        self.assertIn(
+            '[data-effective-overall="degraded"] .status-icon,'
+            '[data-effective-overall="yellow"] .status-icon{'
+            "color:var(--color-warning)}",
+            page,
+        )
+        self.assertIn(
+            '[data-effective-overall="degraded"] .status,'
+            '[data-effective-overall="yellow"] .status{'
+            "color:var(--color-warning)}",
+            page,
+        )
         self.assertIn(
             '<span class="status-icon" data-component="StatusIcon" '
             'aria-hidden="true">!</span>',
