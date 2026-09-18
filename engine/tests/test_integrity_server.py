@@ -324,10 +324,20 @@ class TestIntegrityServer(EngineTestCase):
         self.assertNotIn("Access-Control-Allow", "\n".join(headers))
         self.assertIn("<form method=\"post\" action=\"run-checks-now\">", page)
         self.assertIn("Run checks now", page)
+        self.assertIn(
+            "Checks may take a moment; this page returns when complete.",
+            page,
+        )
+        self.assertIn(
+            "awa-engine integrity console --serve --open",
+            page,
+        )
+        self.assertEqual(page.count(server.token), 1)
+        self.assertNotIn(server.token, page.split("<main", 1)[1])
         self.assertNotIn("/private/evidence", page)
         self.assertNotIn("secret-value", page)
         self.assertEqual(
-            page.count("<td class=\"severity green\">"),
+            page.count('class="severity green"'),
             integrity.HISTORY_MAX + 1,
         )
         self.assertIn(server.form_action_url, headers["Content-Security-Policy"])
@@ -581,10 +591,17 @@ class TestIntegrityServer(EngineTestCase):
         )
         page = body.decode("utf-8")
         self.assertEqual(status, 200)
-        self.assertIn("NO STATUS YET", page)
-        self.assertIn("No integrity status yet", page)
+        self.assertIn("No status yet", page)
+        self.assertIn(
+            "Run checks now to create the first private integrity status.",
+            page,
+        )
         self.assertIn(
             '<form method="post" action="run-checks-now">',
+            page,
+        )
+        self.assertIn(
+            "awa-engine integrity console --serve --open",
             page,
         )
         self.assertNotIn("GREEN", page)
