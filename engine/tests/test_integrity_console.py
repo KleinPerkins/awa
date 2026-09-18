@@ -43,6 +43,18 @@ class TestIntegrityConsole(EngineTestCase):
                     "severity": "degraded",
                     "redacted_reason": "surveillance_freshness is degraded",
                 },
+                *[
+                    {
+                        "id": invariant_id,
+                        "severity": "green",
+                        "redacted_reason": f"{invariant_id} is green",
+                    }
+                    for invariant_id, (_, required, _safety, _profiles)
+                    in integrity.REGISTRY.items()
+                    if required
+                    and invariant_id
+                    not in {"guard_safety", "surveillance_freshness"}
+                ],
             ],
             "orphans": {
                 "worktrees": 2,
@@ -86,6 +98,46 @@ class TestIntegrityConsole(EngineTestCase):
         )
         self.assertIsNotNone(csp_match)
         return script_matches[0], html.unescape(csp_match.group(1))
+
+    def _reduced_projection(
+        self,
+        severities: dict[str, str],
+        *,
+        fresh: bool = True,
+        reverse_input: bool = False,
+    ) -> dict:
+        invariant_ids = [
+            invariant_id
+            for invariant_id, (_, required, _safety, _profiles)
+            in integrity.REGISTRY.items()
+            if required
+        ]
+        if reverse_input:
+            invariant_ids.reverse()
+        invariants = [
+            {
+                "id": invariant_id,
+                "severity": severities.get(invariant_id, "green"),
+                "redacted_reason": (
+                    f"{invariant_id} is "
+                    f"{severities.get(invariant_id, 'green')}"
+                ),
+            }
+            for invariant_id in invariant_ids
+        ]
+        triggers = {
+            "launchd": {
+                "last_success": (
+                    integrity._now_iso()
+                    if fresh
+                    else "2020-01-01T00:00:00Z"
+                ),
+            },
+        }
+        return self._projection(
+            overall=integrity.reduce(invariants, triggers),
+            invariants=invariants,
+        )
 
     def _status(self) -> dict:
         generated = integrity._now_iso()
@@ -298,6 +350,210 @@ class TestIntegrityConsole(EngineTestCase):
             no_status,
         )
 
+    def test_degraded_state_uses_approved_warning_contract(self):
+        page = integrity_console.render(
+            self._projection(overall="degraded"),
+            serve_action="run-checks-now",
+            served_form_action=(
+                "http://127.0.0.1:54321/synthetic-token/run-checks-now"
+            ),
+        )
+        self.assertIn("AWA needs attention", page)
+        self.assertIn(
+            "A check needs attention. Technical id: "
+            "surveillance_freshness. "
+            "Run checks again to refresh this private status.",
+            page,
+        )
+        self.assertIn('data-effective-overall="degraded"', page)
+        self.assertIn(">!</span>", page)
+        self.assertIn("Run checks now", page)
+
+    def test_critical_state_uses_approved_non_color_contract(self):
+        page = integrity_console.render(
+            self._projection(overall="red"),
+            serve_action="run-checks-now",
+            served_form_action=(
+                "http://127.0.0.1:54321/synthetic-token/run-checks-now"
+            ),
+        )
+        self.assertIn("AWA needs immediate attention", page)
+        self.assertIn(
+            "A critical integrity check failed. Technical id: "
+            "integrity status. Run checks again before continuing.",
+            page,
+        )
+        self.assertIn('data-effective-overall="red"', page)
+        self.assertIn(">!</span>", page)
+        self.assertNotIn('action="repair"', page)
+        self.assertNotIn("Repair now", page)
+
+    def test_safety_unknown_red_names_reducer_driving_invariant(self):
+        page = integrity_console.render(
+            self._reduced_projection({"guard_safety": "unknown"}),
+        )
+        self.assertIn(
+            "A critical integrity check failed. Technical id: "
+            "guard_safety. Run checks again before continuing.",
+            page,
+        )
+        self.assertNotIn("Technical id: integrity status.", page)
+
+    def test_noncritical_unknown_degraded_names_reducer_driver(self):
+        page = integrity_console.render(
+            self._reduced_projection({"hooks": "unknown"}),
+        )
+        self.assertIn(
+            "A check needs attention. Technical id: hooks. "
+            "Run checks again to refresh this private status.",
+            page,
+        )
+        self.assertNotIn("Technical id: integrity status.", page)
+
+    def test_red_driver_wins_over_earlier_lower_severity(self):
+        page = integrity_console.render(
+            self._reduced_projection(
+                {
+                    "entry_handshake": "degraded",
+                    "release_identity": "red",
+                },
+            ),
+        )
+        self.assertIn(
+            "A critical integrity check failed. Technical id: "
+            "release_identity. Run checks again before continuing.",
+            page,
+        )
+        self.assertNotIn("Technical id: entry_handshake.", page)
+
+    def test_multiple_unknowns_follow_reducer_registry_order(self):
+        cases = (
+            (
+                {"parity": "unknown", "guard_safety": "unknown"},
+                "A critical integrity check failed. Technical id: "
+                "guard_safety. Run checks again before continuing.",
+            ),
+            (
+                {"hooks": "unknown", "entry_handshake": "unknown"},
+                "A check needs attention. Technical id: entry_handshake. "
+                "Run checks again to refresh this private status.",
+            ),
+        )
+        for severities, expected in cases:
+            with self.subTest(severities=severities):
+                page = integrity_console.render(
+                    self._reduced_projection(
+                        severities,
+                        reverse_input=True,
+                    ),
+                )
+                self.assertIn(expected, page)
+                self.assertNotIn("Technical id: integrity status.", page)
+
+    def test_trigger_only_red_uses_generic_and_green_uses_no_fallback(self):
+        trigger_red = integrity_console.render(
+            self._reduced_projection({}, fresh=False),
+        )
+        self.assertIn(
+            "A critical integrity check failed. Technical id: "
+            "integrity status. Run checks again before continuing.",
+            trigger_red,
+        )
+        healthy = integrity_console.render(
+            self._reduced_projection({}),
+            serve_action="run-checks-now",
+            served_form_action=(
+                "http://127.0.0.1:54321/synthetic-token/run-checks-now"
+            ),
+        )
+        self.assertIn("AWA is healthy", healthy)
+        self.assertNotIn("Technical id:", healthy)
+
+    def test_stale_clock_uses_approved_critical_copy(self):
+        page = integrity_console.render(self._projection(overall="green"))
+        script, _csp = self._script_and_csp(page)
+        self.assertIn('status.textContent="Status is stale / critical"', script)
+        self.assertIn(
+            'detail.textContent="The previous result has expired. '
+            'A new check is required before relying on this status."',
+            script,
+        )
+        self.assertIn('root.dataset.effectiveOverall="red"', script)
+
+    def test_fatal_check_failure_page_has_exact_recovery_without_action(self):
+        page = integrity_console.render_fatal_check_failure()
+        self.assertIn("Checks could not complete", page)
+        self.assertIn('<main data-effective-overall="red">', page)
+        self.assertIn(
+            '<span class="status-icon" data-component="StatusIcon" '
+            'aria-hidden="true">!</span>',
+            page,
+        )
+        self.assertIn("Restart the console, then run checks again.", page)
+        self.assertIn(
+            "awa-engine integrity console --serve --open",
+            page,
+        )
+        self.assertNotIn('data-component="ActionForm"', page)
+        self.assertNotIn("<form", page)
+        self.assertIn('data-component="Notice"', page)
+
+    def test_status_unavailable_page_is_recoverable_and_token_free(self):
+        page = integrity_console.render_status_unavailable()
+        self.assertIn("Status cannot be read", page)
+        self.assertIn('<main data-effective-overall="yellow">', page)
+        self.assertIn(
+            '[data-effective-overall="degraded"] .status-summary,'
+            '[data-effective-overall="yellow"] .status-summary{'
+            "border-left-color:var(--color-warning)}",
+            page,
+        )
+        self.assertIn(
+            '[data-effective-overall="degraded"] .status-icon,'
+            '[data-effective-overall="yellow"] .status-icon{'
+            "color:var(--color-warning)}",
+            page,
+        )
+        self.assertIn(
+            '[data-effective-overall="degraded"] .status,'
+            '[data-effective-overall="yellow"] .status{'
+            "color:var(--color-warning)}",
+            page,
+        )
+        self.assertIn(
+            '<span class="status-icon" data-component="StatusIcon" '
+            'aria-hidden="true">!</span>',
+            page,
+        )
+        self.assertIn(
+            "The saved status is unavailable or corrupt. "
+            "Run checks now to recover in this console.",
+            page,
+        )
+        self.assertIn('<form method="post" action="run-checks-now">', page)
+        self.assertIn("Checks may take a moment", page)
+        self.assertIn('data-component="Notice"', page)
+        self.assertNotIn("synthetic-token", page)
+
+    def test_static_snapshot_uses_approved_action_free_contract(self):
+        page = integrity_console.render(self._projection(overall="green"))
+        self.assertIn(
+            '<h2 class="status" id="overall-status">Private snapshot</h2>',
+            page,
+        )
+        self.assertNotIn(
+            '<h2 class="status" id="overall-status">AWA is healthy</h2>',
+            page,
+        )
+        self.assertIn(
+            "Saved integrity status. This action-free snapshot can become "
+            "critical when freshness expires.",
+            page,
+        )
+        self.assertNotIn('data-component="ActionForm"', page)
+        self.assertNotIn('data-component="Notice"', page)
+        self.assertNotIn("awa-engine integrity console --serve --open", page)
+
     def test_component_content_is_escaped(self):
         card = integrity_console._render_metric_card(
             "<label>",
@@ -459,13 +715,16 @@ class TestIntegrityConsole(EngineTestCase):
         page = integrity_console.render(projection)
         script, _csp = self._script_and_csp(page)
         self.assertIn("Date.now()", script)
-        self.assertIn("STALE / RED", script)
+        self.assertIn("Status is stale / critical", script)
         self.assertIn(
             'document.querySelector("[data-component=StatusIcon]")',
             script,
         )
         self.assertIn('icon.textContent="!"', script)
-        self.assertIn('document.title="AWA integrity — STALE / RED"', script)
+        self.assertIn(
+            'document.title="AWA integrity — Status is stale / critical"',
+            script,
+        )
         self.assertIn(
             '[data-effective-overall="green"] .status-summary{'
             "border-left-color:var(--color-healthy)}",

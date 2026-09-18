@@ -372,7 +372,7 @@ class TestIntegrityServer(EngineTestCase):
             f"generation {second_status['generation']}",
             second_page,
         )
-        self.assertIn("DEGRADED", second_page)
+        self.assertIn("AWA needs attention", second_page)
         self.assertNotEqual(first_page, second_page)
 
     def test_duplicate_malformed_and_proxy_headers_are_rejected(self):
@@ -485,9 +485,50 @@ class TestIntegrityServer(EngineTestCase):
             body=b"",
         )
         self.assertEqual(status, 500)
-        self.assertEqual(body, b"Integrity check failed.\n")
+        page = body.decode("utf-8")
+        self.assertIn("Checks could not complete", page)
+        self.assertIn("Restart the console, then run checks again.", page)
+        self.assertIn(
+            "awa-engine integrity console --serve --open",
+            page,
+        )
+        self.assertNotIn("<form", page)
+        self.assertNotIn('data-component="ActionForm"', page)
         self.assertNotIn(b"SECRET", body)
         self.assertNotIn(server.token.encode(), body)
+        thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0].reason, "error")
+        self.assertTrue(server.closed)
+
+    def test_committer_failure_uses_same_fatal_recovery_contract(self):
+        self._commit_status()
+        evaluator = mock.Mock(return_value=self._status())
+        committer = mock.Mock(
+            side_effect=RuntimeError("SECRET commit artifact path")
+        )
+        server, thread, result = self._start(
+            idle_timeout_s=2,
+            evaluator=evaluator,
+            committer=committer,
+        )
+        status, _headers, body = self._request(
+            server,
+            "POST",
+            server.capability_path + "run-checks-now",
+            headers={
+                "Origin": server.origin,
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body=b"",
+        )
+        page = body.decode("utf-8")
+        self.assertEqual(status, 500)
+        self.assertIn("Checks could not complete", page)
+        self.assertIn("Restart the console, then run checks again.", page)
+        self.assertNotIn("<form", page)
+        self.assertNotIn("SECRET", page)
+        self.assertNotIn(server.token, page)
         thread.join(timeout=2)
         self.assertFalse(thread.is_alive())
         self.assertEqual(result[0].reason, "error")
@@ -630,7 +671,7 @@ class TestIntegrityServer(EngineTestCase):
         )
         self.assertEqual(status, 200)
         self.assertIn("generation 1", body.decode("utf-8"))
-        self.assertIn("GREEN", body.decode("utf-8"))
+        self.assertIn("AWA is healthy", body.decode("utf-8"))
 
     def test_corrupt_get_is_request_local_and_post_recovers(self):
         root = paths.ensure_dir(paths.integrity_dir())
@@ -649,9 +690,18 @@ class TestIntegrityServer(EngineTestCase):
             server.capability_path,
         )
         self.assertEqual(status, 503)
-        self.assertEqual(body, b"Integrity status unavailable.\n")
+        page = body.decode("utf-8")
+        self.assertIn("Status cannot be read", page)
+        self.assertIn(
+            '<form method="post" action="run-checks-now">',
+            page,
+        )
+        self.assertIn("Checks may take a moment", page)
         self.assertNotIn(b"DO NOT LEAK", body)
-        self.assertNotIn(server.token.encode(), body)
+        self.assertNotIn(
+            server.token,
+            page.split("<main", 1)[1],
+        )
         self.assertTrue(thread.is_alive())
         paths.integrity_status_path().unlink()
         self.assertEqual(
@@ -691,9 +741,17 @@ class TestIntegrityServer(EngineTestCase):
                 server.capability_path,
             )
         self.assertEqual(status, 503)
-        self.assertEqual(body, b"Integrity status unavailable.\n")
+        page = body.decode("utf-8")
+        self.assertIn("Status cannot be read", page)
+        self.assertIn(
+            '<form method="post" action="run-checks-now">',
+            page,
+        )
         self.assertNotIn(b"SECRET", body)
-        self.assertNotIn(server.token.encode(), body)
+        self.assertNotIn(
+            server.token,
+            page.split("<main", 1)[1],
+        )
         self.assertTrue(thread.is_alive())
         self.assertEqual(
             self._request(

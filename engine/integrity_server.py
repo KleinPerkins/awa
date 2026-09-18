@@ -26,8 +26,6 @@ REQUEST_TIMEOUT_S = 2.0
 
 _FORM_CONTENT_TYPE = "application/x-www-form-urlencoded"
 _GENERIC_BODY = b"Request rejected.\n"
-_ERROR_BODY = b"Integrity check failed.\n"
-_STATUS_UNAVAILABLE_BODY = b"Integrity status unavailable.\n"
 _GENERIC_CSP = (
     "default-src 'none'; base-uri 'none'; form-action 'none'; "
     "frame-ancestors 'none'"
@@ -220,10 +218,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         except _StatusAbsent:
             page = integrity_console.render_no_status().encode("utf-8")
         except Exception:
+            page = integrity_console.render_status_unavailable(
+                self._owner.form_action_url
+            ).encode("utf-8")
             self._respond(
                 503,
-                _STATUS_UNAVAILABLE_BODY,
-                content_type="text/plain; charset=utf-8",
+                page,
+                content_type="text/html; charset=utf-8",
+                csp=self._owner.served_csp,
             )
             self._owner._touch()
             return
@@ -275,20 +277,28 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         except Exception:
             if method == "POST":
                 try:
+                    page = integrity_console.render_fatal_check_failure().encode(
+                        "utf-8"
+                    )
                     self._respond(
                         500,
-                        _ERROR_BODY,
-                        content_type="text/plain; charset=utf-8",
+                        page,
+                        content_type="text/html; charset=utf-8",
+                        csp=integrity_console.error_csp(),
                     )
                 except (BrokenPipeError, ConnectionError, OSError):
                     pass
                 self._owner._fatal = True
             else:
                 try:
+                    page = integrity_console.render_status_unavailable(
+                        self._owner.form_action_url
+                    ).encode("utf-8")
                     self._respond(
                         503,
-                        _STATUS_UNAVAILABLE_BODY,
-                        content_type="text/plain; charset=utf-8",
+                        page,
+                        content_type="text/html; charset=utf-8",
+                        csp=self._owner.served_csp,
                     )
                 except (BrokenPipeError, ConnectionError, OSError):
                     pass

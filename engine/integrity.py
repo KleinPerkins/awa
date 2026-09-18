@@ -1443,28 +1443,58 @@ def _launchd_is_fresh(triggers: object, *, now: float | None = None) -> bool:
     return 0 <= age <= DEEP_BOUND_SECONDS
 
 
-def reduce(invariants: list[dict], triggers: dict) -> str:
-    """Reduce required invariant severities and deep-trigger freshness."""
+def _reduce_required_invariants(
+    invariants: list[dict],
+) -> tuple[str, str | None]:
     by_id = {
         item.get("id"): item
         for item in invariants
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
-    degraded = False
+    degraded_driver = None
     for invariant_id, (_, required, safety_critical, _) in REGISTRY.items():
         if not required:
             continue
         item = by_id.get(invariant_id)
         severity = item.get("severity") if isinstance(item, dict) else "unknown"
         if severity == "red":
-            return "red"
+            return "red", invariant_id
         if safety_critical and severity == "unknown":
-            return "red"
-        if severity != "green":
-            degraded = True
+            return "red", invariant_id
+        if severity != "green" and degraded_driver is None:
+            degraded_driver = invariant_id
+    if degraded_driver is not None:
+        return "degraded", degraded_driver
+    return "green", None
+
+
+def reduction_driver(invariants: list[dict], overall: str) -> str | None:
+    """Return the visible invariant that deterministically drove overall."""
+    required_ids = {
+        invariant_id
+        for invariant_id, (_, required, _safety, _profiles)
+        in REGISTRY.items()
+        if required
+    }
+    visible_ids = {
+        item.get("id")
+        for item in invariants
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    if not required_ids.issubset(visible_ids):
+        return None
+    invariant_overall, driver = _reduce_required_invariants(invariants)
+    return driver if invariant_overall == overall else None
+
+
+def reduce(invariants: list[dict], triggers: dict) -> str:
+    """Reduce required invariant severities and deep-trigger freshness."""
+    invariant_overall, _driver = _reduce_required_invariants(invariants)
+    if invariant_overall == "red":
+        return "red"
     if not _launchd_is_fresh(triggers):
         return "red"
-    return "degraded" if degraded else "green"
+    return invariant_overall
 
 
 def _repo_root() -> Path:
