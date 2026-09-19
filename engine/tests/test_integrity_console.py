@@ -220,10 +220,130 @@ class TestIntegrityConsole(EngineTestCase):
             self.assertIn(token, page)
         self.assertIn("@media (max-width:520px)", page)
         self.assertIn("overflow-wrap:anywhere", page)
-        self.assertIn("min-height:44px", page)
+        self.assertIn("min-height:48px", page)
         self.assertIn(":focus-visible", page)
         self.assertIn("@media (prefers-reduced-motion:reduce)", page)
         self.assertNotIn("@keyframes", page)
+
+    def test_approved_semantic_color_and_status_icon_parity_contract(self):
+        degraded = integrity_console.render(
+            self._projection(overall="degraded"),
+        )
+        critical = integrity_console.render(
+            self._projection(overall="red"),
+        )
+        self.assertIn("--color-warning:#fbbc04;", degraded)
+        self.assertIn("--color-critical:#f28b82;", critical)
+        self.assertIn(
+            '[data-effective-overall="degraded"] .status-icon,'
+            '[data-effective-overall="yellow"] .status-icon{'
+            "border:0;border-radius:0;color:var(--color-surface);"
+            "background:var(--color-warning)}",
+            degraded,
+        )
+        self.assertIn(
+            '[data-effective-overall="red"] .status-icon,'
+            '[data-effective-overall="unknown"] .status-icon{'
+            "border:0;border-radius:0;color:var(--color-surface);"
+            "background:var(--color-critical)}",
+            critical,
+        )
+        self.assertIn(
+            '<span class="status-icon" data-component="StatusIcon" '
+            'aria-hidden="true">ⓘ</span>',
+            degraded,
+        )
+        self.assertIn(
+            '<span class="status-icon" data-component="StatusIcon" '
+            'aria-hidden="true">ⓘ</span>',
+            critical,
+        )
+        self.assertNotIn(">!</span>", degraded)
+        self.assertNotIn(">!</span>", critical)
+
+    def test_approved_action_focus_uses_focus_colored_control_border(self):
+        page = integrity_console.render_no_status()
+        self.assertIn(
+            "button:focus-visible{outline:none;"
+            "border-color:var(--color-focus)}",
+            page,
+        )
+        self.assertNotIn(
+            "button:focus-visible{outline:3px solid var(--color-focus);"
+            "outline-offset:3px}",
+            page,
+        )
+
+    def test_approved_m32c_responsive_geometry_contract(self):
+        page = integrity_console.render(
+            self._projection(overall="degraded"),
+            serve_action="run-checks-now",
+            served_form_action=(
+                "http://127.0.0.1:54321/synthetic-token/run-checks-now"
+            ),
+        )
+        self.assertIn(
+            ".status-summary{display:grid;"
+            "grid-template-columns:40px minmax(0,1fr);"
+            "gap:var(--spacing-12);align-items:center;"
+            "min-height:260px;",
+            page,
+        )
+        self.assertIn(
+            "padding:var(--spacing-16);"
+            "margin-bottom:var(--spacing-24);"
+            "background:var(--color-elevated)}",
+            page,
+        )
+        self.assertIn(
+            ".metrics{display:grid;"
+            "grid-template-columns:repeat(4,minmax(0,1fr));"
+            "gap:var(--spacing-16);",
+            page,
+        )
+        self.assertIn(
+            ".card{min-height:88px;"
+            "border:var(--border-width-default) solid var(--color-border);",
+            page,
+        )
+        self.assertIn(
+            ".action-form{display:grid;gap:var(--spacing-12);",
+            page,
+        )
+        self.assertIn(
+            ".action-form form{padding:var(--spacing-16);"
+            "border:var(--border-width-default) solid var(--color-border);"
+            "border-radius:var(--radius-12);"
+            "background:var(--color-surface)}",
+            page,
+        )
+        self.assertIn(
+            "button{width:100%;min-height:48px;",
+            page,
+        )
+        self.assertIn(
+            ".notice{display:flex;flex-direction:column;"
+            "gap:var(--spacing-12);min-height:200px;",
+            page,
+        )
+        self.assertIn(
+            "@media (max-width:520px){"
+            "body{padding:var(--spacing-8)}",
+            page,
+        )
+        self.assertIn(
+            ".metrics{grid-template-columns:1fr;"
+            "gap:var(--spacing-12)}",
+            page,
+        )
+
+    def test_fatal_notice_uses_approved_recovery_geometry_variant(self):
+        page = integrity_console.render_fatal_check_failure()
+        self.assertIn(
+            '<aside class="notice notice-fatal" data-component="Notice" ',
+            page,
+        )
+        self.assertIn(".notice-fatal{min-height:240px}", page)
 
     def test_semantic_text_colors_meet_aa_contrast(self):
         def luminance(value: str) -> float:
@@ -254,9 +374,12 @@ class TestIntegrityConsole(EngineTestCase):
             ("#e8eaed", "#101313"),
             ("#9099a6", "#101313"),
             ("#5fd68a", "#171b19"),
-            ("#e6b94f", "#171b19"),
-            ("#f07b7b", "#171b19"),
+            ("#fbbc04", "#171b19"),
+            ("#f28b82", "#171b19"),
             ("#9ec5ff", "#101313"),
+            ("#9ec5ff", "#171b19"),
+            ("#101313", "#fbbc04"),
+            ("#101313", "#f28b82"),
             ("#e8eaed", "#171b19"),
         ):
             self.assertGreaterEqual(contrast(foreground, background), 4.5)
@@ -320,10 +443,10 @@ class TestIntegrityConsole(EngineTestCase):
             healthy,
         )
         self.assertIn(
-            "button{min-height:48px;min-width:127px;"
+            "button{width:100%;min-height:48px;"
             "padding:var(--spacing-12) var(--spacing-16);"
-            "border:var(--border-width-default) solid var(--color-text);"
-            "border-radius:var(--radius-8);"
+            "border:var(--border-width-default) solid var(--color-border);"
+            "border-radius:var(--radius-10);"
             "background:var(--color-elevated);color:var(--color-text);",
             healthy,
         )
@@ -366,7 +489,7 @@ class TestIntegrityConsole(EngineTestCase):
             page,
         )
         self.assertIn('data-effective-overall="degraded"', page)
-        self.assertIn(">!</span>", page)
+        self.assertIn(">ⓘ</span>", page)
         self.assertIn("Run checks now", page)
 
     def test_critical_state_uses_approved_non_color_contract(self):
@@ -384,7 +507,7 @@ class TestIntegrityConsole(EngineTestCase):
             page,
         )
         self.assertIn('data-effective-overall="red"', page)
-        self.assertIn(">!</span>", page)
+        self.assertIn(">ⓘ</span>", page)
         self.assertNotIn('action="repair"', page)
         self.assertNotIn("Repair now", page)
 
@@ -486,7 +609,7 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertIn('<main data-effective-overall="red">', page)
         self.assertIn(
             '<span class="status-icon" data-component="StatusIcon" '
-            'aria-hidden="true">!</span>',
+            'aria-hidden="true">ⓘ</span>',
             page,
         )
         self.assertIn("Restart the console, then run checks again.", page)
@@ -511,7 +634,8 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertIn(
             '[data-effective-overall="degraded"] .status-icon,'
             '[data-effective-overall="yellow"] .status-icon{'
-            "color:var(--color-warning)}",
+            "border:0;border-radius:0;color:var(--color-surface);"
+            "background:var(--color-warning)}",
             page,
         )
         self.assertIn(
@@ -522,7 +646,7 @@ class TestIntegrityConsole(EngineTestCase):
         )
         self.assertIn(
             '<span class="status-icon" data-component="StatusIcon" '
-            'aria-hidden="true">!</span>',
+            'aria-hidden="true">ⓘ</span>',
             page,
         )
         self.assertIn(
@@ -720,7 +844,7 @@ class TestIntegrityConsole(EngineTestCase):
             'document.querySelector("[data-component=StatusIcon]")',
             script,
         )
-        self.assertIn('icon.textContent="!"', script)
+        self.assertIn('icon.textContent="ⓘ"', script)
         self.assertIn(
             'document.title="AWA integrity — Status is stale / critical"',
             script,
@@ -744,7 +868,8 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertIn(
             '[data-effective-overall="red"] .status-icon,'
             '[data-effective-overall="unknown"] .status-icon{'
-            "color:var(--color-critical)}",
+            "border:0;border-radius:0;color:var(--color-surface);"
+            "background:var(--color-critical)}",
             page,
         )
         self.assertIn(
