@@ -1029,15 +1029,15 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertEqual(hooks.read_bytes(), before)
         self.assertFalse(any(runtime.rglob("*.plist")))
 
-    def test_patch_version_recomputed_from_live_v171(self):
+    def test_release_version_recomputed_from_live_v173(self):
         self.assertEqual(
             (_ROOT / "engine" / "__init__.py")
             .read_text(encoding="utf-8")
-            .count('__version__ = "1.7.3"'),
+            .count('__version__ = "1.8.0"'),
             1,
         )
         self.assertIn(
-            'version = "1.7.3"',
+            'version = "1.8.0"',
             (_ROOT / "pyproject.toml").read_text(encoding="utf-8"),
         )
 
