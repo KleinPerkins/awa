@@ -1322,16 +1322,6 @@ def _check_recovery(facts: Facts) -> tuple[str, str]:
 
 
 def _check_lifecycle(facts: Facts) -> tuple[str, str]:
-    counts = (
-        facts.leases_unreconciled,
-        facts.sessions_dangling,
-        facts.husks,
-    )
-    if (
-        any(type(value) is not int or value < 0 for value in counts)
-        or not isinstance(facts.disposition_map, dict)
-    ):
-        return "unknown", "lifecycle topology unavailable"
     worktree_counts = facts.worktree_counts
     if worktree_counts is not None:
         required_counts = (
@@ -1362,6 +1352,16 @@ def _check_lifecycle(facts: Facts) -> tuple[str, str]:
                 f"conflicts={worktree_counts['conflicts']}, "
                 f"problems={worktree_counts['problems']})"
             )
+    counts = (
+        facts.leases_unreconciled,
+        facts.sessions_dangling,
+        facts.husks,
+    )
+    if (
+        any(type(value) is not int or value < 0 for value in counts)
+        or not isinstance(facts.disposition_map, dict)
+    ):
+        return "unknown", "lifecycle topology unavailable"
     problematic = any(
         value not in {"active"} for value in facts.disposition_map.values()
     )

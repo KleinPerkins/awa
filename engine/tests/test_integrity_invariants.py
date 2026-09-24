@@ -173,6 +173,25 @@ class TestIntegrityInvariants(unittest.TestCase):
         )
         self.assertEqual(status["orphans"]["worktrees"], 1)
 
+    def test_concrete_worktree_problems_drive_degraded_when_legacy_topology_unknown(self):
+        status = self.evaluate(
+            leases_unreconciled=None,
+            sessions_dangling=None,
+            husks=None,
+            disposition_map=None,
+            worktree_counts={
+                "discovered_linked": 1,
+                "managed": 0,
+                "active": 1,
+                "unleased": 1,
+                "conflicts": 0,
+                "problems": 1,
+            },
+        )
+        lifecycle = invariant(status, "lifecycle")
+        self.assertEqual(lifecycle["severity"], "degraded")
+        self.assertIn("unleased=1", lifecycle["evidence"])
+
     def test_recovery_error_is_degraded(self):
         status = self.evaluate(recovery_last_status="errors", needs_repair=1)
         self.assertEqual(invariant(status, "recovery")["severity"], "degraded")
