@@ -448,8 +448,33 @@ def _load_policy() -> policy_mod.PolicyConfig:
         raise EntryUnavailable("policy_unavailable") from exc
 
 
+def _policy_repository(identity_value: lifecycle.WorktreeIdentity) -> str:
+    """Resolve and prove the primary repository represented by a linked root."""
+    common = Path(identity_value.git_common_dir)
+    if common.name != ".git":
+        raise EntryUnavailable("policy_repository_unavailable")
+    primary = _canonical_existing_directory(str(common.parent))
+    if primary is None:
+        raise EntryUnavailable("policy_repository_unavailable")
+    primary_top = _canonical_existing_directory(
+        _git_text(primary, "rev-parse", "--show-toplevel")
+    )
+    primary_common = _canonical_existing_directory(
+        _git_text(
+            primary,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        )
+    )
+    if primary_top != primary or primary_common != identity_value.git_common_dir:
+        raise EntryUnavailable("policy_repository_mismatch")
+    return primary
+
+
 def _policy_eligible(identity_value: lifecycle.WorktreeIdentity) -> bool:
     cfg = _load_policy()
+    repository = _policy_repository(identity_value)
     candidates = []
     env_root = os.environ.get("AWA_GOVERNED_ROOT", "").strip()
     if env_root:
@@ -459,28 +484,28 @@ def _policy_eligible(identity_value: lifecycle.WorktreeIdentity) -> bool:
     for candidate in candidates:
         canonical = os.path.realpath(os.path.abspath(os.path.expanduser(candidate)))
         if (
-            identity_value.root == canonical
-            or identity_value.root.startswith(canonical + os.sep)
+            repository == canonical
+            or repository.startswith(canonical + os.sep)
         ):
             governed = canonical
             break
     if governed:
         rel = (
             "."
-            if identity_value.root == governed
-            else identity_value.root[len(governed) + 1 :]
+            if repository == governed
+            else repository[len(governed) + 1 :]
         )
     else:
-        rel = os.path.basename(identity_value.root.rstrip(os.sep))
+        rel = os.path.basename(repository.rstrip(os.sep))
     origin = _git_text(
-        identity_value.root,
+        repository,
         "config",
         "--get",
         "remote.origin.url",
         allow_missing=True,
     )
     hooks_path = _git_text(
-        identity_value.root,
+        repository,
         "config",
         "--get",
         "core.hooksPath",
@@ -488,7 +513,7 @@ def _policy_eligible(identity_value: lifecycle.WorktreeIdentity) -> bool:
     )
     decision = policy_mod.classify(
         rel,
-        identity_value.root,
+        repository,
         cfg,
         hooks_path=hooks_path,
         has_origin=bool(origin),

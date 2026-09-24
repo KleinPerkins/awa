@@ -32,13 +32,17 @@ _CLEAN = _ROOT / "kernel" / "bin" / "dev-worktree.sh"
 class TestNativeEntry(EngineTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.repo = Path(self.make_seeded_repo("native-entry-source"))
+        self.governed_root = Path(self._tmp.name) / "governed"
+        self.governed_root.mkdir(mode=0o700)
+        self.repo = Path(
+            self.make_seeded_repo("governed/native-entry-source")
+        )
         self.policy = Path(self._tmp.name) / "policy.yml"
         self._write_policy()
         self.saved_policy = os.environ.get("AWA_POLICY")
         self.saved_root = os.environ.get("AWA_GOVERNED_ROOT")
         os.environ["AWA_POLICY"] = str(self.policy)
-        os.environ["AWA_GOVERNED_ROOT"] = str(self.repo.parent)
+        os.environ["AWA_GOVERNED_ROOT"] = str(self.governed_root)
 
     def tearDown(self) -> None:
         if self.saved_policy is None:
@@ -55,7 +59,7 @@ class TestNativeEntry(EngineTestCase):
         excluded = f"  - {exclude}\n" if exclude is not None else "  - never-match\n"
         self.policy.write_text(
             "version: 1\n"
-            f"governed_roots:\n  - {self.repo.parent}\n"
+            f"governed_roots:\n  - {self.governed_root}\n"
             "default: include\n"
             "default_mode: on\n"
             "include:\n  - '*'\n"
@@ -168,6 +172,32 @@ class TestNativeEntry(EngineTestCase):
         self.assertEqual(stat.S_IMODE(receipt_path.parent.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(receipt_path.stat().st_mode), 0o600)
 
+    def test_cursor_managed_root_outside_governed_root_uses_primary_policy_identity(self):
+        managed = Path(self._tmp.name) / "cursor-managed" / "awa" / "native"
+        managed.parent.mkdir(parents=True, mode=0o700)
+        git(
+            str(self.repo),
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feat/cursor-managed",
+            str(managed),
+            "main",
+        )
+        self.assertFalse(
+            str(managed.resolve()).startswith(
+                str(self.governed_root.resolve()) + os.sep
+            )
+        )
+        result = native_entry.register_session_start(
+            self._payload(managed.resolve(), "cursor-managed")
+        )
+        self.assertEqual((result.result, result.action), ("success", "adopted"))
+        lease = lease_mod.read_lease(str(managed))
+        self.assertIsNotNone(lease)
+        self.assertEqual(lease_mod.validate(lease), [])
+
     def test_existing_valid_lease_attests_without_duplicate_adoption(self):
         root = self._worktree()
         first = native_entry.register_session_start(self._payload(root, "session-one"))
@@ -273,7 +303,7 @@ class TestNativeEntry(EngineTestCase):
         self.assertIsNone(lease_mod.read_lease(str(dirty)))
 
         excluded = self._worktree("feat/excluded")
-        self._write_policy(exclude="native-entry-source.feat-excluded.wt")
+        self._write_policy(exclude="native-entry-source")
         excluded_result = native_entry.register_session_start(
             self._payload(excluded, "excluded")
         )
