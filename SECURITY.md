@@ -222,8 +222,10 @@ primary, excluded, or drifting state is preserved.
 `awa-native-entry/v1` receipts are private `0700`/`0600`, bounded, no-follow, and atomically
 published per root/session. They contain metadata only—no prompt, transcript, file content,
 credential, arbitrary environment, or operator text. A receipt is successful only after final
-adoption/attestation validation. Receipt replay is rechecked against current root/session/branch/
-HEAD/Git/common-dir, lease, SQLite, and heartbeat identity before it can be green.
+adoption/attestation validation. Explicit failed/in-progress evidence is published before lifecycle
+mutation, so a crash cannot leave silently managed state without entry evidence. Receipt replay is
+rechecked against current root/session/branch/HEAD/Git/common-dir, lease, SQLite, and heartbeat
+identity before it can be green.
 
 Receipts, leases, events, attestation, heartbeat, and discovery remain non-authorizing observations.
 The kernel cleanup path still independently requires active-root/session, Git registration,

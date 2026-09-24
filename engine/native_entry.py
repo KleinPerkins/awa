@@ -1038,6 +1038,18 @@ def register_session_start(
             return EntryResult("failed", None, "policy_ineligible")
         _preflight_receipt(payload.root, payload.session_id)
         _assert_clean(identity_value)
+        # Publish explicit degraded evidence before any lease/SQLite mutation.
+        # Success replaces this record only after adoption/attestation and final
+        # identity validation. A process exit in between is therefore visible
+        # as incomplete registration instead of silent managed state.
+        _write_receipt(
+            payload,
+            identity_value,
+            result="failed",
+            action=None,
+            lease_id=None,
+            reason="registration_pending",
+        )
         with lock.common_dir_lock(
             identity_value.git_common_dir,
             timeout=max(0.0, lock_timeout),

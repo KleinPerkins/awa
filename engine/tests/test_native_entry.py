@@ -489,6 +489,45 @@ class TestNativeEntry(EngineTestCase):
         self.assertEqual(timed_out.result, "failed")
         self.assertIsNone(lease_mod.read_lease(str(timeout_root)))
 
+    def test_receipt_precedes_lifecycle_commit_and_crash_stays_explicit(self):
+        root = self._worktree("feat/receipt-order")
+        real_write = native_entry._write_receipt
+        calls = 0
+
+        class Crash(BaseException):
+            pass
+
+        def crash_after_pending(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_write(*args, **kwargs)
+            raise Crash()
+
+        with mock.patch.object(
+            native_entry,
+            "_write_receipt",
+            side_effect=crash_after_pending,
+        ):
+            result = native_entry.register_session_start(
+                self._payload(root, "receipt-order")
+            )
+        self.assertEqual(result.result, "failed")
+        self.assertIsNotNone(lease_mod.read_lease(str(root)))
+        self.assertEqual(len(self._active_rows(root)), 1)
+        receipt = native_entry.read_receipts()[0]
+        self.assertEqual(receipt["result"], "failed")
+        self.assertEqual(receipt["reason"], "registration_pending")
+        self.assertIsNone(receipt["lease_id"])
+
+        retried = native_entry.register_session_start(
+            self._payload(root, "receipt-order")
+        )
+        self.assertEqual((retried.result, retried.action), ("success", "attested"))
+        final = native_entry.read_receipts()[0]
+        self.assertEqual(final["result"], "success")
+        self.assertGreater(final["generation"], receipt["generation"])
+
     def test_receipt_evidence_requires_current_exact_root_session_and_git_identity(self):
         root = self._worktree("feat/evidence")
         native_entry.register_session_start(self._payload(root, "evidence"))

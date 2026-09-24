@@ -76,8 +76,10 @@ result, action, and lease identity. Its closed results are `success`, `stale`,
 Directories are `0700`, files are `0600`, reads are bounded and no-follow, and
 writes are same-directory atomic publications. Receipts contain no prompt,
 transcript, file content, credential, arbitrary environment, or operator text.
-Success is written only after adoption/attestation and a final identity
-validation.
+Before lifecycle mutation, registration publishes explicit failed/in-progress
+evidence. Success atomically replaces it only after adoption/attestation and a
+final identity validation, so a crash cannot leave silently managed state with
+no post-entry evidence.
 
 This is proof of post-start registration, not pre-entry authorization.
 `awa-session-handoff/v1` remains the unchanged singleton pending→closed proof
