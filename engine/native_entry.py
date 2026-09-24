@@ -1192,17 +1192,27 @@ def _read_receipts_with_state() -> tuple[list[dict], bool]:
     records = []
     invalid = False
     try:
-        names = sorted(
-            entry.name
-            for entry in os.scandir(directory_fd)
-            if entry.name != ".lock" and not entry.name.startswith(".")
-        )
-        if len(names) > _MAX_RECEIPTS:
-            return [], True
-        for name in names:
+        candidates = []
+        for entry in os.scandir(directory_fd):
+            name = entry.name
+            if name == ".lock" or name.startswith("."):
+                continue
             if _RECEIPT_NAME.fullmatch(name) is None:
                 invalid = True
                 continue
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError:
+                invalid = True
+                continue
+            candidates.append((metadata.st_mtime_ns, name))
+        # Bounded newest-first processing keeps current session evidence
+        # available without treating ordinary historical overflow as corruption.
+        names = [
+            name
+            for _mtime, name in sorted(candidates, reverse=True)[:_MAX_RECEIPTS]
+        ]
+        for name in names:
             try:
                 value = _read_fd_json(directory_fd, name)
             except (EntryUnavailable, OSError):

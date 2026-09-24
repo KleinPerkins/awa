@@ -597,6 +597,39 @@ class TestNativeEntry(EngineTestCase):
         git(str(root), "checkout", "-q", "-b", "feat/evidence-drift")
         self.assertEqual(native_entry.evidence_state(), "stale")
 
+    def test_historical_receipt_overflow_keeps_current_success_evidence(self):
+        root = self._worktree("feat/receipt-overflow")
+        native_entry.register_session_start(
+            self._payload(root, "current-overflow")
+        )
+        self._bind_session(root, "current-overflow")
+        current = next(
+            receipt
+            for receipt in native_entry.read_receipts()
+            if receipt["session_id"] == "current-overflow"
+        )
+        for index in range(native_entry._MAX_RECEIPTS):
+            historical = dict(current)
+            historical["session_id"] = f"historical-{index}"
+            historical["generation"] = 1
+            path = native_entry.receipt_path(
+                str(root),
+                historical["session_id"],
+            )
+            path.write_text(
+                json.dumps(historical, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            path.chmod(0o600)
+            os.utime(path, ns=(index + 1, index + 1))
+        receipts = native_entry.read_receipts()
+        self.assertEqual(len(receipts), native_entry._MAX_RECEIPTS)
+        self.assertIn(
+            "current-overflow",
+            {receipt["session_id"] for receipt in receipts},
+        )
+        self.assertEqual(native_entry.evidence_state(), "success")
+
     def test_receipt_or_lease_never_bypasses_independent_cleanup_gates(self):
         root = self._worktree("feat/cleanup")
         native_entry.register_session_start(self._payload(root, "cleanup"))
