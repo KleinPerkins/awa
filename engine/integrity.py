@@ -274,6 +274,8 @@ def _prepare_status(
         current["invariants"] = []
     if not isinstance(current.get("orphans"), dict):
         current["orphans"] = {}
+    if not isinstance(current.get("worktrees"), dict):
+        current["worktrees"] = {}
     if not isinstance(current.get("recovery"), dict):
         current["recovery"] = {}
     if not isinstance(current.get("alert"), dict):
@@ -283,6 +285,10 @@ def _prepare_status(
 
 def _safe_count(value: object) -> int:
     return value if type(value) is int and value >= 0 else 0
+
+
+def _optional_count(value: object) -> int | None:
+    return value if type(value) is int and value >= 0 else None
 
 
 def _safe_timestamp(value: object) -> str | None:
@@ -335,6 +341,34 @@ def public_projection(status: dict) -> dict:
     orphans = status.get("orphans")
     if not isinstance(orphans, dict):
         orphans = {}
+    worktrees = status.get("worktrees")
+    if not isinstance(worktrees, dict):
+        worktrees = {}
+    worktree_projection = {
+        "checked": False,
+        "discovered_linked": _optional_count(
+            worktrees.get("discovered_linked")
+        ),
+        "managed": _optional_count(worktrees.get("managed")),
+        "active": _optional_count(worktrees.get("active")),
+        "unleased": _optional_count(worktrees.get("unleased")),
+        "conflicts": _optional_count(worktrees.get("conflicts")),
+        "problems": _optional_count(worktrees.get("problems")),
+    }
+    worktrees_checked = bool(
+        worktrees.get("checked") is True
+        and all(
+            value is not None
+            for key, value in worktree_projection.items()
+            if key != "checked"
+        )
+    )
+    worktree_projection["checked"] = worktrees_checked
+    if not worktrees_checked:
+        # Legacy and fast-only artifacts did not compute this population. Keep
+        # every field explicitly unknown rather than turning absence into zero.
+        for key in set(worktree_projection) - {"checked"}:
+            worktree_projection[key] = None
     recovery = status.get("recovery")
     if not isinstance(recovery, dict):
         recovery = {}
@@ -375,15 +409,16 @@ def public_projection(status: dict) -> dict:
         ),
         "invariants": invariants,
         "orphans": {
-            "worktrees": _safe_count(orphans.get("worktrees")),
-            "leases_unreconciled": _safe_count(
+            "worktrees": _optional_count(orphans.get("worktrees")),
+            "leases_unreconciled": _optional_count(
                 orphans.get("leases_unreconciled")
             ),
-            "sessions_dangling": _safe_count(
+            "sessions_dangling": _optional_count(
                 orphans.get("sessions_dangling")
             ),
-            "husks": _safe_count(orphans.get("husks")),
+            "husks": _optional_count(orphans.get("husks")),
         },
+        "worktrees": worktree_projection,
         "recovery": {
             "last_status": recovery_status,
             "needs_repair": _safe_count(recovery.get("needs_repair")),
@@ -1223,6 +1258,8 @@ class Facts:
     handoff_state: str | None
     launchd_last_success_age_s: float | None
     delivered: dict[str, str] | None
+    native_entry_state: str | None = "absent"
+    worktree_counts: dict[str, int] | None = None
 
 
 def _check_guard(facts: Facts) -> tuple[str, str]:
@@ -1285,6 +1322,36 @@ def _check_recovery(facts: Facts) -> tuple[str, str]:
 
 
 def _check_lifecycle(facts: Facts) -> tuple[str, str]:
+    worktree_counts = facts.worktree_counts
+    if worktree_counts is not None:
+        required_counts = (
+            "discovered_linked",
+            "managed",
+            "active",
+            "unleased",
+            "conflicts",
+            "problems",
+        )
+        if (
+            not isinstance(worktree_counts, dict)
+            or any(
+                type(worktree_counts.get(key)) is not int
+                or worktree_counts[key] < 0
+                for key in required_counts
+            )
+        ):
+            return "unknown", "worktree populations unavailable"
+        if (
+            worktree_counts["unleased"] > 0
+            or worktree_counts["conflicts"] > 0
+            or worktree_counts["problems"] > 0
+        ):
+            return "degraded", (
+                "worktree lifecycle needs attention "
+                f"(unleased={worktree_counts['unleased']}, "
+                f"conflicts={worktree_counts['conflicts']}, "
+                f"problems={worktree_counts['problems']})"
+            )
     counts = (
         facts.leases_unreconciled,
         facts.sessions_dangling,
@@ -1308,13 +1375,27 @@ def _check_lifecycle(facts: Facts) -> tuple[str, str]:
 
 
 def _check_entry(facts: Facts) -> tuple[str, str]:
+    if facts.native_entry_state == "success":
+        return "green", "native entry evidence validated"
     if facts.handoff_state == "closed":
-        return "green", "handoff metadata closed"
+        return "green", "ensure handoff evidence validated"
+    if facts.native_entry_state == "conflict":
+        return "degraded", "native entry evidence conflict"
+    if facts.native_entry_state == "mismatched":
+        return "degraded", "native entry evidence mismatched"
+    if facts.native_entry_state == "failed":
+        return "degraded", "native entry registration failed"
+    if facts.native_entry_state == "stale":
+        return "degraded", "native entry evidence stale"
     if facts.handoff_state == "pending":
-        return "degraded", "handoff metadata pending"
-    if facts.handoff_state == "absent":
-        return "unknown", "handoff metadata absent"
-    return "unknown", "handoff metadata unknown"
+        return "degraded", "ensure handoff evidence pending"
+    if facts.handoff_state in {"stale", "mismatched"}:
+        return "degraded", "ensure handoff evidence stale"
+    if facts.handoff_state == "conflict":
+        return "degraded", "ensure handoff evidence conflict"
+    if facts.handoff_state == "unknown" or facts.native_entry_state == "unknown":
+        return "unknown", "entry evidence unknown"
+    return "unknown", "entry evidence absent"
 
 
 def _check_freshness(facts: Facts) -> tuple[str, str]:
@@ -2367,7 +2448,7 @@ def _roots_module(source: Path):
 
 
 def _handoff_state(source: Path) -> str:
-    """Bounded state-only adapter to the single kernel handoff authority."""
+    """Validate the singleton ensure handoff against its current Git identity."""
     resolved = source.resolve()
     module = _HANDOFF_MODULES.get(resolved)
     if module is None:
@@ -2387,10 +2468,49 @@ def _handoff_state(source: Path) -> str:
             return "unknown"
         _HANDOFF_MODULES[resolved] = module
     try:
+        record = module.read_record()
         state = module.read_state()
     except Exception:
         return "unknown"
-    return state if state in {"absent", "pending", "closed", "unknown"} else "unknown"
+    if state in {"absent", "unknown"}:
+        return state
+    if not isinstance(record, dict):
+        return "unknown"
+    if state == "pending":
+        return "pending"
+    try:
+        observed = module.identity(record["root"])
+    except Exception:
+        return "stale"
+    return (
+        "closed"
+        if all(record.get(key) == observed.get(key) for key in observed)
+        else "mismatched"
+    )
+
+
+def _native_entry_state() -> str:
+    """Read and exactly revalidate bounded private native-entry receipts."""
+    try:
+        from . import native_entry
+
+        state = native_entry.evidence_state()
+    except Exception:
+        return "unknown"
+    return (
+        state
+        if state
+        in {
+            "absent",
+            "success",
+            "stale",
+            "mismatched",
+            "conflict",
+            "failed",
+            "unknown",
+        }
+        else "unknown"
+    )
 
 
 def _lifecycle_facts(source: Path) -> tuple[
@@ -2398,7 +2518,9 @@ def _lifecycle_facts(source: Path) -> tuple[
     int | None,
     int | None,
     dict[str, str] | None,
+    dict[str, int] | None,
 ]:
+    rows = None
     try:
         conn = _ro_conn()
         try:
@@ -2407,55 +2529,78 @@ def _lifecycle_facts(source: Path) -> tuple[
             ).fetchall()
         finally:
             conn.close()
+    except (sqlite3.Error, OSError):
+        rows = None
+    try:
         roots = _roots_module(source)
-    except (sqlite3.Error, OSError, RuntimeError):
-        return None, None, None, None
+    except (OSError, RuntimeError):
+        roots = None
 
-    leases_unreconciled = 0
-    sessions_dangling = 0
-    husks = 0
-    dispositions: dict[str, str] = {}
-    for row in rows:
-        worktree = str(row[0])
-        key = hashlib.sha256(worktree.encode("utf-8")).hexdigest()[:12]
-        try:
-            result = roots.disposition(worktree)
-            disposition = str(result.get("disposition") or "active")
-        except Exception:  # noqa: BLE001 — canonical UNKNOWN fails safe as active.
-            disposition = "active"
-            result = {}
-        dispositions[key] = disposition
-        exists = os.path.exists(worktree)
-        if not exists or disposition != "active":
-            leases_unreconciled += 1
-        record = result.get("record")
-        sessions = record.get("sessions") if isinstance(record, dict) else None
-        if not exists and isinstance(sessions, dict):
-            sessions_dangling += len(sessions)
-        if exists:
+    if rows is None or roots is None:
+        leases_unreconciled = None
+        sessions_dangling = None
+        husks = None
+        dispositions = None
+    else:
+        leases_unreconciled = 0
+        sessions_dangling = 0
+        husks = 0
+        dispositions = {}
+        for row in rows:
+            worktree = str(row[0])
+            key = hashlib.sha256(worktree.encode("utf-8")).hexdigest()[:12]
             try:
-                probe = subprocess.run(
-                    [
-                        "git",
-                        "-C",
-                        worktree,
-                        "rev-parse",
-                        "--is-inside-work-tree",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                    env={
-                        **os.environ,
-                        "GIT_OPTIONAL_LOCKS": "0",
-                        "GIT_NO_LAZY_FETCH": "1",
-                    },
-                )
-                if probe.returncode != 0:
+                result = roots.disposition(worktree)
+                disposition = str(result.get("disposition") or "active")
+            except Exception:  # noqa: BLE001 — canonical UNKNOWN fails safe as active.
+                disposition = "active"
+                result = {}
+            dispositions[key] = disposition
+            exists = os.path.exists(worktree)
+            if not exists or disposition != "active":
+                leases_unreconciled += 1
+            record = result.get("record")
+            sessions = record.get("sessions") if isinstance(record, dict) else None
+            if not exists and isinstance(sessions, dict):
+                sessions_dangling += len(sessions)
+            if exists:
+                try:
+                    probe = subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            worktree,
+                            "rev-parse",
+                            "--is-inside-work-tree",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        env={
+                            **os.environ,
+                            "GIT_OPTIONAL_LOCKS": "0",
+                            "GIT_NO_LAZY_FETCH": "1",
+                        },
+                    )
+                    if probe.returncode != 0:
+                        husks += 1
+                except (OSError, subprocess.SubprocessError):
                     husks += 1
-            except (OSError, subprocess.SubprocessError):
-                husks += 1
-    return leases_unreconciled, sessions_dangling, husks, dispositions
+    worktree_counts = None
+    try:
+        from . import lifecycle_reconcile
+
+        lifecycle_rows = lifecycle_reconcile.classify()
+        worktree_counts = lifecycle_reconcile.summarize(lifecycle_rows)
+    except Exception:
+        worktree_counts = None
+    return (
+        leases_unreconciled,
+        sessions_dangling,
+        husks,
+        dispositions,
+        worktree_counts,
+    )
 
 
 def _launchd_age(previous: dict | None, now: float) -> float | None:
@@ -2525,6 +2670,7 @@ def _collect_facts(
             sessions_dangling,
             husks,
             disposition_map,
+            worktree_counts,
         ) = _lifecycle_facts(source)
         parity_ok = _kernel_parity(source, probes)
         mcp_matches = _mcp_parity(source, probes)
@@ -2535,6 +2681,7 @@ def _collect_facts(
         sessions_dangling = None
         husks = None
         disposition_map = None
+        worktree_counts = None
         parity_ok = None
         mcp_matches = None
     return Facts(
@@ -2555,6 +2702,8 @@ def _collect_facts(
         handoff_state=_handoff_state(source),
         launchd_last_success_age_s=_launchd_age(previous, now),
         delivered=_delivered(previous),
+        native_entry_state=_native_entry_state(),
+        worktree_counts=worktree_counts,
     )
 
 
@@ -2698,6 +2847,50 @@ def evaluate(
     previous_orphans = (
         previous.get("orphans", {}) if isinstance(previous, dict) else {}
     )
+    if not isinstance(previous_orphans, dict):
+        previous_orphans = {}
+    previous_worktrees = (
+        previous.get("worktrees", {}) if isinstance(previous, dict) else {}
+    )
+    if not isinstance(previous_worktrees, dict):
+        previous_worktrees = {}
+    count_keys = (
+        "discovered_linked",
+        "managed",
+        "active",
+        "unleased",
+        "conflicts",
+        "problems",
+    )
+    supplied_counts = facts.worktree_counts
+    worktree_counts_valid = bool(
+        isinstance(supplied_counts, dict)
+        and all(
+            type(supplied_counts.get(key)) is int
+            and supplied_counts[key] >= 0
+            for key in count_keys
+        )
+    )
+    worktree_status = {
+        "checked": worktree_counts_valid,
+        **{
+            key: (
+                supplied_counts[key]
+                if worktree_counts_valid
+                else _optional_count(previous_worktrees.get(key))
+            )
+            for key in count_keys
+        },
+    }
+
+    def observed_or_previous(value: object, key: str) -> int | None:
+        observed = _optional_count(value)
+        return (
+            observed
+            if observed is not None
+            else _optional_count(previous_orphans.get(key))
+        )
+
     return {
         "schema": SCHEMA,
         "generated_at": generated_at,
@@ -2711,13 +2904,24 @@ def evaluate(
         "invariants": invariants,
         "triggers": triggers,
         "orphans": {
-            "worktrees": int(previous_orphans.get("worktrees", 0))
-            if isinstance(previous_orphans, dict)
-            else 0,
-            "leases_unreconciled": facts.leases_unreconciled or 0,
-            "sessions_dangling": facts.sessions_dangling or 0,
-            "husks": facts.husks or 0,
+            # Legacy field retained, but now means the explicitly defined
+            # unleased linked-worktree population instead of an uncomputed total.
+            "worktrees": (
+                worktree_status["unleased"]
+                if worktree_counts_valid
+                else _optional_count(previous_orphans.get("worktrees"))
+            ),
+            "leases_unreconciled": observed_or_previous(
+                facts.leases_unreconciled,
+                "leases_unreconciled",
+            ),
+            "sessions_dangling": observed_or_previous(
+                facts.sessions_dangling,
+                "sessions_dangling",
+            ),
+            "husks": observed_or_previous(facts.husks, "husks"),
         },
+        "worktrees": worktree_status,
         "recovery": {
             "last_status": facts.recovery_last_status or "unknown",
             "needs_repair": facts.needs_repair or 0,

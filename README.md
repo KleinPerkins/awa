@@ -104,6 +104,22 @@ Every worktree row includes its allocated on-disk size in adaptive KB, MB, or GB
 read-only measurement uses the same bounded timeout posture as repo inspection and reports
 `not available` instead of delaying the whole dashboard when a directory cannot be measured.
 
+### Native Cursor Worktree entry
+
+The Cursor Agents Window **Worktree** environment is AWA's default entry path. After
+`sessionStart`, a quiet fail-open engine registrar strictly revalidates the payload, host policy,
+local Git registration, linked/attached identity, clean state, and lease/SQLite consistency under
+the per-common-directory lock. An eligible root is adopted and attested, an existing exact lease is
+attested without another adoption, and only unambiguous disk/SQLite asymmetry is repaired.
+Conflict, drift, malformed state, lock contention, or engine failure preserves the root and never
+blocks Cursor entry.
+
+Each root/session pair receives private `awa-native-entry/v1` post-entry evidence. This is separate
+from the singleton `awa-session-handoff/v1` pending→closed proof created by
+`dev-worktree.sh ensure`; native entry never invents ensure intent or closes another root's
+handoff. Neither receipt nor lease authorizes cleanup. Active-root, session, Git, content,
+recovery, operation, and explicit operator gates remain independently mandatory.
+
 ### Per-repo mode (ON / OFF)
 
 Each governed repo has an explicit AWA **mode** you can set and inspect:

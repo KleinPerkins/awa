@@ -62,6 +62,15 @@ class TestIntegrityConsole(EngineTestCase):
                 "sessions_dangling": 0,
                 "husks": 0,
             },
+            "worktrees": {
+                "checked": True,
+                "discovered_linked": 7,
+                "managed": 5,
+                "active": 3,
+                "unleased": 2,
+                "conflicts": 1,
+                "problems": 3,
+            },
             "recovery": {
                 "last_status": "ok",
                 "needs_repair": 0,
@@ -167,6 +176,15 @@ class TestIntegrityConsole(EngineTestCase):
                 "leases_unreconciled": 0,
                 "sessions_dangling": 0,
                 "husks": 0,
+            },
+            "worktrees": {
+                "checked": True,
+                "discovered_linked": 0,
+                "managed": 0,
+                "active": 0,
+                "unleased": 0,
+                "conflicts": 0,
+                "problems": 0,
             },
             "recovery": {
                 "last_status": "ok",
@@ -401,6 +419,11 @@ class TestIntegrityConsole(EngineTestCase):
         self.assertEqual(page.count('data-component="MetricCard"'), 4)
         self.assertIn('data-component="ActionForm"', page)
         self.assertIn('data-component="Notice"', page)
+        self.assertIn("Linked worktrees", page)
+        self.assertIn("AWA-managed", page)
+        self.assertIn("Active", page)
+        self.assertIn("Problems", page)
+        self.assertNotIn('<div class="metric-label">Worktrees</div>', page)
         self.assertIn(
             "This console closes after 5 minutes idle",
             page,
@@ -409,6 +432,16 @@ class TestIntegrityConsole(EngineTestCase):
             "awa-engine integrity console --serve --open",
             page,
         )
+
+    def test_legacy_and_fast_statuses_render_not_checked_instead_of_zero(self):
+        status = self._status()
+        status.pop("worktrees")
+        legacy = integrity.public_projection(status)
+        self.assertFalse(legacy["worktrees"]["checked"])
+        self.assertIsNone(legacy["worktrees"]["discovered_linked"])
+        page = integrity_console.render(legacy)
+        self.assertEqual(page.count("Not checked"), 4)
+        self.assertNotIn('<div class="metric-label">Worktrees</div>', page)
 
     def test_action_form_instruction_is_described_by_button(self):
         form = integrity_console._render_action_form()

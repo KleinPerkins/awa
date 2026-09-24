@@ -86,6 +86,7 @@ def _closed_projection(projection: dict) -> dict:
             if isinstance(item, dict)
         ],
         "orphans": projection.get("orphans"),
+        "worktrees": projection.get("worktrees"),
         "recovery": projection.get("recovery"),
         "fresh_until": projection.get("fresh_until"),
         "_recent_history": projection.get("recent_history"),
@@ -400,8 +401,7 @@ def render(
         "</tr>"
         for item in model["recent_history"]
     )
-    orphans = model["orphans"]
-    recovery = model["recovery"]
+    worktrees = model["worktrees"]
     served = serve_action is not None
     if overall == "green":
         heading = "AWA is healthy" if served else "Private snapshot"
@@ -436,12 +436,17 @@ def render(
         supporting_copy=supporting_copy,
         fresh_until=summary_fresh_until,
     )
+    metric_value = (
+        (lambda key: worktrees[key])
+        if worktrees["checked"]
+        else (lambda _key: "Not checked")
+    )
     metrics = (
         '<section class="metrics" aria-label="Integrity counts">'
-        f"{_render_metric_card('Worktrees', orphans['worktrees'])}"
-        f"{_render_metric_card('Unreconciled leases', orphans['leases_unreconciled'])}"
-        f"{_render_metric_card('Dangling sessions', orphans['sessions_dangling'])}"
-        f"{_render_metric_card('Recovery repairs', recovery['needs_repair'])}"
+        f"{_render_metric_card('Linked worktrees', metric_value('discovered_linked'))}"
+        f"{_render_metric_card('AWA-managed', metric_value('managed'))}"
+        f"{_render_metric_card('Active', metric_value('active'))}"
+        f"{_render_metric_card('Problems', metric_value('problems'))}"
         "</section>"
     )
     action_form = _render_action_form() if served else ""

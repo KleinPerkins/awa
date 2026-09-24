@@ -12,8 +12,11 @@ branch, git_common_dir, boot_id, created_at. pid is informational only.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import secrets
+import stat
 import time
 from pathlib import Path
 
@@ -79,6 +82,186 @@ def write_lease(worktree_path: str, lease: dict) -> Path:
     paths.ensure_dir(lp.parent)
     paths.write_private(lp, json.dumps(lease, indent=2, sort_keys=False) + "\n")
     return lp
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    offset = 0
+    while offset < len(data):
+        written = os.write(fd, data[offset:])
+        if written <= 0:
+            raise OSError("short lease write")
+        offset += written
+
+
+def _private_awa_dir(worktree_path: str) -> tuple[Path, int]:
+    root = Path(os.path.abspath(os.path.expanduser(worktree_path)))
+    root_meta = root.lstat()
+    if (
+        root.is_symlink()
+        or not stat.S_ISDIR(root_meta.st_mode)
+        or os.path.realpath(str(root)) != str(root)
+    ):
+        raise OSError("worktree root is not one canonical real directory")
+    directory = root / ".awa"
+    try:
+        directory.mkdir(mode=paths.DIR_MODE)
+    except FileExistsError:
+        pass
+    metadata = directory.lstat()
+    if (
+        directory.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != paths.DIR_MODE
+        or metadata.st_uid != os.getuid()
+    ):
+        raise OSError("AWA lease directory is not one owned private directory")
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(directory), flags)
+    opened = os.fstat(fd)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+    ):
+        os.close(fd)
+        raise OSError("AWA lease directory changed during open")
+    return directory, fd
+
+
+def create_lease(worktree_path: str, lease: dict) -> Path:
+    """Atomically publish a new lease without following or replacing existing state."""
+    errs = validate(lease)
+    if errs:
+        raise ValueError("invalid lease: " + "; ".join(errs))
+    directory, directory_fd = _private_awa_dir(worktree_path)
+    target_name = "lease.json"
+    temp_name = f".lease.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    temp_fd = -1
+    linked = False
+    try:
+        temp_fd = os.open(
+            temp_name,
+            flags,
+            paths.FILE_MODE,
+            dir_fd=directory_fd,
+        )
+        os.fchmod(temp_fd, paths.FILE_MODE)
+        payload = (
+            json.dumps(lease, indent=2, sort_keys=False) + "\n"
+        ).encode("utf-8")
+        _write_all(temp_fd, payload)
+        os.fsync(temp_fd)
+        os.close(temp_fd)
+        temp_fd = -1
+        # link(2) is the portable no-replace publication primitive: it fails with
+        # EEXIST instead of replacing malformed, mismatched, or symlinked state.
+        os.link(
+            temp_name,
+            target_name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        linked = True
+        os.fsync(directory_fd)
+        os.unlink(temp_name, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+        return directory / target_name
+    finally:
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        if not linked:
+            try:
+                os.unlink(temp_name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+        os.close(directory_fd)
+
+
+def replace_lease(
+    worktree_path: str,
+    lease: dict,
+    *,
+    expected_lease_id: str,
+) -> Path:
+    """Atomically replace one already-validated lease without following links."""
+    errs = validate(lease)
+    if errs:
+        raise ValueError("invalid lease: " + "; ".join(errs))
+    if not isinstance(expected_lease_id, str) or not expected_lease_id:
+        raise ValueError("expected lease identity required")
+    directory, directory_fd = _private_awa_dir(worktree_path)
+    read_flags = os.O_RDONLY
+    read_flags |= getattr(os, "O_CLOEXEC", 0)
+    read_flags |= getattr(os, "O_NONBLOCK", 0)
+    read_flags |= getattr(os, "O_NOFOLLOW", 0)
+    temp_name = f".lease.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    temp_fd = -1
+    try:
+        current_fd = os.open("lease.json", read_flags, dir_fd=directory_fd)
+        try:
+            current_meta = os.fstat(current_fd)
+            if (
+                not stat.S_ISREG(current_meta.st_mode)
+                or stat.S_IMODE(current_meta.st_mode) != paths.FILE_MODE
+                or current_meta.st_uid != os.getuid()
+            ):
+                raise OSError("existing lease is not one owned private file")
+            current_raw = os.read(current_fd, 65_537)
+        finally:
+            os.close(current_fd)
+        if len(current_raw) > 65_536:
+            raise OSError("existing lease is oversized")
+        try:
+            current = json.loads(current_raw.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise OSError("existing lease is malformed") from exc
+        if (
+            not isinstance(current, dict)
+            or validate(current)
+            or current.get("lease_id") != expected_lease_id
+        ):
+            raise OSError("existing lease identity changed")
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        temp_fd = os.open(
+            temp_name,
+            flags,
+            paths.FILE_MODE,
+            dir_fd=directory_fd,
+        )
+        os.fchmod(temp_fd, paths.FILE_MODE)
+        payload = (
+            json.dumps(lease, indent=2, sort_keys=False) + "\n"
+        ).encode("utf-8")
+        _write_all(temp_fd, payload)
+        os.fsync(temp_fd)
+        os.close(temp_fd)
+        temp_fd = -1
+        os.replace(
+            temp_name,
+            "lease.json",
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        os.fsync(directory_fd)
+        return directory / "lease.json"
+    finally:
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        with contextlib.suppress(OSError):
+            os.unlink(temp_name, dir_fd=directory_fd)
+        os.close(directory_fd)
 
 
 def read_lease(worktree_path: str) -> dict | None:

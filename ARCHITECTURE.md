@@ -201,6 +201,7 @@ stop; the Cursor chat remains open because no chat-close API exists.
 | `state` | SQLite (WAL) store: leases, append-only **redacted** audit events, detections, quarantine refs, recovery artifacts (+ Phase-3 `recovery_source_deleted` age clock, `recovery_tombstones`, maintenance meta) |
 | `lease` | `.awa/lease.json` read/write + attest; native-window adopt (no push) |
 | `lifecycle` | Adopt → attest → apply-back **preview** (SHA-bound, recovery-before-mutation) → retire |
+| `native_entry` | Fail-open `sessionStart` registrar: exact policy/Git/clean-state revalidation under the lifecycle lock, adopt-or-attest, private per-root/session `awa-native-entry/v1` evidence, and strict read-only evidence/discovery readers; never cleanup authority |
 | `recovery` | Patch round-trip + bundle (secret-skip S1, symlink-escape drop S2) + whole-worktree archive + restore + list; emits the ONE unified `awa_recovery_artifact/v1` manifest and runs prune-on-creation |
 | `retention` | The canonical recovery-retention evaluator + crash-resumable, tombstoned deletion transaction (7-day TTL, 1-GiB/24h pressure, source-deleted age clock) under the shared state-root lock; the ONE implementation every trigger calls |
 | `daemon` | Single-instance (flock'd pidfile) bounded maintenance loop + quarantine-ref cleanup/retention + throttled opportunistic recovery-retention pass |

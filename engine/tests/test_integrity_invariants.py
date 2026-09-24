@@ -36,8 +36,17 @@ _SAFE_FACTS = {
     "husks": 0,
     "disposition_map": {},
     "handoff_state": "closed",
+    "native_entry_state": "absent",
     "launchd_last_success_age_s": 0.0,
     "delivered": {"native": "accepted", "slack": "opted_out"},
+    "worktree_counts": {
+        "discovered_linked": 0,
+        "managed": 0,
+        "active": 0,
+        "unleased": 0,
+        "conflicts": 0,
+        "problems": 0,
+    },
 }
 
 
@@ -134,6 +143,55 @@ class TestIntegrityInvariants(unittest.TestCase):
         self.assertEqual(invariant(status, "lifecycle")["severity"], "degraded")
         self.assertEqual(status["overall"], "degraded")
 
+    def test_active_unleased_native_root_is_visible_and_non_green(self):
+        status = self.evaluate(
+            handoff_state="absent",
+            native_entry_state="absent",
+            worktree_counts={
+                "discovered_linked": 1,
+                "managed": 0,
+                "active": 1,
+                "unleased": 1,
+                "conflicts": 0,
+                "problems": 1,
+            },
+        )
+        self.assertEqual(invariant(status, "lifecycle")["severity"], "degraded")
+        self.assertEqual(invariant(status, "entry_handshake")["severity"], "unknown")
+        self.assertEqual(status["overall"], "degraded")
+        self.assertEqual(
+            status["worktrees"],
+            {
+                "checked": True,
+                "discovered_linked": 1,
+                "managed": 0,
+                "active": 1,
+                "unleased": 1,
+                "conflicts": 0,
+                "problems": 1,
+            },
+        )
+        self.assertEqual(status["orphans"]["worktrees"], 1)
+
+    def test_concrete_worktree_problems_drive_degraded_when_legacy_topology_unknown(self):
+        status = self.evaluate(
+            leases_unreconciled=None,
+            sessions_dangling=None,
+            husks=None,
+            disposition_map=None,
+            worktree_counts={
+                "discovered_linked": 1,
+                "managed": 0,
+                "active": 1,
+                "unleased": 1,
+                "conflicts": 0,
+                "problems": 1,
+            },
+        )
+        lifecycle = invariant(status, "lifecycle")
+        self.assertEqual(lifecycle["severity"], "degraded")
+        self.assertIn("unleased=1", lifecycle["evidence"])
+
     def test_recovery_error_is_degraded(self):
         status = self.evaluate(recovery_last_status="errors", needs_repair=1)
         self.assertEqual(invariant(status, "recovery")["severity"], "degraded")
@@ -170,12 +228,106 @@ class TestIntegrityInvariants(unittest.TestCase):
         self.assertEqual(status["overall"], "degraded")
 
     def test_entry_absent_until_handoff_metadata(self):
-        status = self.evaluate(handoff_state="absent")
+        status = self.evaluate(
+            handoff_state="absent",
+            native_entry_state="absent",
+        )
         entry = invariant(status, "entry_handshake")
         self.assertEqual(entry["severity"], "unknown")
-        self.assertEqual(entry["evidence"], "handoff metadata absent")
+        self.assertEqual(entry["evidence"], "entry evidence absent")
         self.assertEqual(status["overall"], "degraded")
         self.assertNotIn("retry", entry["evidence"])
+
+    def test_native_entry_success_is_green_without_ensure_handoff(self):
+        status = self.evaluate(
+            handoff_state="absent",
+            native_entry_state="success",
+        )
+        entry = invariant(status, "entry_handshake")
+        self.assertEqual(entry["severity"], "green")
+        self.assertEqual(entry["evidence"], "native entry evidence validated")
+        self.assertEqual(status["overall"], "green")
+
+    def test_valid_ensure_handoff_is_independent_success_evidence(self):
+        for native_state in ("stale", "conflict"):
+            with self.subTest(native_state=native_state):
+                status = self.evaluate(
+                    handoff_state="closed",
+                    native_entry_state=native_state,
+                )
+                entry = invariant(status, "entry_handshake")
+                self.assertEqual(entry["severity"], "green")
+                self.assertEqual(
+                    entry["evidence"],
+                    "ensure handoff evidence validated",
+                )
+
+    def test_native_entry_conflict_is_distinct_from_unknown(self):
+        conflict = self.evaluate(
+            handoff_state="absent",
+            native_entry_state="conflict",
+        )
+        unknown = self.evaluate(
+            handoff_state="absent",
+            native_entry_state="absent",
+        )
+        self.assertEqual(
+            invariant(conflict, "entry_handshake")["severity"],
+            "degraded",
+        )
+        self.assertIn(
+            "conflict",
+            invariant(conflict, "entry_handshake")["evidence"],
+        )
+        self.assertEqual(
+            invariant(unknown, "entry_handshake")["severity"],
+            "unknown",
+        )
+
+    def test_stale_mismatched_and_failed_native_receipts_are_not_green(self):
+        for state in ("stale", "mismatched", "failed"):
+            with self.subTest(state=state):
+                status = self.evaluate(
+                    handoff_state="absent",
+                    native_entry_state=state,
+                )
+                self.assertEqual(
+                    invariant(status, "entry_handshake")["severity"],
+                    "degraded",
+                )
+                self.assertNotEqual(status["overall"], "green")
+
+    def test_fast_profile_never_invents_zero_for_unchecked_worktree_counts(self):
+        with mock.patch.object(integrity, "read_status", return_value=None):
+            status = integrity.evaluate(
+                "fast",
+                trigger="beforeShell",
+                facts=facts(
+                    handoff_state="absent",
+                    native_entry_state="absent",
+                    worktree_counts=None,
+                    leases_unreconciled=None,
+                    sessions_dangling=None,
+                    husks=None,
+                    disposition_map=None,
+                ),
+            )
+        self.assertEqual(
+            status["worktrees"],
+            {
+                "checked": False,
+                "discovered_linked": None,
+                "managed": None,
+                "active": None,
+                "unleased": None,
+                "conflicts": None,
+                "problems": None,
+            },
+        )
+        self.assertIsNone(status["orphans"]["worktrees"])
+        self.assertIsNone(status["orphans"]["leases_unreconciled"])
+        self.assertIsNone(status["orphans"]["sessions_dangling"])
+        self.assertIsNone(status["orphans"]["husks"])
 
     def test_reduce_requires_all_required_green_and_fresh(self):
         expected_ids = {
@@ -438,6 +590,13 @@ class TestInstalledTopologyFacts(unittest.TestCase):
             "CURSOR_AGENT_IDENTITY_BROKER",
         ):
             env.pop(name, None)
+        env.update(
+            {
+                "XDG_STATE_HOME": str(self.root / "state"),
+                "XDG_DATA_HOME": str(self.root / "data"),
+                "XDG_CONFIG_HOME": str(self.root / "config"),
+            }
+        )
         env.update(updates)
         return env
 
@@ -486,7 +645,20 @@ class TestInstalledTopologyFacts(unittest.TestCase):
                 mock.patch.object(
                     integrity,
                     "_lifecycle_facts",
-                    return_value=(0, 0, 0, {}),
+                    return_value=(
+                        0,
+                        0,
+                        0,
+                        {},
+                        {
+                            "discovered_linked": 1,
+                            "managed": 1,
+                            "active": 1,
+                            "unleased": 0,
+                            "conflicts": 0,
+                            "problems": 0,
+                        },
+                    ),
                 ), \
                 mock.patch.object(integrity, "_hook_facts", return_value=(True, True)), \
                 mock.patch.object(integrity, "_release_matches", return_value=True):

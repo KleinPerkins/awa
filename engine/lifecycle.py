@@ -44,45 +44,129 @@ class AdoptResult:
     reason: str
 
 
+@dataclass(frozen=True)
+class WorktreeIdentity:
+    """Exact local identity used to bind lifecycle writes under the common-dir lock."""
+
+    root: str
+    git_dir: str
+    git_common_dir: str
+    branch: str
+    head: str
+
+
+def observe_identity(worktree_path: str) -> WorktreeIdentity:
+    """Resolve one complete attached Git identity, without mutating the repository."""
+    ctx = gitutil.resolve(worktree_path)
+    if (
+        not ctx.is_git
+        or not ctx.toplevel
+        or not ctx.git_dir
+        or not ctx.common_dir
+        or not ctx.branch
+        or not ctx.head
+    ):
+        raise LifecycleError(f"incomplete worktree identity: {worktree_path}")
+    return WorktreeIdentity(
+        root=os.path.realpath(os.path.abspath(ctx.toplevel)),
+        git_dir=os.path.realpath(os.path.abspath(ctx.git_dir)),
+        git_common_dir=os.path.realpath(os.path.abspath(ctx.common_dir)),
+        branch=ctx.branch,
+        head=ctx.head,
+    )
+
+
+def _validate_adoptable(identity_value: WorktreeIdentity) -> None:
+    if identity_value.git_dir == identity_value.git_common_dir:
+        raise LifecycleError(
+            "refusing to adopt a PRIMARY checkout as a Safe Workspace: "
+            f"{identity_value.root} "
+            "(adopt is for linked worktrees created by the native Agents-Window path)"
+        )
+
+
+def _identity_matches(
+    observed: WorktreeIdentity,
+    expected: WorktreeIdentity | None,
+) -> None:
+    if expected is not None and observed != expected:
+        raise LifecycleError("worktree identity changed under lifecycle lock")
+
+
 def adopt(worktree_path: str, *, base_ref: str | None = None,
-          state: state_mod.State | None = None, boot: str | None = None) -> AdoptResult:
+          state: state_mod.State | None = None, boot: str | None = None,
+          expected_identity: WorktreeIdentity | None = None,
+          lock_held: bool = False,
+          exclusive_lease: bool = False,
+          lock_timeout: float = 30.0) -> AdoptResult:
     """Adopt an already-created (native-window) worktree: record lease + verify + attest.
 
     NO push occurs. Raises LifecycleError if the path is not a linked worktree or its
-    context cannot be resolved.
+    context cannot be resolved. When ``expected_identity`` is supplied, the complete
+    root/Git-dir/common-dir/branch/HEAD identity is re-read and compared while the
+    collision lock is held immediately before any write.
     """
-    ctx = gitutil.resolve(worktree_path)
-    if not ctx.is_git:
-        raise LifecycleError(f"not a git worktree: {worktree_path}")
-    if not ctx.is_linked:
-        raise LifecycleError(
-            f"refusing to adopt a PRIMARY checkout as a Safe Workspace: {worktree_path} "
-            "(adopt is for linked worktrees created by the native Agents-Window path)"
-        )
-    if not ctx.branch:
-        raise LifecycleError(f"worktree is detached-HEAD; cannot adopt: {worktree_path}")
-
-    lz = lease_mod.build_lease(
-        ctx.toplevel or worktree_path, ctx.branch, ctx.common_dir or "",
-        base_ref=base_ref, head=ctx.head, boot=boot,
+    initial = observe_identity(worktree_path)
+    _validate_adoptable(initial)
+    common_dir = (
+        expected_identity.git_common_dir
+        if expected_identity is not None
+        else initial.git_common_dir
     )
     owns_state = state is None
     if owns_state:
         state = state_mod.State()
-    try:
-        with lock.common_dir_lock(ctx.common_dir or worktree_path):
-            lp = lease_mod.write_lease(ctx.toplevel or worktree_path, lz)
-            state.upsert_lease(lz)
-            state.record_event("adopt", f"adopted worktree {worktree_path} branch={ctx.branch}", lz["lease_id"])
-            # attest: re-read the lease from disk and confirm identity matches.
-            attested, why = _attest_locked(ctx.toplevel or worktree_path, lz["lease_id"], state)
+
+    def _adopt_locked() -> AdoptResult:
+        observed = observe_identity(worktree_path)
+        _validate_adoptable(observed)
+        _identity_matches(observed, expected_identity)
+        lz = lease_mod.build_lease(
+            observed.root,
+            observed.branch,
+            observed.git_common_dir,
+            base_ref=base_ref,
+            head=observed.head,
+            boot=boot,
+        )
+        lp = (
+            lease_mod.create_lease(observed.root, lz)
+            if exclusive_lease
+            else lease_mod.write_lease(observed.root, lz)
+        )
+        state.upsert_lease(lz)
+        state.record_event(
+            "adopt",
+            f"adopted worktree {observed.root} branch={observed.branch}",
+            lz["lease_id"],
+        )
+        attested, why = _attest_locked(
+            observed.root,
+            lz["lease_id"],
+            state,
+            expected_identity=observed,
+            allow_rekey=False,
+        )
         return AdoptResult(lz["lease_id"], str(lp), attested, why)
+
+    try:
+        if lock_held:
+            return _adopt_locked()
+        with lock.common_dir_lock(common_dir, timeout=lock_timeout):
+            return _adopt_locked()
     finally:
         if owns_state:
             state.close()
 
 
-def _attest_locked(worktree_path: str, lease_id: str, state: state_mod.State) -> tuple[bool, str]:
+def _attest_locked(
+    worktree_path: str,
+    lease_id: str,
+    state: state_mod.State,
+    *,
+    expected_identity: WorktreeIdentity | None = None,
+    allow_rekey: bool = True,
+) -> tuple[bool, str]:
     disk = lease_mod.read_lease(worktree_path)
     if not disk:
         return False, "no lease.json on disk"
@@ -91,15 +175,29 @@ def _attest_locked(worktree_path: str, lease_id: str, state: state_mod.State) ->
         return False, "lease invalid: " + "; ".join(errs)
     if disk.get("lease_id") != lease_id:
         return False, "lease_id mismatch between disk and record"
-    # verify the worktree still resolves to the recorded common dir. git_common_dir is the
+    try:
+        observed = observe_identity(worktree_path)
+        _identity_matches(observed, expected_identity)
+    except LifecycleError as exc:
+        return False, str(exc)
+    disk_path = disk.get("worktree_path")
+    disk_common = disk.get("git_common_dir")
+    if not isinstance(disk_path, str) or not isinstance(disk_common, str):
+        return False, "lease path identity malformed"
+    if os.path.realpath(os.path.abspath(disk_path)) != observed.root:
+        return False, "worktree_path drifted"
+    # Verify the worktree still resolves to the recorded common dir. git_common_dir is the
     # REAL collision/identity boundary (frozen contract §lease.collision_boundary: "branch/path
     # uniqueness is necessary but not sufficient") -- a linked worktree's common dir never
     # legitimately changes short of the filesystem being torn down and rebuilt, so any mismatch
     # here is genuine drift and stays an unconditional hard block.
-    ctx = gitutil.resolve(worktree_path)
-    if os.path.abspath(ctx.common_dir or "") != os.path.abspath(disk["git_common_dir"]):
+    if observed.git_common_dir != os.path.realpath(os.path.abspath(disk_common)):
         return False, "git_common_dir drifted"
-    if ctx.branch != disk["branch"]:
+    if expected_identity is not None and disk.get("head") != observed.head:
+        return False, "HEAD drifted"
+    if observed.branch != disk["branch"]:
+        if not allow_rekey:
+            return False, "branch drifted"
         # An ordinary `git checkout`/`git switch` between adopt and attest (or between two
         # attests) is a LEGITIMATE, expected evolution of a Safe Workspace -- not corruption.
         # `gitutil.resolve()` just did a fresh, live re-read of ground truth immediately above;
@@ -120,7 +218,7 @@ def _attest_locked(worktree_path: str, lease_id: str, state: state_mod.State) ->
         # does not double-count the same physical worktree under two identities.
         old_branch, old_lease_id = disk["branch"], lease_id
         new_lease = dict(disk)
-        new_lease["branch"] = ctx.branch or ""
+        new_lease["branch"] = observed.branch
         new_lease["lease_id"] = identity.lease_id(
             disk["worktree_path"], new_lease["branch"], disk["git_common_dir"], disk["boot_id"])
         rekey_errs = lease_mod.validate(new_lease)
@@ -148,7 +246,15 @@ def _attest_locked(worktree_path: str, lease_id: str, state: state_mod.State) ->
     return True, "verified: lease matches worktree (path+branch+common_dir)"
 
 
-def attest(worktree_path: str, *, state: state_mod.State | None = None) -> tuple[bool, str]:
+def attest(
+    worktree_path: str,
+    *,
+    state: state_mod.State | None = None,
+    expected_identity: WorktreeIdentity | None = None,
+    lock_held: bool = False,
+    allow_rekey: bool = True,
+    lock_timeout: float = 30.0,
+) -> tuple[bool, str]:
     lz = lease_mod.read_lease(worktree_path)
     if not lz:
         return False, "no lease.json on disk"
@@ -156,8 +262,25 @@ def attest(worktree_path: str, *, state: state_mod.State | None = None) -> tuple
     if owns_state:
         state = state_mod.State()
     try:
-        with lock.common_dir_lock(lz["git_common_dir"]):
-            return _attest_locked(worktree_path, lz["lease_id"], state)
+        if lock_held:
+            return _attest_locked(
+                worktree_path,
+                lz["lease_id"],
+                state,
+                expected_identity=expected_identity,
+                allow_rekey=allow_rekey,
+            )
+        with lock.common_dir_lock(
+            lz["git_common_dir"],
+            timeout=lock_timeout,
+        ):
+            return _attest_locked(
+                worktree_path,
+                lz["lease_id"],
+                state,
+                expected_identity=expected_identity,
+                allow_rekey=allow_rekey,
+            )
     finally:
         if owns_state:
             state.close()
