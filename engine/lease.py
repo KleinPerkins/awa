@@ -12,6 +12,7 @@ branch, git_common_dir, boot_id, created_at. pid is informational only.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import secrets
@@ -182,6 +183,84 @@ def create_lease(worktree_path: str, lease: dict) -> Path:
                 pass
             except OSError:
                 pass
+        os.close(directory_fd)
+
+
+def replace_lease(
+    worktree_path: str,
+    lease: dict,
+    *,
+    expected_lease_id: str,
+) -> Path:
+    """Atomically replace one already-validated lease without following links."""
+    errs = validate(lease)
+    if errs:
+        raise ValueError("invalid lease: " + "; ".join(errs))
+    if not isinstance(expected_lease_id, str) or not expected_lease_id:
+        raise ValueError("expected lease identity required")
+    directory, directory_fd = _private_awa_dir(worktree_path)
+    read_flags = os.O_RDONLY
+    read_flags |= getattr(os, "O_CLOEXEC", 0)
+    read_flags |= getattr(os, "O_NONBLOCK", 0)
+    read_flags |= getattr(os, "O_NOFOLLOW", 0)
+    temp_name = f".lease.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    temp_fd = -1
+    try:
+        current_fd = os.open("lease.json", read_flags, dir_fd=directory_fd)
+        try:
+            current_meta = os.fstat(current_fd)
+            if (
+                not stat.S_ISREG(current_meta.st_mode)
+                or stat.S_IMODE(current_meta.st_mode) != paths.FILE_MODE
+                or current_meta.st_uid != os.getuid()
+            ):
+                raise OSError("existing lease is not one owned private file")
+            current_raw = os.read(current_fd, 65_537)
+        finally:
+            os.close(current_fd)
+        if len(current_raw) > 65_536:
+            raise OSError("existing lease is oversized")
+        try:
+            current = json.loads(current_raw.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise OSError("existing lease is malformed") from exc
+        if (
+            not isinstance(current, dict)
+            or validate(current)
+            or current.get("lease_id") != expected_lease_id
+        ):
+            raise OSError("existing lease identity changed")
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        temp_fd = os.open(
+            temp_name,
+            flags,
+            paths.FILE_MODE,
+            dir_fd=directory_fd,
+        )
+        os.fchmod(temp_fd, paths.FILE_MODE)
+        payload = (
+            json.dumps(lease, indent=2, sort_keys=False) + "\n"
+        ).encode("utf-8")
+        _write_all(temp_fd, payload)
+        os.fsync(temp_fd)
+        os.close(temp_fd)
+        temp_fd = -1
+        os.replace(
+            temp_name,
+            "lease.json",
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        os.fsync(directory_fd)
+        return directory / "lease.json"
+    finally:
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        with contextlib.suppress(OSError):
+            os.unlink(temp_name, dir_fd=directory_fd)
         os.close(directory_fd)
 
 

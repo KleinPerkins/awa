@@ -858,10 +858,14 @@ def _read_disk_lease(
         or value.get("branch") != identity_value.branch
         or os.path.realpath(os.path.abspath(str(value.get("git_common_dir") or "")))
         != identity_value.git_common_dir
-        or value.get("head") != identity_value.head
         or value.get("status", "active") != "active"
     ):
         return "conflict", value
+    head = value.get("head")
+    if not isinstance(head, str) or _OBJECT_ID.fullmatch(head) is None:
+        return "conflict", value
+    if head != identity_value.head:
+        return "stale_head", value
     return "valid", value
 
 
@@ -882,7 +886,7 @@ def _matching_rows(
     return rows
 
 
-def _row_matches(
+def _row_identity_matches(
     row: dict,
     identity_value: lifecycle.WorktreeIdentity,
     *,
@@ -895,8 +899,23 @@ def _row_matches(
         and row.get("branch") == identity_value.branch
         and os.path.realpath(os.path.abspath(str(row.get("git_common_dir") or "")))
         == identity_value.git_common_dir
-        and row.get("head") == identity_value.head
         and (lease_id is None or row.get("lease_id") == lease_id)
+    )
+
+
+def _row_matches(
+    row: dict,
+    identity_value: lifecycle.WorktreeIdentity,
+    *,
+    lease_id: str | None = None,
+) -> bool:
+    return bool(
+        _row_identity_matches(
+            row,
+            identity_value,
+            lease_id=lease_id,
+        )
+        and row.get("head") == identity_value.head
     )
 
 
@@ -945,9 +964,36 @@ def _register_under_lock(
             raise EntryUnavailable("attestation_failed")
         action = "adopted"
         lease_id = adopted.lease_id
-    elif disk_state == "valid" and len(rows) == 1:
-        if not _row_matches(rows[0], observed, lease_id=disk["lease_id"]):
+    elif disk_state in {"valid", "stale_head"} and len(rows) == 1:
+        if (
+            disk is None
+            or not _row_identity_matches(
+                rows[0],
+                observed,
+                lease_id=disk["lease_id"],
+            )
+        ):
             raise EntryUnavailable("registration_conflict", result="conflict")
+        repaired_head = (
+            disk_state == "stale_head"
+            or rows[0].get("head") != observed.head
+        )
+        if repaired_head:
+            updated = dict(disk)
+            updated["head"] = observed.head
+            if disk_state == "stale_head":
+                lease_mod.replace_lease(
+                    observed.root,
+                    updated,
+                    expected_lease_id=disk["lease_id"],
+                )
+            state.upsert_lease(updated)
+            state.record_event(
+                "native_entry_repair",
+                "repaired exact lease HEAD projection",
+                updated["lease_id"],
+            )
+            disk = updated
         attested, _reason = lifecycle.attest(
             observed.root,
             state=state,
@@ -957,9 +1003,20 @@ def _register_under_lock(
         )
         if not attested:
             raise EntryUnavailable("attestation_failed")
-        action = "attested"
+        action = "repaired" if repaired_head else "attested"
         lease_id = disk["lease_id"]
-    elif disk_state == "valid" and not rows:
+    elif disk_state in {"valid", "stale_head"} and not rows:
+        if disk is None:
+            raise EntryUnavailable("registration_conflict", result="conflict")
+        if disk_state == "stale_head":
+            updated = dict(disk)
+            updated["head"] = observed.head
+            lease_mod.replace_lease(
+                observed.root,
+                updated,
+                expected_lease_id=disk["lease_id"],
+            )
+            disk = updated
         state.upsert_lease(disk)
         state.record_event(
             "native_entry_repair",
@@ -979,12 +1036,14 @@ def _register_under_lock(
         lease_id = disk["lease_id"]
     elif disk_state == "absent" and len(rows) == 1:
         row = rows[0]
-        if not _row_matches(row, observed):
+        if not _row_identity_matches(row, observed):
             raise EntryUnavailable("registration_conflict", result="conflict")
         restored = _lease_from_row(row)
+        restored["head"] = observed.head
         if lease_mod.validate(restored):
             raise EntryUnavailable("registration_conflict", result="conflict")
         lease_mod.create_lease(observed.root, restored)
+        state.upsert_lease(restored)
         state.record_event(
             "native_entry_repair",
             "repaired exact SQLite-only lease projection",

@@ -181,6 +181,36 @@ class TestNativeEntry(EngineTestCase):
         self.assertGreaterEqual(sum(event["kind"] == "attest" for event in events), 2)
         self.assertEqual(len(native_entry.read_receipts()), 2)
 
+    def test_clean_head_advance_repairs_same_lease_then_attests(self):
+        root = self._worktree("feat/head-advance")
+        first = native_entry.register_session_start(
+            self._payload(root, "head-before")
+        )
+        self.assertEqual(first.action, "adopted")
+        before = lease_mod.read_lease(str(root))
+        (root / "advance.txt").write_text("advance\n", encoding="utf-8")
+        git(str(root), "add", "advance.txt")
+        git(str(root), "commit", "-m", "advance native head")
+        new_head = git(str(root), "rev-parse", "HEAD").stdout.strip()
+
+        second = native_entry.register_session_start(
+            self._payload(root, "head-after")
+        )
+        self.assertEqual((second.result, second.action), ("success", "repaired"))
+        after = lease_mod.read_lease(str(root))
+        self.assertEqual(after["lease_id"], before["lease_id"])
+        self.assertEqual(after["head"], new_head)
+        rows = self._active_rows(root)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["lease_id"], before["lease_id"])
+        self.assertEqual(rows[0]["head"], new_head)
+        with state_mod.State() as state:
+            events = state.events(lease_id=before["lease_id"], limit=20)
+        self.assertEqual(sum(event["kind"] == "adopt" for event in events), 1)
+        self.assertTrue(
+            any(event["kind"] == "native_entry_repair" for event in events)
+        )
+
     def test_concurrent_sessions_have_one_adoption_and_distinct_receipts(self):
         root = self._worktree()
         barrier = threading.Barrier(2)

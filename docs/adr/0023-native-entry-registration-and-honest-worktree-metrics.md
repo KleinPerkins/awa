@@ -60,9 +60,16 @@ the lock immediately before writing. With no lease or conflicting row, the
 registrar reuses adoption to create the lease, SQLite row, adoption event, and
 attestation. A matching valid lease is attested without another adoption.
 Disk-only or SQLite-only state is repaired only when one exact path, branch,
-HEAD, common directory, and lease identity makes the repair unambiguous.
+common directory, and lease identity makes the repair unambiguous.
 Malformed, mismatched, duplicate, or drifting state is preserved and reported
 as conflict or mismatch; it is never seized.
+
+A clean same-branch worktree may legitimately advance HEAD between sessions.
+When the on-disk lease and sole active SQLite row retain the exact path, branch,
+common directory, and lease id, registration repairs their persisted HEAD to
+the already-revalidated current value and attests the same lease. A live HEAD
+change between the pre-lock and under-lock observations still refuses before
+adoption.
 
 ### 3. `awa-native-entry/v1` is private post-entry evidence
 

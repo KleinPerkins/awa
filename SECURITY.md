@@ -217,7 +217,9 @@ directories, visible index, clean/unrelated-ignored state, and private lease/rec
 rechecked under the existing common-directory collision lock before mutation. Adoption rechecks an
 expected complete identity inside that lock. Existing exact state attests; disk/SQLite asymmetry
 repairs only one-to-one exact identity. Malformed, duplicate, mismatched, symlinked, dirty, detached,
-primary, excluded, or drifting state is preserved.
+primary, excluded, or live-drifting state is preserved. A clean same-branch HEAD advanced between
+sessions may update only the exact same lease's persisted HEAD before attestation; HEAD movement
+between the pre-lock and under-lock observations still refuses before adoption.
 
 `awa-native-entry/v1` receipts are private `0700`/`0600`, bounded, no-follow, and atomically
 published per root/session. They contain metadata only—no prompt, transcript, file content,
