@@ -1375,14 +1375,14 @@ def _check_lifecycle(facts: Facts) -> tuple[str, str]:
 
 
 def _check_entry(facts: Facts) -> tuple[str, str]:
-    if facts.native_entry_state == "conflict":
-        return "degraded", "native entry evidence conflict"
-    if facts.native_entry_state == "mismatched":
-        return "degraded", "native entry evidence mismatched"
     if facts.native_entry_state == "success":
         return "green", "native entry evidence validated"
     if facts.handoff_state == "closed":
         return "green", "ensure handoff evidence validated"
+    if facts.native_entry_state == "conflict":
+        return "degraded", "native entry evidence conflict"
+    if facts.native_entry_state == "mismatched":
+        return "degraded", "native entry evidence mismatched"
     if facts.native_entry_state == "failed":
         return "degraded", "native entry registration failed"
     if facts.native_entry_state == "stale":

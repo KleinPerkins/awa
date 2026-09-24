@@ -249,13 +249,18 @@ class TestIntegrityInvariants(unittest.TestCase):
         self.assertEqual(status["overall"], "green")
 
     def test_valid_ensure_handoff_is_independent_success_evidence(self):
-        status = self.evaluate(
-            handoff_state="closed",
-            native_entry_state="stale",
-        )
-        entry = invariant(status, "entry_handshake")
-        self.assertEqual(entry["severity"], "green")
-        self.assertEqual(entry["evidence"], "ensure handoff evidence validated")
+        for native_state in ("stale", "conflict"):
+            with self.subTest(native_state=native_state):
+                status = self.evaluate(
+                    handoff_state="closed",
+                    native_entry_state=native_state,
+                )
+                entry = invariant(status, "entry_handshake")
+                self.assertEqual(entry["severity"], "green")
+                self.assertEqual(
+                    entry["evidence"],
+                    "ensure handoff evidence validated",
+                )
 
     def test_native_entry_conflict_is_distinct_from_unknown(self):
         conflict = self.evaluate(
