@@ -21,9 +21,11 @@ from engine import (
     integrity,
     lease as lease_mod,
     lifecycle_reconcile,
+    native_entry,
     state as state_mod,
 )
 from engine.tests.helpers import EngineTestCase, git
+from kernel.lib import awa_roots
 
 
 def _observation(
@@ -255,6 +257,24 @@ class TestLifecycleReconcile(EngineTestCase):
         lease_path = lease_mod.write_lease(worktree, lease)
         with state_mod.State() as state:
             state.upsert_lease(lease)
+        awa_roots.heartbeat(
+            worktree,
+            branch="feat/readonly",
+            common_dir=common_dir,
+            session_id="readonly-session",
+        )
+        observed_identity = native_entry._observe_identity(worktree)
+        native_entry._write_receipt(
+            native_entry.EntryPayload(
+                root=observed_identity.root,
+                session_id="readonly-session",
+            ),
+            observed_identity,
+            result="success",
+            action="attested",
+            lease_id=lease["lease_id"],
+            reason="registered",
+        )
 
         db_path = self.state_home / "awa" / "state.db"
         uri = f"file:{quote(str(db_path.resolve()), safe='/')}?mode=ro"
@@ -284,6 +304,8 @@ class TestLifecycleReconcile(EngineTestCase):
             lease_path,
             Path(worktree) / "README.md",
             git_dir / "index",
+            Path(awa_roots.record_path(worktree)),
+            native_entry.receipt_path(worktree, "readonly-session"),
         )
         before = {
             path: (
@@ -352,6 +374,111 @@ class TestLifecycleReconcile(EngineTestCase):
         self.assertEqual(row.topology, "present_registered")
         self.assertEqual(row.content_safety, "clean")
         self.assertEqual(row.cached_remote, "redundant")
+
+    def test_active_root_seeds_unleased_linked_discovery_and_problem_counts(self):
+        repo = self.make_seeded_repo("active-root-repo")
+        worktree = self.add_worktree(repo, "feat/active-native")
+        branch = git(worktree, "symbolic-ref", "--short", "HEAD").stdout.strip()
+        common = git(
+            worktree,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ).stdout.strip()
+        awa_roots.heartbeat(
+            worktree,
+            branch=branch,
+            common_dir=common,
+            session_id="active-native-session",
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {"AWA_INTEGRITY_PROBE_REPO": str(self.state_home / "missing-probe")},
+            clear=False,
+        ):
+            rows = lifecycle_reconcile.classify()
+        row = next(
+            item
+            for item in rows
+            if item.worktree_path == str(Path(worktree).resolve())
+        )
+        self.assertEqual(row.activity, "active")
+        self.assertIsNone(row.lease_id)
+        self.assertEqual(row.classification, "preserve")
+        self.assertEqual(
+            lifecycle_reconcile.summarize(rows),
+            {
+                "discovered_linked": 1,
+                "managed": 0,
+                "active": 1,
+                "unleased": 1,
+                "conflicts": 0,
+                "problems": 1,
+            },
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"AWA_INTEGRITY_PROBE_REPO": str(self.state_home / "missing-probe")},
+            clear=False,
+        ):
+            facts = integrity._lifecycle_facts(integrity._source_root())
+        self.assertEqual(facts[:4], (None, None, None, None))
+        self.assertEqual(facts[4]["discovered_linked"], 1)
+        self.assertEqual(facts[4]["unleased"], 1)
+        self.assertEqual(facts[4]["problems"], 1)
+
+    def test_native_receipt_alone_seeds_repository_discovery(self):
+        repo = self.make_seeded_repo("receipt-seed-repo")
+        worktree = Path(self.add_worktree(repo, "feat/receipt-seed"))
+        policy = Path(self._tmp.name) / "receipt-policy.yml"
+        policy.write_text(
+            "version: 1\n"
+            f"governed_roots:\n  - {Path(repo).parent}\n"
+            "default: include\n"
+            "default_mode: on\n"
+            "include:\n  - '*'\n"
+            "exclude: []\n",
+            encoding="utf-8",
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AWA_POLICY": str(policy),
+                "AWA_GOVERNED_ROOT": str(Path(repo).parent),
+            },
+            clear=False,
+        ):
+            result = native_entry.register_session_start(
+                {
+                    "hook_event_name": "sessionStart",
+                    "workspace_roots": [str(worktree)],
+                    "session_id": "receipt-seed",
+                }
+            )
+        self.assertEqual(result.result, "success")
+        lease = lease_mod.read_lease(str(worktree))
+        self.assertIsNotNone(lease)
+        with state_mod.State() as state:
+            state.conn.execute(
+                "DELETE FROM leases WHERE lease_id=?",
+                (lease["lease_id"],),
+            )
+        (worktree / ".awa" / "lease.json").unlink()
+        (worktree / ".awa").rmdir()
+
+        with mock.patch.dict(
+            os.environ,
+            {"AWA_INTEGRITY_PROBE_REPO": ""},
+            clear=False,
+        ):
+            rows = lifecycle_reconcile.classify()
+        self.assertTrue(
+            any(
+                row.worktree_path == str(worktree.resolve())
+                for row in rows
+            )
+        )
 
     def test_on_disk_lease_without_active_db_lease_is_preserved(self):
         repo = self.make_seeded_repo("orphaned-lease-repo")

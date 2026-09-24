@@ -1468,6 +1468,91 @@ def finish_session_gate(root_path: str, *, confirming_session_key: str,
 # K2 TODO (deferred — observability, NOT a safety gap): dead-root records and clean receipts
 # accumulate unbounded under roots/ and receipts/. Add a prune/TTL + a size cap in K2. The
 # SAFETY-relevant escape (clearing a stuck record) ships now as `forget` / `--force`, below.
+def list_records(limit: int = 4096) -> list[dict]:
+    """Read strict active-root observations without following links or writing state."""
+    directory = roots_dir()
+    try:
+        metadata = os.lstat(directory)
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return []
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != DIR_MODE
+    ):
+        return []
+    directory_flags = os.O_RDONLY
+    directory_flags |= getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_CLOEXEC", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        directory_fd = os.open(directory, directory_flags)
+    except OSError:
+        return []
+    try:
+        opened = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+        ):
+            return []
+        try:
+            names = sorted(
+                name
+                for name in os.listdir(directory_fd)
+                if name.endswith(".json")
+            )
+        except OSError:
+            return []
+        if len(names) > max(0, limit):
+            return []
+        records = []
+        for name in names:
+            flags = os.O_RDONLY
+            flags |= getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NONBLOCK", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            try:
+                fd = os.open(name, flags, dir_fd=directory_fd)
+            except OSError:
+                continue
+            try:
+                opened_file = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(opened_file.st_mode)
+                    or stat.S_IMODE(opened_file.st_mode) != FILE_MODE
+                ):
+                    continue
+                raw = os.read(fd, 65537)
+            finally:
+                os.close(fd)
+            if len(raw) > 65536:
+                continue
+            try:
+                record = json.loads(raw.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError):
+                continue
+            root_path = record.get("root_path") if isinstance(record, dict) else None
+            if (
+                not isinstance(root_path, str)
+                or not root_path
+                or root_path != canon(root_path)
+                or os.path.basename(record_path(root_path)) != name
+            ):
+                continue
+            valid, _reason, _sessions = _validate_record_for_heartbeat_merge(
+                root_path,
+                record,
+            )
+            if valid:
+                records.append(record)
+        return records
+    finally:
+        os.close(directory_fd)
+
+
 def dead_roots() -> list[dict]:
     """Every recorded root whose path no longer exists — used for sessionStart guidance."""
     out: list[dict] = []

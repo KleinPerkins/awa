@@ -164,6 +164,7 @@ validate_integrity_product_assets() {
   [ -f "$root/contracts/awa-hook-owner.v2.json" ] || return 1
   [ -f "$root/engine/integrity_console.py" ] || return 1
   [ -f "$root/engine/integrity_alert.py" ] || return 1
+  [ -f "$root/engine/native_entry.py" ] || return 1
   python3 - "$root" "$access_mode" <<'PY'
 import json
 import os

@@ -12,7 +12,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from engine import integrity
+from engine import (
+    integrity,
+    lease as lease_mod,
+    native_entry,
+    state as state_mod,
+)
 from engine.tests.helpers import EngineTestCase, git
 from kernel.lib import awa_handoff
 
@@ -140,13 +145,48 @@ class TestEntryHandshake(EngineTestCase):
 
         _, target = self._ensure()
         closed = self._hook(
-            {"hook_event_name": "sessionStart", "workspace_roots": [str(target)]},
+            {
+                "hook_event_name": "sessionStart",
+                "workspace_roots": [str(target.resolve())],
+                "session_id": "ensure-session",
+            },
             cwd=target,
         )
         self.assertEqual((closed.returncode, closed.stdout, closed.stderr), (0, "", ""))
         record = awa_handoff.read_record()
         self.assertEqual(record["status"], "closed")
         self.assertEqual(integrity._collect_facts(None, profile="fast", now=1.0).handoff_state, "closed")
+        lease = lease_mod.read_lease(str(target))
+        self.assertIsNotNone(lease)
+        self.assertEqual(lease_mod.validate(lease), [])
+        with state_mod.State() as state:
+            self.assertEqual(
+                [row["lease_id"] for row in state.list_leases("active")],
+                [lease["lease_id"]],
+            )
+        self.assertEqual(
+            [receipt["result"] for receipt in native_entry.read_receipts()],
+            ["success"],
+        )
+
+    def test_native_session_without_ensure_handoff_adopts_with_distinct_evidence(self):
+        target = Path(self.add_worktree(str(self.repo), "feat/native-direct"))
+        result = self._hook(
+            {
+                "hook_event_name": "sessionStart",
+                "workspace_roots": [str(target.resolve())],
+                "session_id": "native-direct-session",
+            },
+            cwd=target,
+        )
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        self.assertEqual(awa_handoff.read_state(), "absent")
+        lease = lease_mod.read_lease(str(target))
+        self.assertIsNotNone(lease)
+        receipts = native_entry.read_receipts()
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0]["session_id"], "native-direct-session")
+        self.assertEqual(receipts[0]["result"], "success")
 
     def test_mismatch_malformed_ambiguous_drift_and_symlink_preserve_fail_open(self):
         _, target = self._ensure()

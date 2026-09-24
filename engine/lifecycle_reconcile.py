@@ -19,7 +19,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import integrity, paths, policy as policy_mod
+from . import integrity, native_entry, paths, policy as policy_mod
 
 
 SCHEMA = "awa-integrity-lifecycle/v1"
@@ -59,6 +59,7 @@ class _Observation:
     lease_snapshot_known: bool = True
     lease_ambiguous: bool = False
     registration_ambiguous: bool = False
+    lease_state: str | None = None
 
 
 @dataclass(frozen=True)
@@ -258,6 +259,19 @@ def _candidate_repositories(leases: list[dict]) -> list[str]:
             candidates.append(str(source))
     for lease in leases:
         repo = _repo_from_common_dir(str(lease.get("git_common_dir") or ""))
+        if repo:
+            candidates.append(repo)
+    try:
+        roots = integrity._roots_module(integrity._source_root())
+        active_records = roots.list_records()
+    except Exception:
+        active_records = []
+    for record in active_records:
+        repo = _repo_from_common_dir(str(record.get("git_common_dir") or ""))
+        if repo:
+            candidates.append(repo)
+    for common_dir in native_entry.candidate_common_dirs():
+        repo = _repo_from_common_dir(common_dir)
         if repo:
             candidates.append(repo)
 
@@ -588,13 +602,19 @@ def _observation_for(
         )
     )
     disposition_result = _canonical_disposition(path)
+    lease_on_disk = _lexists(Path(path) / ".awa" / "lease.json")
+    lease_state = (
+        native_entry.inspect_lease_state(path)
+        if lease_on_disk is True and registration is not None
+        else ("absent" if lease_on_disk is False else None)
+    )
     return _Observation(
         path=path,
         lease=lease,
         registration=registration,
         registration_known=registration_known,
         root_exists=_root_exists(path, disposition_result),
-        lease_on_disk=_lexists(Path(path) / ".awa" / "lease.json"),
+        lease_on_disk=lease_on_disk,
         disposition=(
             str(disposition_result["disposition"])
             if disposition_result is not None
@@ -605,6 +625,7 @@ def _observation_for(
         lease_snapshot_known=lease_snapshot_known,
         lease_ambiguous=lease_ambiguous,
         registration_ambiguous=registration_ambiguous,
+        lease_state=lease_state,
     )
 
 
@@ -808,11 +829,14 @@ def _classify_observation(
             ),
             "linked": registration.linked if registration else None,
             "lease_on_disk": observation.lease_on_disk,
+            "lease_state": observation.lease_state,
             "live_session": observation.live_session,
             "journal_or_recovery_ambiguous": (
                 observation.journal_or_recovery_ambiguous
             ),
             "no_touch": configured_no_touch,
+            "lease_ambiguous": observation.lease_ambiguous,
+            "registration_ambiguous": observation.registration_ambiguous,
             # Diagnostic only: neither value is read by any score or predicate.
             "pid": lease.get("pid"),
             "boot_id": lease.get("boot_id"),
@@ -827,3 +851,69 @@ def classify() -> list[Row]:
         (_classify_observation(item, policy) for item in _observations()),
         key=lambda row: (row.worktree_path, row.lease_id or ""),
     )
+
+
+def summarize(rows: list[Row]) -> dict[str, int]:
+    """Compute disjoint, path-deduplicated linked-worktree populations."""
+    grouped: dict[str, list[Row]] = {}
+    for row in rows:
+        diagnostics = row.diagnostics if isinstance(row.diagnostics, dict) else {}
+        if (
+            diagnostics.get("git_registered") is True
+            and diagnostics.get("linked") is True
+        ):
+            grouped.setdefault(_path_key(row.worktree_path), []).append(row)
+
+    counts = {
+        "discovered_linked": len(grouped),
+        "managed": 0,
+        "active": 0,
+        "unleased": 0,
+        "conflicts": 0,
+        "problems": 0,
+    }
+    for path_rows in grouped.values():
+        lease_ids = {row.lease_id for row in path_rows if row.lease_id}
+        ambiguity = any(
+            row.diagnostics.get("lease_ambiguous") is True
+            or row.diagnostics.get("registration_ambiguous") is True
+            for row in path_rows
+        )
+        on_disk = any(
+            row.diagnostics.get("lease_on_disk") is True
+            for row in path_rows
+        )
+        lease_states = {
+            row.diagnostics.get("lease_state")
+            for row in path_rows
+        }
+        managed = (
+            len(lease_ids) == 1
+            and lease_states == {"valid"}
+            and not ambiguity
+        )
+        active = any(row.activity == "active" for row in path_rows)
+        unleased = not lease_ids
+        conflict = (
+            ambiguity
+            or len(lease_ids) > 1
+            or (on_disk and not lease_ids)
+            or "conflict" in lease_states
+            or (bool(lease_ids) and lease_states != {"valid"})
+        )
+        problem = (
+            unleased
+            or conflict
+            or any(
+                row.classification == "unknown"
+                or row.topology != "present_registered"
+                or row.content_safety in {"dirty", "husk", "unknown"}
+                for row in path_rows
+            )
+        )
+        counts["managed"] += int(managed)
+        counts["active"] += int(active)
+        counts["unleased"] += int(unleased)
+        counts["conflicts"] += int(conflict)
+        counts["problems"] += int(problem)
+    return counts
