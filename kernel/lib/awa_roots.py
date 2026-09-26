@@ -431,7 +431,8 @@ def read_current_session(root_path: str) -> tuple:
 
 def _bind_current_session_locked(root_path: str, *, incoming: dict, source: str,
                                  target_rechecked: bool = False,
-                                 deadline: float | None = None) -> dict:
+                                 deadline: float | None = None,
+                                 stale_replacement: dict | None = None) -> dict:
     if not target_rechecked:
         target_ok, target_reason = _heartbeat_target_recheck(
             root_path, branch=incoming["branch"],
@@ -447,6 +448,7 @@ def _bind_current_session_locked(root_path: str, *, incoming: dict, source: str,
         # A structurally valid projection from a prior boot has no current-session
         # authority. The live linked-target recheck above makes replacing it safe.
         prior = None
+    replaced_stale_session = False
     if prior is not None:
         same_session = prior.get("session_id") == incoming["session_id"]
         same_target = (
@@ -457,7 +459,9 @@ def _bind_current_session_locked(root_path: str, *, incoming: dict, source: str,
         if not same_target:
             return {"ok": False, "reason": "current_session_target_mismatch"}
         if source == "beforeSubmitPrompt" and not same_session:
-            return {"ok": False, "reason": "current_session_session_mismatch"}
+            if stale_replacement is None or prior != stale_replacement:
+                return {"ok": False, "reason": "current_session_session_mismatch"}
+            replaced_stale_session = True
         if same_session:
             prior_conversation = prior.get("conversation_id", "")
             incoming_conversation = incoming["conversation_id"]
@@ -468,10 +472,23 @@ def _bind_current_session_locked(root_path: str, *, incoming: dict, source: str,
     _write_current_session_locked(root_path, incoming)
     return {
         "ok": True,
-        "reason": "replaced_prior_boot" if replaced_prior_boot else (
-            "bound" if status == "absent" else (
-            "conversation_attached" if status == "partial"
-            and bool(incoming["conversation_id"]) else "matched")),
+        "reason": (
+            "replaced_prior_boot"
+            if replaced_prior_boot
+            else (
+                "replaced_stale_session"
+                if replaced_stale_session
+                else (
+                    "bound"
+                    if status == "absent"
+                    else (
+                        "conversation_attached"
+                        if status == "partial" and bool(incoming["conversation_id"])
+                        else "matched"
+                    )
+                )
+            )
+        ),
         "created": status == "absent",
         "replaced_prior_boot": replaced_prior_boot,
         "current_session": incoming,
@@ -497,6 +514,123 @@ def bind_current_session(root_path: str, *, session_id: str, conversation_id: st
         return {"ok": False, "reason": "current_session_lock_busy"}
 
 
+def _member_liveness(
+    member: dict,
+    *,
+    current_boot: str,
+    now_epoch: int,
+    ttl_seconds: int,
+) -> str:
+    """Return live|stale|unknown using canonical active-root semantics."""
+    if member.get("boot_id") != current_boot:
+        return "stale"
+    pid = member.get("pid")
+    if isinstance(pid, int) and pid > 0:
+        return "live" if _pid_alive(pid) else "stale"
+    last = _strict_positive_epoch(member.get("last_heartbeat_epoch"))
+    if last is None:
+        return "unknown"
+    age = now_epoch - last
+    if age < 0:
+        return "unknown"
+    return "live" if age < ttl_seconds else "stale"
+
+
+def _stale_prompt_replacement_locked(
+    root_path: str,
+    *,
+    incoming: dict,
+    prior: dict,
+    current_boot: str,
+) -> tuple[dict | None, str]:
+    """Prove one same-boot prior binding stale before an incoming heartbeat."""
+    if (
+        prior.get("boot_id") != current_boot
+        or prior.get("root") != incoming["root"]
+        or prior.get("branch") != incoming["branch"]
+        or os.path.abspath(str(prior.get("common_dir") or ""))
+        != incoming["common_dir"]
+    ):
+        return None, "current_session_target_mismatch"
+    now_epoch = _now_epoch()
+    updated_at = _strict_positive_epoch(prior.get("updated_at_epoch"))
+    if updated_at is None or now_epoch < updated_at:
+        return None, "current_session_stale_evidence_unknown"
+    ttl_seconds = _ttl_seconds()
+    if now_epoch - updated_at < ttl_seconds:
+        return None, "current_session_session_mismatch"
+
+    safe, reason = _prompt_active_members_safe_locked(
+        root_path,
+        incoming=incoming,
+        current_boot=current_boot,
+        now_epoch=now_epoch,
+        ttl_seconds=ttl_seconds,
+    )
+    if not safe:
+        return None, reason
+    return dict(prior), "current_session_stale_replacement"
+
+
+def _prompt_active_members_safe_locked(
+    root_path: str,
+    *,
+    incoming: dict,
+    current_boot: str,
+    now_epoch: int | None = None,
+    ttl_seconds: int | None = None,
+) -> tuple[bool, str]:
+    """Refuse prompt replacement when any different live member remains."""
+    observed_now = _now_epoch() if now_epoch is None else now_epoch
+    observed_ttl = _ttl_seconds() if ttl_seconds is None else ttl_seconds
+    record, corrupt = read_record(root_path)
+    if corrupt:
+        return False, "current_session_stale_evidence_unknown"
+    if record is None:
+        return True, "current_session_stale_replacement"
+    valid, _reason, sessions = _validate_record_for_heartbeat_merge(
+        root_path,
+        record,
+    )
+    if not valid:
+        return False, "current_session_stale_evidence_unknown"
+    current_boot_sessions = {
+        key: member
+        for key, member in sessions.items()
+        if member.get("boot_id") == current_boot
+    }
+    if record.get("boot_id") != current_boot and current_boot_sessions:
+        return False, "current_session_stale_evidence_unknown"
+    record_common = record.get("git_common_dir")
+    if (
+        isinstance(record_common, str)
+        and record_common
+        and os.path.abspath(record_common) != incoming["common_dir"]
+    ):
+        return False, "current_session_stale_evidence_unknown"
+
+    incoming_key = session_key(incoming["session_id"])
+    for key, member in sessions.items():
+        liveness = _member_liveness(
+            member,
+            current_boot=current_boot,
+            now_epoch=observed_now,
+            ttl_seconds=observed_ttl,
+        )
+        if liveness == "unknown":
+            return False, "current_session_stale_evidence_unknown"
+        if liveness != "live":
+            continue
+        if (
+            key != incoming_key
+            or member.get("branch") != incoming["branch"]
+            or os.path.abspath(str(member.get("git_common_dir") or ""))
+            != incoming["common_dir"]
+        ):
+            return False, "current_session_session_mismatch"
+    return True, "current_session_stale_replacement"
+
+
 def heartbeat_and_bind_current_session(
         root_path: str, *, session_id: str, conversation_id: str,
         branch: str, common_dir: str, source: str,
@@ -513,6 +647,41 @@ def heartbeat_and_bind_current_session(
         return {"ok": False, "reason": "conversation_missing"}
     try:
         with _common_dir_lock(common_dir, timeout=lock_timeout):
+            stale_replacement = None
+            if source == "beforeSubmitPrompt":
+                prior, status = _read_current_session(
+                    root_path,
+                    allow_partial=True,
+                    expected_boot_id=current_boot,
+                )
+                if status == "malformed":
+                    return {"ok": False, "reason": "current_session_malformed"}
+                if (
+                    prior is not None
+                    and prior.get("session_id") != incoming["session_id"]
+                ):
+                    if status == "ok":
+                        stale_replacement, reason = _stale_prompt_replacement_locked(
+                            root_path,
+                            incoming=incoming,
+                            prior=prior,
+                            current_boot=current_boot,
+                        )
+                        if stale_replacement is None:
+                            return {"ok": False, "reason": reason}
+                    elif status in {"prior_boot", "partial_prior_boot"}:
+                        safe, reason = _prompt_active_members_safe_locked(
+                            root_path,
+                            incoming=incoming,
+                            current_boot=current_boot,
+                        )
+                        if not safe:
+                            return {"ok": False, "reason": reason}
+                    else:
+                        return {
+                            "ok": False,
+                            "reason": "current_session_stale_evidence_unknown",
+                        }
             heartbeat_result = _heartbeat_locked(
                 root_path, branch=branch, common_dir=common_dir,
                 session_id=session_id, pid=None, boot=current_boot,
@@ -521,7 +690,8 @@ def heartbeat_and_bind_current_session(
                 return heartbeat_result
             return _bind_current_session_locked(
                 root_path, incoming=incoming, source=source,
-                target_rechecked=True, deadline=deadline)
+                target_rechecked=True, deadline=deadline,
+                stale_replacement=stale_replacement)
     except TimeoutError:
         return {"ok": False, "reason": "current_session_lock_busy"}
 

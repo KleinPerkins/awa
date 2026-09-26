@@ -227,6 +227,13 @@ class ActiveRootTest(EngineTestCase):
                     rec["first_seen"] = timestamp
         path.write_text(json.dumps(rec), encoding="utf-8")
 
+    def _age_current_session(self, root: str, seconds_ago: int) -> dict:
+        path = Path(AR.current_session_path(root))
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        rec["updated_at_epoch"] = AR._now_epoch() - seconds_ago
+        path.write_text(json.dumps(rec), encoding="utf-8")
+        return rec
+
     def test_heartbeat_stale_different_session_branch_disagreement_no_longer_vetoes(
             self) -> None:
         """BITING (fix, round 2): PR #82 made `other_session_disagrees` session-aware but not
@@ -367,6 +374,299 @@ class ActiveRootTest(EngineTestCase):
         current, status = AR.read_current_session(wt)
         self.assertEqual(status, "ok")
         self.assertEqual(current["session_id"], "session-b")
+
+    def test_prompt_fused_bind_replaces_only_proven_stale_prior_session(self) -> None:
+        repo = self.make_repo("promptstalebind")
+        wt = self.add_worktree(repo, "feat/prompt-stale")
+        branch = git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        common = git(
+            wt, "rev-parse", "--path-format=absolute", "--git-common-dir"
+        ).stdout.strip()
+        AR.write_current_session(
+            wt,
+            session_id="old-conversation",
+            conversation_id="old-conversation",
+            branch=branch,
+            common_dir=common,
+        )
+        self._age_current_session(wt, AR.DEFAULT_TTL_SECONDS + 60)
+
+        replaced = AR.heartbeat_and_bind_current_session(
+            wt,
+            session_id="new-conversation",
+            conversation_id="new-conversation",
+            branch=branch,
+            common_dir=common,
+            source="beforeSubmitPrompt",
+        )
+        self.assertTrue(replaced["ok"], replaced)
+        self.assertEqual(replaced["reason"], "replaced_stale_session")
+        current, status = AR.read_current_session(wt)
+        self.assertEqual(status, "ok")
+        self.assertEqual(current["session_id"], "new-conversation")
+        record, corrupt = AR.read_record(wt)
+        self.assertFalse(corrupt)
+        self.assertEqual(
+            set(record["sessions"]),
+            {AR.session_key("new-conversation")},
+        )
+
+    def test_prompt_fused_bind_preserves_live_different_session_evidence(self) -> None:
+        repo = self.make_repo("promptlivebind")
+        wt = self.add_worktree(repo, "feat/prompt-live")
+        branch = git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        common = git(
+            wt, "rev-parse", "--path-format=absolute", "--git-common-dir"
+        ).stdout.strip()
+        AR.heartbeat(
+            wt,
+            branch=branch,
+            common_dir=common,
+            session_id="old-conversation",
+        )
+        AR.write_current_session(
+            wt,
+            session_id="old-conversation",
+            conversation_id="old-conversation",
+            branch=branch,
+            common_dir=common,
+        )
+        self._age_current_session(wt, AR.DEFAULT_TTL_SECONDS + 60)
+        before_heartbeat = Path(AR.record_path(wt)).read_bytes()
+        before_current = Path(AR.current_session_path(wt)).read_bytes()
+
+        refused = AR.heartbeat_and_bind_current_session(
+            wt,
+            session_id="new-conversation",
+            conversation_id="new-conversation",
+            branch=branch,
+            common_dir=common,
+            source="beforeSubmitPrompt",
+        )
+        self.assertFalse(refused["ok"], refused)
+        self.assertEqual(
+            refused["reason"],
+            "current_session_session_mismatch",
+        )
+        self.assertEqual(Path(AR.record_path(wt)).read_bytes(), before_heartbeat)
+        self.assertEqual(
+            Path(AR.current_session_path(wt)).read_bytes(),
+            before_current,
+        )
+
+    def test_prompt_fused_bind_refuses_fresh_prior_without_membership(self) -> None:
+        repo = self.make_repo("promptfreshbind")
+        wt = self.add_worktree(repo, "feat/prompt-fresh")
+        branch = git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        common = git(
+            wt, "rev-parse", "--path-format=absolute", "--git-common-dir"
+        ).stdout.strip()
+        AR.write_current_session(
+            wt,
+            session_id="old-conversation",
+            conversation_id="old-conversation",
+            branch=branch,
+            common_dir=common,
+        )
+        before = Path(AR.current_session_path(wt)).read_bytes()
+
+        refused = AR.heartbeat_and_bind_current_session(
+            wt,
+            session_id="new-conversation",
+            conversation_id="new-conversation",
+            branch=branch,
+            common_dir=common,
+            source="beforeSubmitPrompt",
+        )
+        self.assertFalse(refused["ok"], refused)
+        self.assertEqual(
+            refused["reason"],
+            "current_session_session_mismatch",
+        )
+        self.assertEqual(Path(AR.current_session_path(wt)).read_bytes(), before)
+        self.assertFalse(Path(AR.record_path(wt)).exists())
+
+    def test_prompt_prior_boot_binding_preserves_current_boot_live_member(self) -> None:
+        repo = self.make_repo("promptpriorbootlive")
+        wt = self.add_worktree(repo, "feat/prompt-prior-boot-live")
+        branch = git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        common = git(
+            wt, "rev-parse", "--path-format=absolute", "--git-common-dir"
+        ).stdout.strip()
+        AR.heartbeat(
+            wt,
+            branch=branch,
+            common_dir=common,
+            session_id="old-conversation",
+        )
+        current = AR.write_current_session(
+            wt,
+            session_id="old-conversation",
+            conversation_id="old-conversation",
+            branch=branch,
+            common_dir=common,
+        )
+        current["boot_id"] = "prior-boot"
+        current_path = Path(AR.current_session_path(wt))
+        current_path.write_text(json.dumps(current), encoding="utf-8")
+        heartbeat_path = Path(AR.record_path(wt))
+        heartbeat_before = heartbeat_path.read_bytes()
+        current_before = current_path.read_bytes()
+
+        refused = AR.heartbeat_and_bind_current_session(
+            wt,
+            session_id="new-conversation",
+            conversation_id="new-conversation",
+            branch=branch,
+            common_dir=common,
+            source="beforeSubmitPrompt",
+        )
+        self.assertFalse(refused["ok"], refused)
+        self.assertEqual(
+            refused["reason"],
+            "current_session_session_mismatch",
+        )
+        self.assertEqual(heartbeat_path.read_bytes(), heartbeat_before)
+        self.assertEqual(current_path.read_bytes(), current_before)
+
+    def test_prompt_fused_bind_refuses_unknown_malformed_and_contended_state(
+            self) -> None:
+        repo = self.make_repo("promptunknownbind")
+        wt = self.add_worktree(repo, "feat/prompt-unknown")
+        branch = git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        common = git(
+            wt, "rev-parse", "--path-format=absolute", "--git-common-dir"
+        ).stdout.strip()
+        AR.write_current_session(
+            wt,
+            session_id="old-conversation",
+            conversation_id="old-conversation",
+            branch=branch,
+            common_dir=common,
+        )
+        self._age_current_session(wt, AR.DEFAULT_TTL_SECONDS + 60)
+        heartbeat_path = Path(AR.record_path(wt))
+        heartbeat_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        heartbeat_path.write_text('{"schema":', encoding="utf-8")
+        heartbeat_path.chmod(0o600)
+        current_before = Path(AR.current_session_path(wt)).read_bytes()
+        heartbeat_before = heartbeat_path.read_bytes()
+
+        unknown = AR.heartbeat_and_bind_current_session(
+            wt,
+            session_id="new-conversation",
+            conversation_id="new-conversation",
+            branch=branch,
+            common_dir=common,
+            source="beforeSubmitPrompt",
+        )
+        self.assertFalse(unknown["ok"], unknown)
+        self.assertEqual(
+            unknown["reason"],
+            "current_session_stale_evidence_unknown",
+        )
+        self.assertEqual(heartbeat_path.read_bytes(), heartbeat_before)
+        self.assertEqual(
+            Path(AR.current_session_path(wt)).read_bytes(),
+            current_before,
+        )
+
+        heartbeat_path.unlink()
+        current_path = Path(AR.current_session_path(wt))
+        current_path.write_text('{"schema":', encoding="utf-8")
+        malformed_before = current_path.read_bytes()
+        malformed = AR.heartbeat_and_bind_current_session(
+            wt,
+            session_id="new-conversation",
+            conversation_id="new-conversation",
+            branch=branch,
+            common_dir=common,
+            source="beforeSubmitPrompt",
+        )
+        self.assertFalse(malformed["ok"], malformed)
+        self.assertEqual(malformed["reason"], "current_session_malformed")
+        self.assertEqual(current_path.read_bytes(), malformed_before)
+        self.assertFalse(heartbeat_path.exists())
+
+        current_path.unlink()
+        with mock.patch.object(
+            AR,
+            "_common_dir_lock",
+            side_effect=TimeoutError("busy"),
+        ):
+            contended = AR.heartbeat_and_bind_current_session(
+                wt,
+                session_id="new-conversation",
+                conversation_id="new-conversation",
+                branch=branch,
+                common_dir=common,
+                source="beforeSubmitPrompt",
+            )
+        self.assertFalse(contended["ok"], contended)
+        self.assertEqual(contended["reason"], "current_session_lock_busy")
+        self.assertFalse(current_path.exists())
+        self.assertFalse(heartbeat_path.exists())
+
+    def test_concurrent_old_and_new_prompts_cannot_steal_current_session(self) -> None:
+        repo = self.make_repo("promptconcurrentbind")
+        wt = self.add_worktree(repo, "feat/prompt-concurrent")
+        branch = git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        common = git(
+            wt, "rev-parse", "--path-format=absolute", "--git-common-dir"
+        ).stdout.strip()
+        AR.write_current_session(
+            wt,
+            session_id="old-conversation",
+            conversation_id="old-conversation",
+            branch=branch,
+            common_dir=common,
+        )
+        self._age_current_session(wt, AR.DEFAULT_TTL_SECONDS + 60)
+        barrier = threading.Barrier(2)
+        results: dict[str, dict] = {}
+
+        def bind(conversation: str) -> None:
+            barrier.wait(timeout=5)
+            results[conversation] = AR.heartbeat_and_bind_current_session(
+                wt,
+                session_id=conversation,
+                conversation_id=conversation,
+                branch=branch,
+                common_dir=common,
+                source="beforeSubmitPrompt",
+            )
+
+        workers = [
+            threading.Thread(target=bind, args=(conversation,))
+            for conversation in ("old-conversation", "new-conversation")
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(10)
+        self.assertFalse(any(worker.is_alive() for worker in workers))
+        winners = [
+            conversation
+            for conversation, result in results.items()
+            if result.get("ok")
+        ]
+        self.assertEqual(len(winners), 1, results)
+        winner = winners[0]
+        loser = (
+            "new-conversation"
+            if winner == "old-conversation"
+            else "old-conversation"
+        )
+        self.assertEqual(
+            results[loser]["reason"],
+            "current_session_session_mismatch",
+        )
+        current, status = AR.read_current_session(wt)
+        self.assertEqual(status, "ok")
+        self.assertEqual(current["session_id"], winner)
+        record, corrupt = AR.read_record(wt)
+        self.assertFalse(corrupt)
+        self.assertEqual(set(record["sessions"]), {AR.session_key(winner)})
 
     # ---- finish_session_evidence has the SAME defect one level further downstream ----
     def test_finish_session_evidence_stale_disagreeing_session_no_longer_malformed(

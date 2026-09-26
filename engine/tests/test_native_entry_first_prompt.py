@@ -71,6 +71,14 @@ class TestNativeEntryFirstPrompt(EngineTestCase):
         )
 
     @staticmethod
+    def _age_current_session(root: Path, seconds_ago: int) -> dict:
+        path = Path(awa_roots.current_session_path(str(root)))
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["updated_at_epoch"] = awa_roots._now_epoch() - seconds_ago
+        path.write_text(json.dumps(record), encoding="utf-8")
+        return record
+
+    @staticmethod
     def _payload(
         root: Path,
         *,
@@ -309,6 +317,89 @@ class TestNativeEntryFirstPrompt(EngineTestCase):
         self.assertEqual(status, "ok")
         self.assertEqual(current["conversation_id"], "moved-conversation")
         self.assertEqual(current["session_id"], "moved-conversation")
+
+    def test_stale_prior_conversation_recovers_on_first_prompt(self) -> None:
+        root = self._worktree("feat/stale-prior-conversation")
+        identity = native_entry._observe_identity(str(root))
+        awa_roots.write_current_session(
+            str(root),
+            session_id="prior-conversation",
+            conversation_id="prior-conversation",
+            branch=identity.branch,
+            common_dir=identity.git_common_dir,
+        )
+        self._age_current_session(
+            root,
+            awa_roots.DEFAULT_TTL_SECONDS + 60,
+        )
+
+        recovered = native_entry.register_event(
+            self._payload(
+                root,
+                conversation="replacement-conversation",
+                generation="replacement-first-prompt",
+            )
+        )
+        self.assertEqual(
+            (recovered.result, recovered.action),
+            ("success", "adopted"),
+        )
+        current, status = awa_roots.read_current_session(str(root))
+        self.assertEqual(status, "ok")
+        self.assertEqual(current["session_id"], "replacement-conversation")
+        disposition = awa_roots.disposition(str(root))
+        self.assertEqual(disposition["disposition"], "active")
+        self.assertEqual(
+            set(disposition["record"]["sessions"]),
+            {awa_roots.session_key("replacement-conversation")},
+        )
+
+    def test_live_prior_conversation_refuses_first_prompt_takeover(self) -> None:
+        root = self._worktree("feat/live-prior-conversation")
+        identity = native_entry._observe_identity(str(root))
+        awa_roots.heartbeat(
+            str(root),
+            branch=identity.branch,
+            common_dir=identity.git_common_dir,
+            session_id="prior-conversation",
+        )
+        awa_roots.write_current_session(
+            str(root),
+            session_id="prior-conversation",
+            conversation_id="prior-conversation",
+            branch=identity.branch,
+            common_dir=identity.git_common_dir,
+        )
+        self._age_current_session(
+            root,
+            awa_roots.DEFAULT_TTL_SECONDS + 60,
+        )
+        heartbeat_before = Path(
+            awa_roots.record_path(str(root))
+        ).read_bytes()
+        current_before = Path(
+            awa_roots.current_session_path(str(root))
+        ).read_bytes()
+
+        refused = native_entry.register_event(
+            self._payload(
+                root,
+                conversation="replacement-conversation",
+                generation="replacement-first-prompt",
+            ),
+            deadline=time.monotonic() + 0.25,
+        )
+        self.assertEqual((refused.result, refused.action), ("failed", None))
+        self.assertEqual(
+            Path(awa_roots.record_path(str(root))).read_bytes(),
+            heartbeat_before,
+        )
+        self.assertEqual(
+            Path(awa_roots.current_session_path(str(root))).read_bytes(),
+            current_before,
+        )
+        self.assertIsNone(lease_mod.read_lease(str(root)))
+        self.assertEqual(native_entry.read_receipts(), [])
 
     def test_later_prompt_generation_is_exact_success_noop(self) -> None:
         root = self._worktree("feat/later-generation")
