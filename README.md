@@ -44,10 +44,14 @@ source "${XDG_CONFIG_HOME:-$HOME/.config}/awa/env"
 
 ### Cursor hook-file owner
 
-The `awa-hook-owner/v1` contract has two modes:
+The frozen `awa-hook-owner/v1` base contract has two modes. Product role
+composition currently prefers the additive `awa-hook-owner/v3` successor
+(`v1 + v2 + v3`, with explicit supersession) while retaining strict v1/v2
+compatibility:
 
-- `direct` (the fresh and legacy default) — AWA reconciles its five fail-open/observation hook
-  roles in the selected Cursor user hook file while preserving unrelated rows.
+- `direct` (the fresh and legacy default) — AWA reconciles the seven effective
+  fail-open/observation hook roles in the selected Cursor user hook file while
+  preserving unrelated rows.
 - `external` — another host owns the complete hook file. Set `AWA_HOOK_OWNER=external` for the
   first install or transition. AWA persists that choice in
   `$XDG_CONFIG_HOME/awa/hook-owner.json`; later install/repair/doctor/uninstall calls preserve it
@@ -106,19 +110,26 @@ read-only measurement uses the same bounded timeout posture as repo inspection a
 
 ### Native Cursor Worktree entry
 
-The Cursor Agents Window **Worktree** environment is AWA's default entry path. After
-`sessionStart`, a quiet fail-open engine registrar strictly revalidates the payload, host policy,
-local Git registration, linked/attached identity, clean state, and lease/SQLite consistency under
-the per-common-directory lock. An eligible root is adopted and attested, an existing exact lease is
-attested without another adoption, and only unambiguous disk/SQLite asymmetry is repaired.
-Conflict, drift, malformed state, lock contention, or engine failure preserves the root and never
-blocks Cursor entry.
+The Cursor Agents Window **Worktree** environment is AWA's default entry path.
+`sessionStart` is an eager compatibility opportunity; if an existing or moved
+conversation enters without it, the first valid `beforeSubmitPrompt` gets one
+hard-bounded, fail-open recovery opportunity before the unchanged finish hook.
+`workspaceOpen` is never registration authority.
 
-Each root/session pair receives private `awa-native-entry/v1` post-entry evidence. This is separate
-from the singleton `awa-session-handoff/v1` pending→closed proof created by
-`dev-worktree.sh ensure`; native entry never invents ensure intent or closes another root's
-handoff. Neither receipt nor lease authorizes cleanup. Active-root, session, Git, content,
-recovery, operation, and explicit operator gates remain independently mandatory.
+Both supported events require one canonical physical root plus exact payload
+`conversation_id` and `generation_id`; `sessionStart` also requires an equal
+explicit `session_id`, while prompt recovery permits it to be absent. The
+registrar heartbeats and binds that payload identity, then revalidates policy,
+local Git registration, linked/attached identity, clean state, current-session
+membership, and lease/SQLite consistency under the per-common-directory lock.
+
+Each root/session pair receives private `awa-native-entry/v2` evidence with the
+real source event and generation. Strict v1 records remain legacy read/discovery
+evidence and never gain inferred v2 provenance; integrity reporting keeps eager,
+first-prompt-recovered, and legacy success distinct. This is separate from the
+singleton `awa-session-handoff/v1` pending→closed proof created by
+`dev-worktree.sh ensure`; neither path invents ensure intent or closes another
+root's handoff. Receipts and leases never authorize cleanup.
 
 ### Per-repo mode (ON / OFF)
 

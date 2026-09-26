@@ -248,6 +248,22 @@ class TestIntegrityInvariants(unittest.TestCase):
         self.assertEqual(entry["evidence"], "native entry evidence validated")
         self.assertEqual(status["overall"], "green")
 
+    def test_native_entry_success_provenance_remains_distinct(self):
+        expected = {
+            "eager": "eager session-start entry evidence validated",
+            "recovered": "first-prompt recovery evidence validated",
+            "legacy": "legacy v1 entry evidence validated; source unknown",
+        }
+        for native_state, evidence in expected.items():
+            with self.subTest(native_state=native_state):
+                status = self.evaluate(
+                    handoff_state="absent",
+                    native_entry_state=native_state,
+                )
+                entry = invariant(status, "entry_handshake")
+                self.assertEqual(entry["severity"], "green")
+                self.assertEqual(entry["evidence"], evidence)
+
     def test_valid_ensure_handoff_is_independent_success_evidence(self):
         for native_state in ("stale", "conflict"):
             with self.subTest(native_state=native_state):
@@ -284,8 +300,8 @@ class TestIntegrityInvariants(unittest.TestCase):
             "unknown",
         )
 
-    def test_stale_mismatched_and_failed_native_receipts_are_not_green(self):
-        for state in ("stale", "mismatched", "failed"):
+    def test_stale_mismatched_failed_and_pending_native_receipts_are_not_green(self):
+        for state in ("stale", "mismatched", "failed", "pending"):
             with self.subTest(state=state):
                 status = self.evaluate(
                     handoff_state="absent",
@@ -806,6 +822,10 @@ class TestLiveHookFacts(unittest.TestCase):
         shutil.copy2(
             _ROOT / "engine" / "integrity_detach.py",
             runtime / "engine" / "integrity_detach.py",
+        )
+        shutil.copy2(
+            _ROOT / "engine" / "native_entry_prompt_adapter.py",
+            runtime / "engine" / "native_entry_prompt_adapter.py",
         )
         (runtime / "dashboard").mkdir()
         shutil.copy2(

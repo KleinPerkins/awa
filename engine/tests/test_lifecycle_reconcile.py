@@ -268,6 +268,9 @@ class TestLifecycleReconcile(EngineTestCase):
             native_entry.EntryPayload(
                 root=observed_identity.root,
                 session_id="readonly-session",
+                conversation_id="readonly-session",
+                source_generation_id="readonly-generation",
+                source_event="sessionStart",
             ),
             observed_identity,
             result="success",
@@ -454,6 +457,8 @@ class TestLifecycleReconcile(EngineTestCase):
                     "hook_event_name": "sessionStart",
                     "workspace_roots": [str(worktree)],
                     "session_id": "receipt-seed",
+                    "conversation_id": "receipt-seed",
+                    "generation_id": "receipt-seed-generation",
                 }
             )
         self.assertEqual(result.result, "success")

@@ -76,6 +76,18 @@ class TestEntryHandshake(EngineTestCase):
         return result, target
 
     def _hook(self, payload: object, *, cwd: Path, env: dict | None = None):
+        if (
+            isinstance(payload, dict)
+            and payload.get("hook_event_name") == "sessionStart"
+            and isinstance(payload.get("session_id"), str)
+            and payload["session_id"]
+        ):
+            payload = dict(payload)
+            payload.setdefault("conversation_id", payload["session_id"])
+            payload.setdefault(
+                "generation_id",
+                f"generation-{payload['session_id']}",
+            )
         return subprocess.run(
             ["bash", str(_HOOK)],
             input=json.dumps(payload),

@@ -31,6 +31,7 @@ INSTALL_HOOKS = REPO / "kernel" / "hooks" / "install-hooks.sh"
 GUARD = REPO / "kernel" / "hooks" / "worktree-guard.sh"
 CONTRACT = REPO / "contracts" / "awa-contract.v1.json"
 V2_CONTRACT = REPO / "contracts" / "awa-hook-owner.v2.json"
+V3_CONTRACT = REPO / "contracts" / "awa-hook-owner.v3.json"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "hook-owner"
 V150_COMMIT = "331e633027aa489c08f22b96c979fde36079e220"
 
@@ -206,7 +207,9 @@ def _expected_direct_hooks(runtime):
         ],
         "beforeSubmitPrompt": [
             {
-                "command": str((hooks / "before-submit-prompt.sh").resolve()),
+                "command": str(
+                    (hooks / "before-submit-prompt-with-entry.sh").resolve()
+                ),
                 "type": "command",
                 "matcher": "UserPromptSubmit",
                 "timeout": 20,
@@ -237,9 +240,16 @@ def _effective_direct_roles():
         return v1["roles"]
     v2 = json.loads(V2_CONTRACT.read_text(encoding="utf-8"))
     superseded = set(v2["supersedes_roles"])
-    return [
+    effective = [
         role for role in v1["roles"] if role["id"] not in superseded
     ] + v2["roles"]
+    if not V3_CONTRACT.is_file():
+        return effective
+    v3 = json.loads(V3_CONTRACT.read_text(encoding="utf-8"))
+    superseded = set(v3["supersedes_roles"])
+    return [
+        role for role in effective if role["id"] not in superseded
+    ] + v3["roles"]
 
 
 class HookOwnerSandbox(unittest.TestCase):
@@ -400,7 +410,7 @@ class TestHookOwnerInstall(HookOwnerSandbox):
             pointer["hook_owner_contract_sha256"],
             _sha256(self.runtime / "contracts" / "awa-contract.v1.json"))
 
-    def test_clean_direct_install_creates_exact_seven_v2_roles(self):
+    def test_clean_direct_install_creates_exact_seven_composed_roles(self):
         first = self.run_install()
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         document = json.loads(self.hooks.read_text(encoding="utf-8"))

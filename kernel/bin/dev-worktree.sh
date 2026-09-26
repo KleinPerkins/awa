@@ -1383,7 +1383,8 @@ clean_worktree() {
 
 hook_owner_role_matrix() {
   python3 - "$AWA_HOME/contracts/awa-contract.v1.json" \
-    "$AWA_HOME/contracts/awa-hook-owner.v2.json" <<'PY'
+    "$AWA_HOME/contracts/awa-hook-owner.v2.json" \
+    "$AWA_HOME/contracts/awa-hook-owner.v3.json" <<'PY'
 import json
 import os
 import stat
@@ -1421,6 +1422,21 @@ V2_LAYOUT = (
         "host-policy-delegator",
         {"type": "command", "timeout": 5, "failClosed": False},
         "M2.4",
+    ),
+)
+V3_LAYOUT = (
+    (
+        "finish.prompt-recall-with-entry",
+        "before" + "SubmitPrompt",
+        "kernel/hooks/before-submit-prompt-with-entry.sh",
+        "host-policy-delegator",
+        {
+            "type": "command",
+            "matcher": "UserPromptSubmit",
+            "timeout": 20,
+            "failClosed": False,
+        },
+        None,
     ),
 )
 
@@ -1529,6 +1545,7 @@ def roles_match(roles, layout):
 
 v1_path = Path(sys.argv[1])
 v2_path = Path(sys.argv[2])
+v3_path = Path(sys.argv[3])
 root = v1_path.parent.parent.resolve()
 v1_doc = load(v1_path, "hook-owner v1")
 v1 = v1_doc.get("hook_ownership")
@@ -1580,8 +1597,40 @@ if v2_path.is_file():
     roles.extend(v2["roles"])
     preferred = v2["schema"]
 
+if v3_path.is_file():
+    v3 = load(v3_path, "hook-owner v3")
+    if (
+        preferred != "awa-hook-owner/v2"
+        or v3.get("schema") != "awa-hook-owner/v3"
+        or v3.get("version") != 3
+        or v3.get("successor_of") != "awa-hook-owner/v2"
+        or v3.get("v2_contract") != "contracts/awa-hook-owner.v2.json"
+        or v3.get("modes") != ["direct", "external"]
+        or v3.get("default_mode") != "direct"
+        or v3.get("selection_env") != "AWA_HOOK_OWNER"
+        or v3.get("selection_schema") != "awa-hook-owner-selection/v1"
+        or v3.get("external_real_hook_file_writes") is not False
+        or v3.get("supersedes_roles") != ["finish.prompt-recall"]
+        or not isinstance(v3.get("composition_rule"), str)
+        or not v3["composition_rule"]
+        or not isinstance(v3.get("external_rule"), str)
+        or not v3["external_rule"]
+        or not roles_match(v3.get("roles"), V3_LAYOUT)
+        or not all(
+            valid_role(role, allow_dormant=False)
+            for role in v3.get("roles", [])
+        )
+    ):
+        fail("hook-owner v3")
+    superseded = set(v3["supersedes_roles"])
+    roles = [role for role in roles if role["id"] not in superseded]
+    roles.extend(v3["roles"])
+    preferred = v3["schema"]
+
 print("== hook-owner role matrix ==")
 print(f"preferred: {preferred}")
+if v2_path.is_file():
+    print("compatibility: awa-hook-owner/v2")
 print("compatibility: awa-hook-owner/v1")
 for role in roles:
     entry = role["entry"]
