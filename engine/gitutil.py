@@ -8,20 +8,31 @@ no-lost-work guarantee).
 
 from __future__ import annotations
 
+import concurrent.futures
 import subprocess
 from dataclasses import dataclass
+from typing import Mapping
 
 
 class GitError(RuntimeError):
     pass
 
 
-def git(cwd: str, *args: str, timeout: float = 15.0, check: bool = False) -> tuple[int, str, str]:
+def git(
+    cwd: str,
+    *args: str,
+    timeout: float = 15.0,
+    check: bool = False,
+    env: Mapping[str, str] | None = None,
+) -> tuple[int, str, str]:
     """Run `git -C cwd <args>`. Returns (rc, stdout, stderr). rc 124 = timeout."""
     try:
         proc = subprocess.run(
             ["git", "-C", cwd, *args],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         if check:
@@ -119,12 +130,63 @@ class RepoContext:
         return self.toplevel is not None
 
 
-def resolve(cwd: str, timeout: float = 15.0) -> RepoContext:
+def resolve(
+    cwd: str,
+    timeout: float = 15.0,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> RepoContext:
+    def identity_probe() -> tuple[int, str, str]:
+        return git(
+            cwd,
+            "rev-parse",
+            "--show-toplevel",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+            timeout=timeout,
+            env=env,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        identity_future = executor.submit(identity_probe)
+        branch_future = executor.submit(
+            git,
+            cwd,
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+            timeout=timeout,
+            env=env,
+        )
+        head_future = executor.submit(
+            git,
+            cwd,
+            "rev-parse",
+            "HEAD",
+            timeout=timeout,
+            env=env,
+        )
+        identity_rc, identity_out, _ = identity_future.result()
+        branch_rc, branch_out, _ = branch_future.result()
+        head_rc, head_out, _ = head_future.result()
+    identity_lines = identity_out.splitlines() if identity_rc == 0 else []
+    complete = len(identity_lines) == 3
+    branch = branch_out.strip() if branch_rc == 0 else None
+    head = head_out.strip() if head_rc == 0 else None
     return RepoContext(
         cwd=cwd,
-        toplevel=toplevel(cwd, timeout),
-        git_dir=git_dir(cwd, timeout),
-        common_dir=common_dir(cwd, timeout),
-        branch=current_branch(cwd, timeout),
-        head=head_sha(cwd, timeout),
+        toplevel=identity_lines[0] if complete else None,
+        git_dir=identity_lines[1] if complete else None,
+        common_dir=identity_lines[2] if complete else None,
+        branch=(
+            branch
+            if branch and branch not in {"HEAD", "(detached)"}
+            else None
+        ),
+        head=(
+            head
+            if head and head not in {"(initial)", "(unknown)"}
+            else None
+        ),
     )

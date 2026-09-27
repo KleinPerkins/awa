@@ -7,6 +7,7 @@ import os
 import stat
 import subprocess
 import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -81,6 +82,8 @@ class TestNativeEntry(EngineTestCase):
             "hook_event_name": "sessionStart",
             "workspace_roots": [str(root)],
             "session_id": session,
+            "conversation_id": session,
+            "generation_id": f"generation-{session}",
         }
 
     @staticmethod
@@ -111,7 +114,7 @@ class TestNativeEntry(EngineTestCase):
         bound = awa_roots.bind_current_session(
             str(root),
             session_id=session,
-            conversation_id=f"conversation-{session}",
+            conversation_id=session,
             branch=branch,
             common_dir=common,
             source="sessionStart",
@@ -241,7 +244,7 @@ class TestNativeEntry(EngineTestCase):
             any(event["kind"] == "native_entry_repair" for event in events)
         )
 
-    def test_concurrent_sessions_have_one_adoption_and_distinct_receipts(self):
+    def test_concurrent_sessions_never_amplify_adoption(self):
         root = self._worktree()
         barrier = threading.Barrier(2)
         results = []
@@ -254,6 +257,7 @@ class TestNativeEntry(EngineTestCase):
                     native_entry.register_session_start(
                         self._payload(root, session),
                         lock_timeout=10.0,
+                        deadline=time.monotonic() + 15.0,
                     )
                 )
             except BaseException as exc:  # pragma: no cover - assertion reports detail
@@ -266,14 +270,16 @@ class TestNativeEntry(EngineTestCase):
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join(10)
+            thread.join(20)
         self.assertFalse(errors)
-        self.assertEqual(sorted(result.action for result in results), ["adopted", "attested"])
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertTrue(any(result.result == "success" for result in results))
         self.assertEqual(len(self._active_rows(root)), 1)
-        self.assertEqual(
-            {receipt["session_id"] for receipt in native_entry.read_receipts()},
-            {"session-0", "session-1"},
-        )
+        lease = lease_mod.read_lease(str(root))
+        with state_mod.State() as state:
+            events = state.events(lease_id=lease["lease_id"], limit=20)
+        self.assertEqual(sum(event["kind"] == "adopt" for event in events), 1)
+        self.assertLessEqual(len(native_entry.read_receipts()), 2)
 
     def test_multiple_roots_and_sessions_never_overwrite_receipts(self):
         first = self._worktree("feat/first")
@@ -493,7 +499,7 @@ class TestNativeEntry(EngineTestCase):
                 drifted = replace(observed, **{field: value})
                 with mock.patch.object(
                     native_entry,
-                    "_observe_identity",
+                    "_validated_registration_identity",
                     side_effect=[observed, drifted],
                 ):
                     result = native_entry.register_session_start(
@@ -551,23 +557,14 @@ class TestNativeEntry(EngineTestCase):
 
     def test_receipt_precedes_lifecycle_commit_and_crash_stays_explicit(self):
         root = self._worktree("feat/receipt-order")
-        real_write = native_entry._write_receipt
-        calls = 0
 
         class Crash(BaseException):
             pass
 
-        def crash_after_pending(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                return real_write(*args, **kwargs)
-            raise Crash()
-
         with mock.patch.object(
             native_entry,
-            "_write_receipt",
-            side_effect=crash_after_pending,
+            "_publish_success",
+            side_effect=Crash(),
         ):
             result = native_entry.register_session_start(
                 self._payload(root, "receipt-order")
@@ -576,14 +573,14 @@ class TestNativeEntry(EngineTestCase):
         self.assertIsNotNone(lease_mod.read_lease(str(root)))
         self.assertEqual(len(self._active_rows(root)), 1)
         receipt = native_entry.read_receipts()[0]
-        self.assertEqual(receipt["result"], "failed")
+        self.assertEqual(receipt["result"], "pending")
         self.assertEqual(receipt["reason"], "registration_pending")
         self.assertIsNone(receipt["lease_id"])
 
         retried = native_entry.register_session_start(
             self._payload(root, "receipt-order")
         )
-        self.assertEqual((retried.result, retried.action), ("success", "attested"))
+        self.assertEqual((retried.result, retried.action), ("success", "recovered"))
         final = native_entry.read_receipts()[0]
         self.assertEqual(final["result"], "success")
         self.assertGreater(final["generation"], receipt["generation"])
@@ -591,9 +588,7 @@ class TestNativeEntry(EngineTestCase):
     def test_receipt_evidence_requires_current_exact_root_session_and_git_identity(self):
         root = self._worktree("feat/evidence")
         native_entry.register_session_start(self._payload(root, "evidence"))
-        self.assertEqual(native_entry.evidence_state(), "stale")
-        self._bind_session(root, "evidence")
-        self.assertEqual(native_entry.evidence_state(), "success")
+        self.assertEqual(native_entry.evidence_state(), "eager")
         git(str(root), "checkout", "-q", "-b", "feat/evidence-drift")
         self.assertEqual(native_entry.evidence_state(), "stale")
 
@@ -611,6 +606,7 @@ class TestNativeEntry(EngineTestCase):
         for index in range(native_entry._MAX_RECEIPTS):
             historical = dict(current)
             historical["session_id"] = f"historical-{index}"
+            historical["conversation_id"] = f"historical-{index}"
             historical["generation"] = 1
             path = native_entry.receipt_path(
                 str(root),
@@ -628,7 +624,7 @@ class TestNativeEntry(EngineTestCase):
             "current-overflow",
             {receipt["session_id"] for receipt in receipts},
         )
-        self.assertEqual(native_entry.evidence_state(), "success")
+        self.assertEqual(native_entry.evidence_state(), "eager")
 
     def test_receipt_or_lease_never_bypasses_independent_cleanup_gates(self):
         root = self._worktree("feat/cleanup")

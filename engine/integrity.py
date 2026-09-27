@@ -1375,6 +1375,12 @@ def _check_lifecycle(facts: Facts) -> tuple[str, str]:
 
 
 def _check_entry(facts: Facts) -> tuple[str, str]:
+    if facts.native_entry_state == "eager":
+        return "green", "eager session-start entry evidence validated"
+    if facts.native_entry_state == "recovered":
+        return "green", "first-prompt recovery evidence validated"
+    if facts.native_entry_state == "legacy":
+        return "green", "legacy v1 entry evidence validated; source unknown"
     if facts.native_entry_state == "success":
         return "green", "native entry evidence validated"
     if facts.handoff_state == "closed":
@@ -1385,6 +1391,8 @@ def _check_entry(facts: Facts) -> tuple[str, str]:
         return "degraded", "native entry evidence mismatched"
     if facts.native_entry_state == "failed":
         return "degraded", "native entry registration failed"
+    if facts.native_entry_state == "pending":
+        return "degraded", "native entry registration pending"
     if facts.native_entry_state == "stale":
         return "degraded", "native entry evidence stale"
     if facts.handoff_state == "pending":
@@ -1840,6 +1848,21 @@ _V2_HOOK_LAYOUT = (
         "M2.4",
     ),
 )
+_V3_HOOK_LAYOUT = (
+    (
+        "finish.prompt-recall-with-entry",
+        "beforeSubmitPrompt",
+        "kernel/hooks/before-submit-prompt-with-entry.sh",
+        "host-policy-delegator",
+        {
+            "type": "command",
+            "matcher": "UserPromptSubmit",
+            "timeout": 20,
+            "failClosed": False,
+        },
+        None,
+    ),
+)
 
 
 def _roles_match_layout(roles: object, layout: tuple) -> bool:
@@ -1960,6 +1983,38 @@ def _valid_v2_hook_contract(source: Path, v2: object) -> bool:
     )
 
 
+def _valid_v3_hook_contract(source: Path, v3: object) -> bool:
+    if not isinstance(v3, dict):
+        return False
+    roles = v3.get("roles")
+    return (
+        v3.get("schema") == "awa-hook-owner/v3"
+        and v3.get("version") == 3
+        and v3.get("successor_of") == "awa-hook-owner/v2"
+        and v3.get("v2_contract") == "contracts/awa-hook-owner.v2.json"
+        and v3.get("modes") == ["direct", "external"]
+        and v3.get("default_mode") == "direct"
+        and v3.get("selection_env") == "AWA_HOOK_OWNER"
+        and v3.get("selection_schema") == "awa-hook-owner-selection/v1"
+        and v3.get("external_real_hook_file_writes") is False
+        and v3.get("supersedes_roles") == ["finish.prompt-recall"]
+        and isinstance(v3.get("composition_rule"), str)
+        and bool(v3["composition_rule"])
+        and isinstance(v3.get("external_rule"), str)
+        and bool(v3["external_rule"])
+        and _roles_match_layout(roles, _V3_HOOK_LAYOUT)
+        and all(
+            _valid_hook_role(source, role, allow_dormant=False)
+            for role in roles or []
+        )
+        and all(
+            role["external_command_path_class"] == "host-policy-delegator"
+            and role["entry"].get("failClosed") is False
+            for role in roles or []
+        )
+    )
+
+
 def _effective_hook_roles(source: Path) -> list[dict] | None:
     v1_path = source / "contracts" / "awa-contract.v1.json"
     try:
@@ -1990,7 +2045,10 @@ def _effective_hook_roles(source: Path) -> list[dict] | None:
 
     v1_roles = v1["roles"]
     v2_path = source / "contracts" / "awa-hook-owner.v2.json"
+    v3_path = source / "contracts" / "awa-hook-owner.v3.json"
     if not v2_path.exists():
+        if v3_path.exists():
+            return None
         return list(v1_roles)
     try:
         v2 = json.loads(v2_path.read_text(encoding="utf-8"))
@@ -2004,9 +2062,26 @@ def _effective_hook_roles(source: Path) -> list[dict] | None:
     if not _valid_v2_hook_contract(source, v2):
         return None
     superseded = set(v2["supersedes_roles"])
-    return [
+    effective = [
         role for role in v1_roles if role["id"] not in superseded
     ] + list(v2["roles"])
+    if not v3_path.exists():
+        return effective
+    try:
+        v3 = json.loads(v3_path.read_text(encoding="utf-8"))
+    except (
+        OSError,
+        TypeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ):
+        return None
+    if not _valid_v3_hook_contract(source, v3):
+        return None
+    superseded = set(v3["supersedes_roles"])
+    return [
+        role for role in effective if role["id"] not in superseded
+    ] + list(v3["roles"])
 
 
 def _bounded_json_object(path: Path) -> dict | None:
@@ -2503,10 +2578,14 @@ def _native_entry_state() -> str:
         in {
             "absent",
             "success",
+            "eager",
+            "recovered",
+            "legacy",
             "stale",
             "mismatched",
             "conflict",
             "failed",
+            "pending",
             "unknown",
         }
         else "unknown"

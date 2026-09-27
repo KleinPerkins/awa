@@ -70,9 +70,10 @@ binding. Only Commit's contained temporary-index operation may substitute its va
 2. Preview resolves exactly one local linked-worktree root, calls the Phase-1 inventory/challenge,
    renders immutable warning copy plus Phase-1 escaped rows, and stores `awa_finish_dialogue/v1`
    state keyed by stable conversation id.
-3. `sessionStart` writes an atomic root-bound current identity with the real payload
-   session/conversation plus exact branch/common-dir. The guard reuses that identity rather than
-   minting an `unattributed` member.
+3. `sessionStart` eagerly writes an atomic root-bound current identity; the
+   first `beforeSubmitPrompt` can bind the same exact payload conversation when
+   eager ordering or workspace movement missed it. The guard reuses that
+   identity rather than minting an `unattributed` member.
 4. The user-level `beforeSubmitPrompt` command hook returns `{continue:false,user_message:...}` only
    after complete preview/index publication. Its private invocation ticket binds the post-output
    publication transition to the exact emitted conversation/session/root/generation/nonce/warning
@@ -178,6 +179,8 @@ stop; the Cursor chat remains open because no chat-close API exists.
   - `kernel/bin/dev-worktree.sh` — the `git worktree` adapter/CLI (frozen verbs/flags).
   - `kernel/hooks/worktree-guard.sh` — the `beforeShellExecution` gate + `afterFileEdit` detector.
   - `kernel/hooks/worktree-session.sh` — the `sessionStart` context provider.
+  - `kernel/hooks/before-submit-prompt-with-entry.sh` — the fail-open
+    first-prompt recovery composite that relays the unchanged finish hook.
   - `kernel/lib/awa_policy.py` — the single kernel-layer generic policy resolver/classifier.
   - `kernel/policy/default-worktree-policy.yml` — the **generic** default overlay (zero literals).
   - `kernel/checks/awa-contract-freeze.sh` — the role-resolved behavior-freeze checker.
@@ -201,7 +204,8 @@ stop; the Cursor chat remains open because no chat-close API exists.
 | `state` | SQLite (WAL) store: leases, append-only **redacted** audit events, detections, quarantine refs, recovery artifacts (+ Phase-3 `recovery_source_deleted` age clock, `recovery_tombstones`, maintenance meta) |
 | `lease` | `.awa/lease.json` read/write + attest; native-window adopt (no push) |
 | `lifecycle` | Adopt → attest → apply-back **preview** (SHA-bound, recovery-before-mutation) → retire |
-| `native_entry` | Fail-open `sessionStart` registrar: exact policy/Git/clean-state revalidation under the lifecycle lock, adopt-or-attest, private per-root/session `awa-native-entry/v1` evidence, and strict read-only evidence/discovery readers; never cleanup authority |
+| `native_entry` | Event-aware fail-open registrar for eager `sessionStart` and first-prompt `beforeSubmitPrompt`: payload-only conversation identity, exact current-session/policy/Git/content/lifecycle revalidation, monotonic private per-root/session `awa-native-entry/v2` evidence, and strict v1/v2 read-only evidence/discovery readers; never `workspaceOpen` or cleanup authority |
+| `native_entry_prompt_adapter` | Quiet 2-second total-deadline process supervisor for prompt recovery; bounded stdin only, closed FDs, isolated process group, suppressed output, and terminate/kill cleanup before the unchanged finish hook runs |
 | `recovery` | Patch round-trip + bundle (secret-skip S1, symlink-escape drop S2) + whole-worktree archive + restore + list; emits the ONE unified `awa_recovery_artifact/v1` manifest and runs prune-on-creation |
 | `retention` | The canonical recovery-retention evaluator + crash-resumable, tombstoned deletion transaction (7-day TTL, 1-GiB/24h pressure, source-deleted age clock) under the shared state-root lock; the ONE implementation every trigger calls |
 | `daemon` | Single-instance (flock'd pidfile) bounded maintenance loop + quarantine-ref cleanup/retention + throttled opportunistic recovery-retention pass |
@@ -499,19 +503,25 @@ dir, and writes a self-describing release pointer. It is idempotent and backup-b
 `--repair`, `--doctor`, `--check`, and `--uninstall [--keep-state]` verbs. No sibling-repo
 dependency: a fresh clone installs on its own.
 
-Hook-file ownership is the additive `awa-hook-owner/v1` block in the canonical behavior contract.
+Hook-file ownership starts with the additive `awa-hook-owner/v1` block in the
+canonical behavior contract. Direct product projection prefers
+`awa-hook-owner/v3`, composing the frozen v1 roles, v2 guard/observer/handoff
+roles, and the v3 prompt-recovery composite after explicit role supersession;
+v1/v2 remain validated compatibility inputs.
 The strict machine-local selection at `$XDG_CONFIG_HOME/awa/hook-owner.json` resolves from an
 explicit `AWA_HOOK_OWNER=direct|external`, then persisted selection, then a compatible release
 pointer, with `direct` only as the fresh/legacy default. Invalid or ambiguous state refuses before
 hook or selection mutation; only a valid explicit value repairs malformed state.
 
-In `direct`, AWA reconciles the contract's exact five roles into the selected user hook file. In
+In `direct`, AWA reconciles the exact seven-role effective composition into the selected user hook file. In
 `external`, the host owns the entire file transaction and AWA performs zero selected-hook-file
 reads or writes on install, repair, doctor, and uninstall. A host-policy delegator may inject only
-policy/root data before executing the installed guard/session role; recovery maintenance and
-finish recall still point at installed AWA. The role ID plus event—not command spelling—is identity.
-The four runtime hook scripts and finish executor remain unchanged, so this owner selection does not
-move the guard, recovery, heartbeat, or literal-`Close` authority off the kernel-first path.
+policy/root data before executing an installed product role. The v3
+`beforeSubmitPrompt` role runs bounded native-entry recovery and then delegates
+to the byte-identical finish hook; the finish consumer remains unchanged. The
+role ID plus event—not command spelling—is identity, and this composition does
+not move guard, recovery, heartbeat, cleanup, or literal-`Close` authority off
+the kernel-first path.
 
 The release pointer advertises the selected mode, `awa-hook-owner/v1`, and the installed canonical
 contract SHA-256. Doctor requires selection/pointer/runtime/contract agreement. A direct projection

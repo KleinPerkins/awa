@@ -129,21 +129,40 @@ def now_iso() -> str:
 
 
 class State:
-    def __init__(self, db_path: Path | None = None, *, assert_local: bool = True):
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        *,
+        assert_local: bool = True,
+        timeout_seconds: float = 30.0,
+    ):
         self.db_path = Path(db_path) if db_path else paths.state_db_path()
+        if (
+            not isinstance(timeout_seconds, (int, float))
+            or isinstance(timeout_seconds, bool)
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("SQLite timeout must be positive")
+        timeout_seconds = float(timeout_seconds)
         paths.ensure_dir(self.db_path.parent)
         if assert_local:
             paths.assert_local_disk(self.db_path.parent)
         # Restrictive umask so the db + sidecars are created 600, not world-readable.
         old_umask = os.umask(0o077)
         try:
-            self.conn = sqlite3.connect(str(self.db_path), timeout=30.0, isolation_level=None)
+            self.conn = sqlite3.connect(
+                str(self.db_path),
+                timeout=timeout_seconds,
+                isolation_level=None,
+            )
         finally:
             os.umask(old_umask)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.conn.execute("PRAGMA busy_timeout=30000")
+        self.conn.execute(
+            f"PRAGMA busy_timeout={max(1, int(timeout_seconds * 1000))}"
+        )
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(_DDL)
         self._migrate()

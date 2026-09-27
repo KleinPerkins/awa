@@ -1,0 +1,33 @@
+{
+  "schema": "awa-hook-owner/v3",
+  "version": 3,
+  "successor_of": "awa-hook-owner/v2",
+  "v2_contract": "contracts/awa-hook-owner.v2.json",
+  "modes": [
+    "direct",
+    "external"
+  ],
+  "default_mode": "direct",
+  "selection_env": "AWA_HOOK_OWNER",
+  "selection_schema": "awa-hook-owner-selection/v1",
+  "external_real_hook_file_writes": false,
+  "supersedes_roles": [
+    "finish.prompt-recall"
+  ],
+  "composition_rule": "The effective direct projection is the fully composed awa-hook-owner/v1 plus awa-hook-owner/v2 role set with every supersedes_roles id removed, plus the role declared here. The composite is the sole direct beforeSubmitPrompt UserPromptSubmit row.",
+  "external_rule": "The external host owns the complete selected hook file. AWA may validate this product contract but must not read, stat, create, back up, chmod, rewrite, remove, or render rows for the selected external hook file.",
+  "roles": [
+    {
+      "id": "finish.prompt-recall-with-entry",
+      "event": "beforeSubmitPrompt",
+      "direct_command_role": "kernel/hooks/before-submit-prompt-with-entry.sh",
+      "external_command_path_class": "host-policy-delegator",
+      "entry": {
+        "type": "command",
+        "matcher": "UserPromptSubmit",
+        "timeout": 20,
+        "failClosed": false
+      }
+    }
+  ]
+}

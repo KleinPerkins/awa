@@ -348,7 +348,8 @@ def _common_dir_lock(common_dir: str, timeout: float = 5.0):
 
 
 def _current_session_record(root_path: str, *, session_id: str, conversation_id: str,
-                            branch: str, common_dir: str) -> dict:
+                            branch: str, common_dir: str,
+                            boot: str | None = None) -> dict:
     values = (session_id, branch, common_dir)
     if not all(isinstance(value, str) and value.strip() for value in values):
         raise ValueError("session, branch, and common directory required")
@@ -362,7 +363,7 @@ def _current_session_record(root_path: str, *, session_id: str, conversation_id:
         "session_key": session_key(session_id),
         "branch": branch.strip(),
         "common_dir": os.path.abspath(common_dir),
-        "boot_id": boot_id(),
+        "boot_id": boot if isinstance(boot, str) and boot else boot_id(),
         "updated_at_epoch": _now_epoch(),
     }
 
@@ -428,24 +429,76 @@ def read_current_session(root_path: str) -> tuple:
     return _read_current_session(root_path)
 
 
+def _bind_current_session_locked(root_path: str, *, incoming: dict, source: str,
+                                 target_rechecked: bool = False,
+                                 deadline: float | None = None,
+                                 stale_replacement: dict | None = None) -> dict:
+    if not target_rechecked:
+        target_ok, target_reason = _heartbeat_target_recheck(
+            root_path, branch=incoming["branch"],
+            common_dir=incoming["common_dir"], require_linked=True,
+            deadline=deadline)
+        if not target_ok:
+            return {"ok": False, "reason": "current_session_target_" + target_reason}
+    prior, status = _read_current_session(root_path, allow_partial=True)
+    if status == "malformed":
+        return {"ok": False, "reason": "current_session_malformed"}
+    replaced_prior_boot = status in {"prior_boot", "partial_prior_boot"}
+    if replaced_prior_boot:
+        # A structurally valid projection from a prior boot has no current-session
+        # authority. The live linked-target recheck above makes replacing it safe.
+        prior = None
+    replaced_stale_session = False
+    if prior is not None:
+        same_session = prior.get("session_id") == incoming["session_id"]
+        same_target = (
+            prior.get("root") == incoming["root"]
+            and (same_session or prior.get("branch") == incoming["branch"])
+            and os.path.abspath(prior.get("common_dir", ""))
+            == incoming["common_dir"])
+        if not same_target:
+            return {"ok": False, "reason": "current_session_target_mismatch"}
+        if source == "beforeSubmitPrompt" and not same_session:
+            if stale_replacement is None or prior != stale_replacement:
+                return {"ok": False, "reason": "current_session_session_mismatch"}
+            replaced_stale_session = True
+        if same_session:
+            prior_conversation = prior.get("conversation_id", "")
+            incoming_conversation = incoming["conversation_id"]
+            if (prior_conversation and incoming_conversation
+                    and prior_conversation != incoming_conversation):
+                return {"ok": False, "reason": "current_session_conversation_mismatch"}
+            incoming["conversation_id"] = incoming_conversation or prior_conversation
+    _write_current_session_locked(root_path, incoming)
+    return {
+        "ok": True,
+        "reason": (
+            "replaced_prior_boot"
+            if replaced_prior_boot
+            else (
+                "replaced_stale_session"
+                if replaced_stale_session
+                else (
+                    "bound"
+                    if status == "absent"
+                    else (
+                        "conversation_attached"
+                        if status == "partial" and bool(incoming["conversation_id"])
+                        else "matched"
+                    )
+                )
+            )
+        ),
+        "created": status == "absent",
+        "replaced_prior_boot": replaced_prior_boot,
+        "current_session": incoming,
+    }
+
+
 def bind_current_session(root_path: str, *, session_id: str, conversation_id: str,
                          branch: str, common_dir: str, source: str,
                          lock_timeout: float = 5.0) -> dict:
-    """CAS-bind one root/session, attaching the first real prompt conversation when needed.
-
-    sessionStart may replace a previous session but never clears an already attached conversation
-    for the same session. beforeSubmitPrompt may create an absent binding or attach only to its
-    exact session; it never adopts another session or conversation.
-
-    Identity-mutation guard (session-aware for ``branch``, unconditional for ``root``/
-    ``common_dir``): mirrors ``heartbeat``'s guard above for the same reason -- ``branch``
-    legitimately, routinely changes over a worktree's lifetime via an ordinary `git checkout`/
-    `git switch` (e.g. sequential PRs in one long-lived agent session), so the SAME session's own
-    prior branch claim evolving (now live-reverified by the target-recheck below) must not veto
-    its own freshly-reverified value. A DIFFERENT session's disagreement about the branch still
-    refuses -- for ``beforeSubmitPrompt`` explicitly (``current_session_session_mismatch``, right
-    below) and for any source via the unchanged ``root``/``common_dir`` half of ``same_target``.
-    """
+    """CAS-bind one exact root/session/conversation after live target recheck."""
     if source not in {"sessionStart", "beforeSubmitPrompt"}:
         raise ValueError("unsupported current session bind source")
     incoming = _current_session_record(
@@ -455,48 +508,190 @@ def bind_current_session(root_path: str, *, session_id: str, conversation_id: st
         return {"ok": False, "reason": "conversation_missing"}
     try:
         with _common_dir_lock(common_dir, timeout=lock_timeout):
-            target_ok, target_reason = _heartbeat_target_recheck(
-                root_path, branch=branch, common_dir=common_dir, require_linked=True)
-            if not target_ok:
-                return {"ok": False, "reason": "current_session_target_" + target_reason}
-            prior, status = _read_current_session(root_path, allow_partial=True)
-            if status == "malformed":
-                return {"ok": False, "reason": "current_session_malformed"}
-            replaced_prior_boot = status in {"prior_boot", "partial_prior_boot"}
-            if replaced_prior_boot:
-                # A structurally valid projection from a prior boot has no current-session
-                # authority. The live linked-target recheck above makes replacing it safe.
-                prior = None
-            if prior is not None:
-                same_session = prior.get("session_id") == incoming["session_id"]
-                same_target = (
-                    prior.get("root") == incoming["root"]
-                    and (same_session or prior.get("branch") == incoming["branch"])
-                    and os.path.abspath(prior.get("common_dir", ""))
-                    == incoming["common_dir"])
-                if not same_target:
-                    return {"ok": False, "reason": "current_session_target_mismatch"}
-                if source == "beforeSubmitPrompt" and not same_session:
-                    return {"ok": False, "reason": "current_session_session_mismatch"}
-                if same_session:
-                    prior_conversation = prior.get("conversation_id", "")
-                    incoming_conversation = incoming["conversation_id"]
-                    if (prior_conversation and incoming_conversation
-                            and prior_conversation != incoming_conversation):
-                        return {"ok": False, "reason": "current_session_conversation_mismatch"}
-                    incoming["conversation_id"] = (
-                        incoming_conversation or prior_conversation)
-            _write_current_session_locked(root_path, incoming)
-            return {
-                "ok": True,
-                "reason": "replaced_prior_boot" if replaced_prior_boot else (
-                    "bound" if status == "absent" else (
-                    "conversation_attached" if status == "partial"
-                    and bool(incoming["conversation_id"]) else "matched")),
-                "created": status == "absent",
-                "replaced_prior_boot": replaced_prior_boot,
-                "current_session": incoming,
-            }
+            return _bind_current_session_locked(
+                root_path, incoming=incoming, source=source)
+    except TimeoutError:
+        return {"ok": False, "reason": "current_session_lock_busy"}
+
+
+def _member_liveness(
+    member: dict,
+    *,
+    current_boot: str,
+    now_epoch: int,
+    ttl_seconds: int,
+) -> str:
+    """Return live|stale|unknown using canonical active-root semantics."""
+    if member.get("boot_id") != current_boot:
+        return "stale"
+    pid = member.get("pid")
+    if isinstance(pid, int) and pid > 0:
+        return "live" if _pid_alive(pid) else "stale"
+    last = _strict_positive_epoch(member.get("last_heartbeat_epoch"))
+    if last is None:
+        return "unknown"
+    age = now_epoch - last
+    if age < 0:
+        return "unknown"
+    return "live" if age < ttl_seconds else "stale"
+
+
+def _stale_prompt_replacement_locked(
+    root_path: str,
+    *,
+    incoming: dict,
+    prior: dict,
+    current_boot: str,
+) -> tuple[dict | None, str]:
+    """Prove one same-boot prior binding stale before an incoming heartbeat."""
+    if (
+        prior.get("boot_id") != current_boot
+        or prior.get("root") != incoming["root"]
+        or prior.get("branch") != incoming["branch"]
+        or os.path.abspath(str(prior.get("common_dir") or ""))
+        != incoming["common_dir"]
+    ):
+        return None, "current_session_target_mismatch"
+    now_epoch = _now_epoch()
+    updated_at = _strict_positive_epoch(prior.get("updated_at_epoch"))
+    if updated_at is None or now_epoch < updated_at:
+        return None, "current_session_stale_evidence_unknown"
+    ttl_seconds = _ttl_seconds()
+    if now_epoch - updated_at < ttl_seconds:
+        return None, "current_session_session_mismatch"
+
+    safe, reason = _prompt_active_members_safe_locked(
+        root_path,
+        incoming=incoming,
+        current_boot=current_boot,
+        now_epoch=now_epoch,
+        ttl_seconds=ttl_seconds,
+    )
+    if not safe:
+        return None, reason
+    return dict(prior), "current_session_stale_replacement"
+
+
+def _prompt_active_members_safe_locked(
+    root_path: str,
+    *,
+    incoming: dict,
+    current_boot: str,
+    now_epoch: int | None = None,
+    ttl_seconds: int | None = None,
+) -> tuple[bool, str]:
+    """Refuse prompt replacement when any different live member remains."""
+    observed_now = _now_epoch() if now_epoch is None else now_epoch
+    observed_ttl = _ttl_seconds() if ttl_seconds is None else ttl_seconds
+    record, corrupt = read_record(root_path)
+    if corrupt:
+        return False, "current_session_stale_evidence_unknown"
+    if record is None:
+        return True, "current_session_stale_replacement"
+    valid, _reason, sessions = _validate_record_for_heartbeat_merge(
+        root_path,
+        record,
+    )
+    if not valid:
+        return False, "current_session_stale_evidence_unknown"
+    current_boot_sessions = {
+        key: member
+        for key, member in sessions.items()
+        if member.get("boot_id") == current_boot
+    }
+    if record.get("boot_id") != current_boot and current_boot_sessions:
+        return False, "current_session_stale_evidence_unknown"
+    record_common = record.get("git_common_dir")
+    if (
+        isinstance(record_common, str)
+        and record_common
+        and os.path.abspath(record_common) != incoming["common_dir"]
+    ):
+        return False, "current_session_stale_evidence_unknown"
+
+    incoming_key = session_key(incoming["session_id"])
+    for key, member in sessions.items():
+        liveness = _member_liveness(
+            member,
+            current_boot=current_boot,
+            now_epoch=observed_now,
+            ttl_seconds=observed_ttl,
+        )
+        if liveness == "unknown":
+            return False, "current_session_stale_evidence_unknown"
+        if liveness != "live":
+            continue
+        if (
+            key != incoming_key
+            or member.get("branch") != incoming["branch"]
+            or os.path.abspath(str(member.get("git_common_dir") or ""))
+            != incoming["common_dir"]
+        ):
+            return False, "current_session_session_mismatch"
+    return True, "current_session_stale_replacement"
+
+
+def heartbeat_and_bind_current_session(
+        root_path: str, *, session_id: str, conversation_id: str,
+        branch: str, common_dir: str, source: str,
+        lock_timeout: float = 5.0,
+        deadline: float | None = None) -> dict:
+    """Fused exact entry bind under one common-dir lock and one target recheck."""
+    if source not in {"sessionStart", "beforeSubmitPrompt"}:
+        raise ValueError("unsupported current session bind source")
+    current_boot = boot_id()
+    incoming = _current_session_record(
+        root_path, session_id=session_id, conversation_id=conversation_id,
+        branch=branch, common_dir=common_dir, boot=current_boot)
+    if source == "beforeSubmitPrompt" and not incoming["conversation_id"]:
+        return {"ok": False, "reason": "conversation_missing"}
+    try:
+        with _common_dir_lock(common_dir, timeout=lock_timeout):
+            stale_replacement = None
+            if source == "beforeSubmitPrompt":
+                prior, status = _read_current_session(
+                    root_path,
+                    allow_partial=True,
+                    expected_boot_id=current_boot,
+                )
+                if status == "malformed":
+                    return {"ok": False, "reason": "current_session_malformed"}
+                if (
+                    prior is not None
+                    and prior.get("session_id") != incoming["session_id"]
+                ):
+                    if status == "ok":
+                        stale_replacement, reason = _stale_prompt_replacement_locked(
+                            root_path,
+                            incoming=incoming,
+                            prior=prior,
+                            current_boot=current_boot,
+                        )
+                        if stale_replacement is None:
+                            return {"ok": False, "reason": reason}
+                    elif status in {"prior_boot", "partial_prior_boot"}:
+                        safe, reason = _prompt_active_members_safe_locked(
+                            root_path,
+                            incoming=incoming,
+                            current_boot=current_boot,
+                        )
+                        if not safe:
+                            return {"ok": False, "reason": reason}
+                    else:
+                        return {
+                            "ok": False,
+                            "reason": "current_session_stale_evidence_unknown",
+                        }
+            heartbeat_result = _heartbeat_locked(
+                root_path, branch=branch, common_dir=common_dir,
+                session_id=session_id, pid=None, boot=current_boot,
+                deadline=deadline)
+            if not heartbeat_result.get("ok", True):
+                return heartbeat_result
+            return _bind_current_session_locked(
+                root_path, incoming=incoming, source=source,
+                target_rechecked=True, deadline=deadline,
+                stale_replacement=stale_replacement)
     except TimeoutError:
         return {"ok": False, "reason": "current_session_lock_busy"}
 
@@ -811,7 +1006,11 @@ def _validated_recheck_binding(root: str, git_dir: str, common_dir: str) -> dict
     }
 
 
-def _detached_operation_branch(binding: dict) -> str | None:
+def _detached_operation_branch(
+    binding: dict,
+    *,
+    deadline: float | None = None,
+) -> str | None:
     """Read the narrow original-branch descriptors used by detached rebase/bisect."""
     candidates = []
     descriptors = []
@@ -850,9 +1049,19 @@ def _detached_operation_branch(binding: dict) -> str | None:
             "--work-tree=" + binding["root"],
             "show-ref", "--hash", "--verify", ref,
         ]
-        proc = subprocess.run(
-            command, capture_output=True, text=True,
-            env=_sanitized_git_env(index_file=binding["index_file"]))
+        timeout = None if deadline is None else deadline - time.monotonic()
+        if timeout is not None and timeout <= 0:
+            return None
+        try:
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                env=_sanitized_git_env(index_file=binding["index_file"]),
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return None
         if proc.returncode == 0 and proc.stdout.strip():
             candidates.append(ref[len("refs/heads/"):])
         elif proc.returncode not in (0, 1):
@@ -863,7 +1072,8 @@ def _detached_operation_branch(binding: dict) -> str | None:
 
 def _heartbeat_target_recheck(root_path: str, *, branch: str | None,
                               common_dir: str | None,
-                              require_linked: bool = False) -> tuple[bool, str]:
+                              require_linked: bool = False,
+                              deadline: float | None = None) -> tuple[bool, str]:
     """Revalidate a real linked-worktree target while the common-dir lock is held.
 
     Legacy non-git callers remain supported only when no git identity is observable. A missing
@@ -879,29 +1089,38 @@ def _heartbeat_target_recheck(root_path: str, *, branch: str | None,
         return True, "legacy_identity_unavailable"
     expected_common = os.path.abspath(common_dir)
     discovery_env = _sanitized_git_env()
-    probes = (
-        subprocess.run(
-            ["git", "-C", ap, "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, env=discovery_env),
-        subprocess.run(
-            ["git", "-C", ap, "rev-parse", "--path-format=absolute", "--git-dir"],
-            capture_output=True, text=True, env=discovery_env),
-        subprocess.run(
-            ["git", "-C", ap, "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            capture_output=True, text=True, env=discovery_env),
-        subprocess.run(
-            ["git", "-C", ap, "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, env=discovery_env),
+    timeout = (
+        None
+        if deadline is None
+        else max(0.001, deadline - time.monotonic())
     )
-    if any(proc.returncode != 0 for proc in probes):
+    probe = subprocess.run(
+        [
+            "git",
+            "-C",
+            ap,
+            "rev-parse",
+            "--show-toplevel",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+            "--abbrev-ref",
+            "HEAD",
+        ],
+        capture_output=True,
+        text=True,
+        env=discovery_env,
+        timeout=timeout,
+    )
+    probe_lines = probe.stdout.splitlines() if probe.returncode == 0 else []
+    if len(probe_lines) != 4:
         # Synthetic/non-git heartbeat compatibility is intentionally narrow. An observable git
         # marker/common dir means this was meant to be a real worktree and identity uncertainty
         # fails safe.
         if require_linked or os.path.lexists(os.path.join(ap, ".git")) or os.path.isdir(expected_common):
             return False, "git_identity_unavailable"
         return True, "legacy_non_git"
-    top, git_dir, actual_common, actual_branch = (
-        proc.stdout.strip() for proc in probes)
+    top, git_dir, actual_common, actual_branch = probe_lines
     if canon(top) != ap:
         return False, "root_not_toplevel"
     if os.path.abspath(git_dir) == os.path.abspath(actual_common):
@@ -911,7 +1130,10 @@ def _heartbeat_target_recheck(root_path: str, *, branch: str | None,
     if actual_branch == "HEAD":
         try:
             preliminary = _validated_recheck_binding(ap, git_dir, actual_common)
-            actual_branch = _detached_operation_branch(preliminary) or "HEAD"
+            actual_branch = (
+                _detached_operation_branch(preliminary, deadline=deadline)
+                or "HEAD"
+            )
         except OSError:
             actual_branch = "HEAD"
     if actual_branch != branch or actual_branch == "HEAD":
@@ -925,26 +1147,39 @@ def _heartbeat_target_recheck(root_path: str, *, branch: str | None,
         "--work-tree=" + binding["root"],
     ]
     bound_env = _sanitized_git_env(index_file=binding["index_file"])
-    bound_probes = (
-        subprocess.run(
-            [*command_prefix, "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, env=bound_env),
-        subprocess.run(
-            [*command_prefix, "rev-parse", "--path-format=absolute", "--git-dir"],
-            capture_output=True, text=True, env=bound_env),
-        subprocess.run(
-            [*command_prefix, "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            capture_output=True, text=True, env=bound_env),
-        subprocess.run(
-            [*command_prefix, "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, env=bound_env),
+    timeout = (
+        None
+        if deadline is None
+        else max(0.001, deadline - time.monotonic())
     )
-    if any(proc.returncode != 0 for proc in bound_probes):
+    bound_probe = subprocess.run(
+        [
+            *command_prefix,
+            "rev-parse",
+            "--show-toplevel",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+            "--abbrev-ref",
+            "HEAD",
+        ],
+        capture_output=True,
+        text=True,
+        env=bound_env,
+        timeout=timeout,
+    )
+    bound_lines = (
+        bound_probe.stdout.splitlines()
+        if bound_probe.returncode == 0
+        else []
+    )
+    if len(bound_lines) != 4:
         return False, "git_binding_unavailable"
-    bound_top, bound_git, bound_common, bound_branch = (
-        proc.stdout.strip() for proc in bound_probes)
+    bound_top, bound_git, bound_common, bound_branch = bound_lines
     if bound_branch == "HEAD":
-        bound_branch = _detached_operation_branch(binding) or "HEAD"
+        bound_branch = (
+            _detached_operation_branch(binding, deadline=deadline) or "HEAD"
+        )
     if (canon(bound_top) != ap
             or os.path.abspath(bound_git) != binding["git_dir"]
             or os.path.abspath(bound_common) != expected_common
@@ -972,10 +1207,11 @@ def _session_disagreement_is_fresh(sess: dict, now_epoch: int) -> bool:
 
 def _heartbeat_locked(root_path: str, *, branch: str | None, common_dir: str | None,
                       session_id: str | None, pid: int | None,
-                      boot: str | None) -> dict:
+                      boot: str | None,
+                      deadline: float | None = None) -> dict:
     ap = canon(root_path)
     target_ok, target_reason = _heartbeat_target_recheck(
-        ap, branch=branch, common_dir=common_dir)
+        ap, branch=branch, common_dir=common_dir, deadline=deadline)
     if not target_ok:
         return {"ok": False, "reason": "heartbeat_target_" + target_reason}
 
@@ -1091,7 +1327,8 @@ def _heartbeat_locked(root_path: str, *, branch: str | None, common_dir: str | N
 def heartbeat(root_path: str, *, branch: str | None = None, common_dir: str | None = None,
               session_id: str | None = None, pid: int | None = None,
               boot: str | None = None, lock_held: bool = False,
-              lock_timeout: float = 5.0) -> dict:
+              lock_timeout: float = 5.0,
+              deadline: float | None = None) -> dict:
     """Write/refresh the active_root/v1 heartbeat for ``root_path``. Preserves ``first_seen``.
 
     Additive per-session tracking (ADDITIVE-WITHIN-v1): the FROZEN top-level keys are preserved and
@@ -1126,12 +1363,12 @@ def heartbeat(root_path: str, *, branch: str | None = None, common_dir: str | No
     if lock_held:
         return _heartbeat_locked(
             ap, branch=branch, common_dir=common_dir, session_id=session_id,
-            pid=pid, boot=boot)
+            pid=pid, boot=boot, deadline=deadline)
     try:
         with _common_dir_lock(lock_common, timeout=lock_timeout):
             return _heartbeat_locked(
                 ap, branch=branch, common_dir=common_dir, session_id=session_id,
-                pid=pid, boot=boot)
+                pid=pid, boot=boot, deadline=deadline)
     except TimeoutError:
         return {"ok": False, "reason": "heartbeat_lock_busy"}
 

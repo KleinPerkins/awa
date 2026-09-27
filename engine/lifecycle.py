@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass
 
 from . import gitutil, identity, lease as lease_mod, lock, state as state_mod
@@ -55,9 +56,27 @@ class WorktreeIdentity:
     head: str
 
 
-def observe_identity(worktree_path: str) -> WorktreeIdentity:
+def _remaining_timeout(deadline: float | None, fallback: float = 15.0) -> float:
+    if deadline is None:
+        return fallback
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise LifecycleError("lifecycle deadline exceeded")
+    return max(0.001, remaining)
+
+
+def observe_identity(
+    worktree_path: str,
+    *,
+    deadline: float | None = None,
+    git_env: dict[str, str] | None = None,
+) -> WorktreeIdentity:
     """Resolve one complete attached Git identity, without mutating the repository."""
-    ctx = gitutil.resolve(worktree_path)
+    ctx = gitutil.resolve(
+        worktree_path,
+        timeout=_remaining_timeout(deadline),
+        env=git_env,
+    )
     if (
         not ctx.is_git
         or not ctx.toplevel
@@ -98,7 +117,9 @@ def adopt(worktree_path: str, *, base_ref: str | None = None,
           expected_identity: WorktreeIdentity | None = None,
           lock_held: bool = False,
           exclusive_lease: bool = False,
-          lock_timeout: float = 30.0) -> AdoptResult:
+          lock_timeout: float = 30.0,
+          deadline: float | None = None,
+          git_env: dict[str, str] | None = None) -> AdoptResult:
     """Adopt an already-created (native-window) worktree: record lease + verify + attest.
 
     NO push occurs. Raises LifecycleError if the path is not a linked worktree or its
@@ -106,7 +127,15 @@ def adopt(worktree_path: str, *, base_ref: str | None = None,
     root/Git-dir/common-dir/branch/HEAD identity is re-read and compared while the
     collision lock is held immediately before any write.
     """
-    initial = observe_identity(worktree_path)
+    initial = (
+        expected_identity
+        if lock_held and expected_identity is not None
+        else observe_identity(
+            worktree_path,
+            deadline=deadline,
+            git_env=git_env,
+        )
+    )
     _validate_adoptable(initial)
     common_dir = (
         expected_identity.git_common_dir
@@ -118,7 +147,11 @@ def adopt(worktree_path: str, *, base_ref: str | None = None,
         state = state_mod.State()
 
     def _adopt_locked() -> AdoptResult:
-        observed = observe_identity(worktree_path)
+        observed = observe_identity(
+            worktree_path,
+            deadline=deadline,
+            git_env=git_env,
+        )
         _validate_adoptable(observed)
         _identity_matches(observed, expected_identity)
         lz = lease_mod.build_lease(
@@ -146,6 +179,8 @@ def adopt(worktree_path: str, *, base_ref: str | None = None,
             state,
             expected_identity=observed,
             allow_rekey=False,
+            deadline=deadline,
+            git_env=git_env,
         )
         return AdoptResult(lz["lease_id"], str(lp), attested, why)
 
@@ -166,6 +201,8 @@ def _attest_locked(
     *,
     expected_identity: WorktreeIdentity | None = None,
     allow_rekey: bool = True,
+    deadline: float | None = None,
+    git_env: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
     disk = lease_mod.read_lease(worktree_path)
     if not disk:
@@ -176,7 +213,11 @@ def _attest_locked(
     if disk.get("lease_id") != lease_id:
         return False, "lease_id mismatch between disk and record"
     try:
-        observed = observe_identity(worktree_path)
+        observed = observe_identity(
+            worktree_path,
+            deadline=deadline,
+            git_env=git_env,
+        )
         _identity_matches(observed, expected_identity)
     except LifecycleError as exc:
         return False, str(exc)
@@ -254,6 +295,8 @@ def attest(
     lock_held: bool = False,
     allow_rekey: bool = True,
     lock_timeout: float = 30.0,
+    deadline: float | None = None,
+    git_env: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
     lz = lease_mod.read_lease(worktree_path)
     if not lz:
@@ -269,6 +312,8 @@ def attest(
                 state,
                 expected_identity=expected_identity,
                 allow_rekey=allow_rekey,
+                deadline=deadline,
+                git_env=git_env,
             )
         with lock.common_dir_lock(
             lz["git_common_dir"],
@@ -280,6 +325,8 @@ def attest(
                 state,
                 expected_identity=expected_identity,
                 allow_rekey=allow_rekey,
+                deadline=deadline,
+                git_env=git_env,
             )
     finally:
         if owns_state:
