@@ -82,6 +82,7 @@ lands — this directory already follows the reference shape it derived from.
 | [0022](0022-two-worker-verification-default.md) | Accepted — 2026-08-30 | Make two process-isolated module workers the ordinary verification default after the owner accepted M2's equivalent, repeatable 22.376% gain; keep explicit serial fallback and all failure, cleanup, receipt, inventory, and dashboard guarantees. |
 | [0023](0023-native-entry-registration-and-honest-worktree-metrics.md) | Superseded by ADR 0024 — 2026-09-25 | Add fail-open exact post-`sessionStart` adoption/attestation and private native-entry evidence for native Cursor worktrees; seed read-only lifecycle discovery from observations and report computed linked/managed/active/problem populations without changing cleanup authority. |
 | [0024](0024-first-prompt-native-entry-recovery.md) | Accepted — 2026-09-25 | Adopt payload-bound first-prompt recovery because no documented Cursor event combines immediate workspace-entry timing with exact conversation identity; supersedes ADR 0023. |
+| [0025](0025-durable-registration-episodes-and-tool-admission.md) | Accepted — C0-DESIGN NO-GO — 2026-09-26 | Propose single-root durable registration with one merged request/effect authority and member epoch, exact 7-table/9-trigger/97-generated-leaf manifest, direct OPEN authority, audit-only transition witness, stateless rendering, member-isolated admission, and distinct implementation/R1/C1/R2 gates; fresh exact-hash review/verifier adjudication remain C0 gates. |
 
 ## Related conventions
 
