@@ -59,6 +59,15 @@ def state_db_path() -> Path:
     return awa_state_dir() / "state.db"
 
 
+def registration_dir() -> Path:
+    """ADR 0025 dedicated authority root (separate from legacy state.db)."""
+    return awa_state_dir() / "registration-v1"
+
+
+def registration_db_path() -> Path:
+    return registration_dir() / "registration.db"
+
+
 def recovery_dir() -> Path:
     return awa_state_dir() / "recovery"
 
