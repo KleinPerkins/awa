@@ -373,6 +373,30 @@ class SelectedAuthority:
 
 
 @dataclass(frozen=True)
+class DueCandidate:
+    member_id: str
+    member_epoch: int
+    phase: str
+    effect_id: str
+    member_tuple_hash: str
+    effect_tuple_hash: str
+    status_hash: str
+    current_basis_hash: str
+    pending_basis_hash: str | None
+    due_since_mono_ns: int
+    observed_now_mono_ns: int
+
+
+@dataclass(frozen=True)
+class RebootCandidate:
+    member_id: str
+    phase: str
+    effect_id: str
+    status_hash: str
+    stored_boot_id: str
+
+
+@dataclass(frozen=True)
 class MemberIdentity:
     canonical_root: str
     root_dev: int
@@ -5722,6 +5746,155 @@ class RegistrationStore:
             member_id, episode_id=episode_id
         )
         return authority.revision_token if authority is not None else None
+
+    def find_member_id(self, identity_value: MemberIdentity) -> str | None:
+        with self._read_scope():
+            self._connection.execute("BEGIN")
+            try:
+                row = self._connection.execute(
+                    "SELECT member_id,canonical_root,git_toplevel,"
+                    "git_dir,git_common_dir FROM registration_member "
+                    "WHERE root_dev=? AND root_ino=? "
+                    "AND git_dir_dev=? AND git_dir_ino=? "
+                    "AND git_common_dev=? AND git_common_ino=?",
+                    (
+                        identity_value.root_dev,
+                        identity_value.root_ino,
+                        identity_value.git_dir_dev,
+                        identity_value.git_dir_ino,
+                        identity_value.git_common_dev,
+                        identity_value.git_common_ino,
+                    ),
+                ).fetchall()
+                self._connection.execute("COMMIT")
+                if not row:
+                    return None
+                if len(row) != 1:
+                    raise StoreError("duplicate physical member identity")
+                current = row[0]
+                if (
+                    current["canonical_root"]
+                    != identity_value.canonical_root
+                    or current["git_toplevel"]
+                    != identity_value.git_toplevel
+                    or current["git_dir"] != identity_value.git_dir
+                    or current["git_common_dir"]
+                    != identity_value.git_common_dir
+                ):
+                    raise StaleAuthority(
+                        "physical member path changed; explicit repair required"
+                    )
+                return str(current["member_id"])
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
+
+    def episode_exists(self, member_id: str, episode_id: str) -> bool:
+        _require_hash(member_id, "member_id")
+        _require_hash(episode_id, "episode_id")
+        return (
+            self._connection.execute(
+                "SELECT 1 FROM registration_episode "
+                "WHERE member_id=? AND episode_id=?",
+                (member_id, episode_id),
+            ).fetchone()
+            is not None
+        )
+
+    def list_due_candidates(
+        self, *, boot_id: str, now_mono_ns: int, limit: int = 8
+    ) -> tuple[DueCandidate, ...]:
+        if (
+            not isinstance(boot_id, str)
+            or not boot_id
+            or not isinstance(now_mono_ns, int)
+            or isinstance(now_mono_ns, bool)
+            or now_mono_ns < 0
+            or not 1 <= limit <= 8
+        ):
+            raise ValueError("invalid due-candidate selector")
+        with self._read_scope():
+            self._connection.execute("BEGIN")
+            try:
+                rows = self._connection.execute(
+                    "SELECT m.member_id,m.member_epoch,m.phase,"
+                    "m.current_effect_id,m.member_tuple_hash,"
+                    "m.current_basis_hash,m.pending_basis_hash,"
+                    "e.request_tuple_hash,s.status_hash,"
+                    "s.due_since_mono_ns,s.observed_now_mono_ns "
+                    "FROM registration_runtime_status s "
+                    "JOIN registration_member m USING(member_id) "
+                    "JOIN registration_effect e "
+                    "ON e.effect_id=m.current_effect_id "
+                    "WHERE s.schedule_boot_id=? "
+                    "AND s.next_due_mono_ns<=? "
+                    "AND s.executor_token_hash IS NULL "
+                    "ORDER BY COALESCE(s.observed_now_mono_ns,"
+                    "s.due_since_mono_ns),s.due_since_mono_ns,m.member_id "
+                    "LIMIT ?",
+                    (boot_id, now_mono_ns, limit),
+                ).fetchall()
+                self._connection.execute("COMMIT")
+                return tuple(
+                    DueCandidate(
+                        member_id=row["member_id"],
+                        member_epoch=row["member_epoch"],
+                        phase=row["phase"],
+                        effect_id=row["current_effect_id"],
+                        member_tuple_hash=row["member_tuple_hash"],
+                        effect_tuple_hash=row["request_tuple_hash"],
+                        status_hash=row["status_hash"],
+                        current_basis_hash=row["current_basis_hash"],
+                        pending_basis_hash=row["pending_basis_hash"],
+                        due_since_mono_ns=row["due_since_mono_ns"],
+                        observed_now_mono_ns=row["observed_now_mono_ns"],
+                    )
+                    for row in rows
+                )
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
+
+    def list_reboot_candidates(
+        self, current_boot_id: str
+    ) -> tuple[RebootCandidate, ...]:
+        if not isinstance(current_boot_id, str) or not current_boot_id:
+            raise ValueError("current boot id is required")
+        with self._read_scope():
+            self._connection.execute("BEGIN")
+            try:
+                rows = self._connection.execute(
+                    "SELECT m.member_id,m.phase,m.current_effect_id,"
+                    "s.status_hash,CASE WHEN s.executor_token_hash IS NOT NULL "
+                    "THEN s.executor_boot_id ELSE s.schedule_boot_id END "
+                    "AS stored_boot_id "
+                    "FROM registration_member m "
+                    "JOIN registration_runtime_status s USING(member_id) "
+                    "WHERE (s.executor_token_hash IS NOT NULL "
+                    "AND s.executor_boot_id<>?) "
+                    "OR (s.executor_token_hash IS NULL "
+                    "AND s.schedule_boot_id IS NOT NULL "
+                    "AND s.schedule_boot_id<>?) "
+                    "ORDER BY m.member_id",
+                    (current_boot_id, current_boot_id),
+                ).fetchall()
+                self._connection.execute("COMMIT")
+                return tuple(
+                    RebootCandidate(
+                        member_id=row["member_id"],
+                        phase=row["phase"],
+                        effect_id=row["current_effect_id"],
+                        status_hash=row["status_hash"],
+                        stored_boot_id=row["stored_boot_id"],
+                    )
+                    for row in rows
+                )
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
 
     def resolve_operation(self, operation_id: str) -> str:
         """Classify ambiguous SQLite completion from durable authority only."""
