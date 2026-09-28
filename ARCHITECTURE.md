@@ -505,15 +505,16 @@ dependency: a fresh clone installs on its own.
 
 Hook-file ownership starts with the additive `awa-hook-owner/v1` block in the
 canonical behavior contract. Direct product projection prefers
-`awa-hook-owner/v3`, composing the frozen v1 roles, v2 guard/observer/handoff
-roles, and the v3 prompt-recovery composite after explicit role supersession;
-v1/v2 remain validated compatibility inputs.
+`awa-hook-owner/v4`, composing the frozen v1 roles, v2
+guard/observer/handoff roles, the v3 prompt-recovery composite, and v4's
+later-tool admission/startup roles after explicit role supersession; v1–v3
+remain validated compatibility inputs.
 The strict machine-local selection at `$XDG_CONFIG_HOME/awa/hook-owner.json` resolves from an
 explicit `AWA_HOOK_OWNER=direct|external`, then persisted selection, then a compatible release
 pointer, with `direct` only as the fresh/legacy default. Invalid or ambiguous state refuses before
 hook or selection mutation; only a valid explicit value repairs malformed state.
 
-In `direct`, AWA reconciles the exact seven-role effective composition into the selected user hook file. In
+In `direct`, AWA reconciles the exact ten-role effective composition into the selected user hook file. In
 `external`, the host owns the entire file transaction and AWA performs zero selected-hook-file
 reads or writes on install, repair, doctor, and uninstall. A host-policy delegator may inject only
 policy/root data before executing an installed product role. The v3
@@ -522,6 +523,18 @@ to the byte-identical finish hook; the finish consumer remains unchanged. The
 role ID plus event—not command spelling—is identity, and this composition does
 not move guard, recovery, heartbeat, cleanup, or literal-`Close` authority off
 the kernel-first path.
+
+V4's `preToolUse` catch-all receives ordinary, unknown/renamed, MCP, and Task
+discriminators; `subagentStart` independently makes Task launch receivability
+provable. Activation binds exact tool inventory, matcher, normalized
+projection, wrapper/runtime, DIRECT receipt, installer identity/capability,
+and protocol-lock hashes. A missing/unreceivable launch seam yields
+`HOOK_UNSUPPORTED`; wrapper/store failure makes no denial claim. Registration
+cutover derives C0–C7 restart solely from the current file receipt plus Body
+A protocol/audit authority, never a second journal or direct relation write.
+The startup hook and one-shot tick consume Body B orchestration; host
+scheduling remains outside AWA. Guard, finish, cleanup, active-root, kernel-off,
+and ADR 0020 alert ownership remain independent.
 
 The release pointer advertises the selected mode, `awa-hook-owner/v1`, and the installed canonical
 contract SHA-256. Doctor requires selection/pointer/runtime/contract agreement. A direct projection

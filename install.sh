@@ -163,10 +163,16 @@ validate_integrity_product_assets() {
   [ -f "$root/contracts/awa-integrity-schedule.v1.json" ] || return 1
   [ -f "$root/contracts/awa-hook-owner.v2.json" ] || return 1
   [ -f "$root/contracts/awa-hook-owner.v3.json" ] || return 1
+  [ -f "$root/contracts/awa-hook-owner.v4.json" ] || return 1
   [ -f "$root/engine/integrity_console.py" ] || return 1
   [ -f "$root/engine/integrity_alert.py" ] || return 1
   [ -f "$root/engine/native_entry.py" ] || return 1
   [ -f "$root/engine/native_entry_prompt_adapter.py" ] || return 1
+  [ -f "$root/engine/registration_projection.py" ] || return 1
+  [ -f "$root/engine/registration_hook_runtime.py" ] || return 1
+  [ -f "$root/engine/registration_installer.py" ] || return 1
+  [ -f "$root/engine/registration_host.py" ] || return 1
+  [ -f "$root/engine/registration_receiver.py" ] || return 1
   python3 - "$root" "$access_mode" <<'PY'
 import json
 import os
@@ -182,6 +188,10 @@ scripts = (
     root / "kernel" / "hooks" / "awa-integrity-observer.sh",
     root / "kernel" / "hooks" / "awa-session-handoff.sh",
     root / "kernel" / "hooks" / "before-submit-prompt-with-entry.sh",
+    root / "kernel" / "hooks" / "awa-registration-admission.sh",
+    root / "kernel" / "hooks" / "awa-registration-startup.sh",
+    root / "kernel" / "bin" / "awa-registration-tick.sh",
+    root / "kernel" / "bin" / "awa-registration-receiver.sh",
     root / "engine" / "integrity_detach.py",
     root / "engine" / "native_entry_prompt_adapter.py",
 )
@@ -211,6 +221,11 @@ owner_v2 = json.loads(
 )
 owner_v3 = json.loads(
     (root / "contracts" / "awa-hook-owner.v3.json").read_text(
+        encoding="utf-8"
+    )
+)
+owner_v4 = json.loads(
+    (root / "contracts" / "awa-hook-owner.v4.json").read_text(
         encoding="utf-8"
     )
 )
@@ -298,6 +313,55 @@ valid = (
                 "failClosed": False,
             },
         )
+    ]
+    and owner_v4.get("schema") == "awa-hook-owner/v4"
+    and owner_v4.get("version") == 4
+    and owner_v4.get("successor_of") == "awa-hook-owner/v3"
+    and owner_v4.get("v3_contract") == "contracts/awa-hook-owner.v3.json"
+    and owner_v4.get("modes") == ["direct", "external"]
+    and owner_v4.get("default_mode") == "direct"
+    and owner_v4.get("selection_schema") == "awa-hook-owner-selection/v1"
+    and owner_v4.get("external_real_hook_file_writes") is False
+    and owner_v4.get("supersedes_roles") == []
+    and owner_v4.get("matcher_modes") == ["CATCH_ALL", "ENUMERATED"]
+    and [
+        (
+            role.get("id"),
+            role.get("event"),
+            role.get("direct_command_role"),
+            role.get("entry"),
+        )
+        for role in owner_v4.get("roles", [])
+    ]
+    == [
+        (
+            "registration.tool-admission",
+            "preToolUse",
+            "kernel/hooks/awa-registration-admission.sh",
+            {
+                "type": "command",
+                "matcher": "*",
+                "timeout": 20,
+                "failClosed": False,
+            },
+        ),
+        (
+            "registration.subagent-admission",
+            "subagentStart",
+            "kernel/hooks/awa-registration-admission.sh",
+            {
+                "type": "command",
+                "matcher": "*",
+                "timeout": 20,
+                "failClosed": False,
+            },
+        ),
+        (
+            "registration.startup-reconcile",
+            "sessionStart",
+            "kernel/hooks/awa-registration-startup.sh",
+            {"type": "command", "timeout": 5, "failClosed": False},
+        ),
     ]
 )
 raise SystemExit(0 if valid else 1)
@@ -632,7 +696,9 @@ owned = {
                  "before-submit-prompt-with-entry.sh",
                  "awa-recovery-maintenance.sh",
                  "worktree-guard-with-integrity.sh",
-                 "awa-integrity-observer.sh", "awa-session-handoff.sh")
+                 "awa-integrity-observer.sh", "awa-session-handoff.sh",
+                 "awa-registration-admission.sh",
+                 "awa-registration-startup.sh")
 }
 def is_owned(entry):
     command = str(entry.get("command", ""))
@@ -675,9 +741,9 @@ do_doctor() {
   else echo "  FAIL  frozen contract missing/invalid"; rc=1; fi
   if [ -f "$RUNTIME/kernel/policy/default-worktree-policy.yml" ]; then echo "  PASS  default policy present"; else echo "  FAIL  default policy missing"; rc=1; fi
   if validate_integrity_product_assets "$RUNTIME"; then
-    echo "  PASS  integrity sweep/console + awa-hook-owner/v3 assets valid (host activation external)"
+    echo "  PASS  integrity/registration + awa-hook-owner/v4 assets valid (host activation external)"
   else
-    echo "  FAIL  integrity sweep/console or awa-hook-owner/v3 assets missing or invalid"
+    echo "  FAIL  integrity/registration or awa-hook-owner/v4 assets missing or invalid"
     rc=1
   fi
   if [ -x "$RUNTIME/kernel/bin/dev-worktree.sh" ] && "$RUNTIME/kernel/bin/dev-worktree.sh" policy-check >/dev/null 2>&1; then
@@ -767,6 +833,7 @@ try:
         "before-submit-prompt-with-entry.sh",
         "worktree-guard-with-integrity.sh", "awa-integrity-observer.sh",
         "awa-session-handoff.sh",
+        "awa-registration-admission.sh", "awa-registration-startup.sh",
     )
     for name in required_scripts:
         script = runtime / "kernel" / "hooks" / name
@@ -849,8 +916,8 @@ PY
     echo "  PASS  finish operator entrypoint sources present"
   else echo "  FAIL  finish operator entrypoint sources missing"; rc=1; fi
   if validate_integrity_product_assets "$SRC_ROOT" source; then
-    echo "  PASS  integrity product + awa-hook-owner/v3 assets valid (no plist; host activation external)"
-  else echo "  FAIL  integrity product assets invalid"; rc=1; fi
+    echo "  PASS  integrity/registration product + awa-hook-owner/v4 assets valid (no plist; host activation external)"
+  else echo "  FAIL  integrity/registration product assets invalid"; rc=1; fi
   if [ -f "$SRC_ROOT/dashboard/seed.canvas.tsx" ] && \
      [ -f "$SRC_ROOT/dashboard/render.py" ] && \
      [ -f "$SRC_ROOT/dashboard/install_actions.sh" ] && \

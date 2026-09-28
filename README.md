@@ -45,11 +45,11 @@ source "${XDG_CONFIG_HOME:-$HOME/.config}/awa/env"
 ### Cursor hook-file owner
 
 The frozen `awa-hook-owner/v1` base contract has two modes. Product role
-composition currently prefers the additive `awa-hook-owner/v3` successor
-(`v1 + v2 + v3`, with explicit supersession) while retaining strict v1/v2
+composition currently prefers the additive `awa-hook-owner/v4` successor
+(`v1 + v2 + v3 + v4`, with explicit supersession) while retaining strict v1–v3
 compatibility:
 
-- `direct` (the fresh and legacy default) — AWA reconciles the seven effective
+- `direct` (the fresh and legacy default) — AWA reconciles the ten effective
   fail-open/observation hook roles in the selected Cursor user hook file while
   preserving unrelated rows.
 - `external` — another host owns the complete hook file. Set `AWA_HOOK_OWNER=external` for the
@@ -130,6 +130,16 @@ first-prompt-recovered, and legacy success distinct. This is separate from the
 singleton `awa-session-handoff/v1` pending→closed proof created by
 `dev-worktree.sh ensure`; neither path invents ensure intent or closes another
 root's handoff. Receipts and leases never authorize cleanup.
+
+The v4 successor also packages ADR 0025's later-tool receiver: one catch-all
+`preToolUse` row, an independent `subagentStart` launch-denial row, and a
+`sessionStart` reconciliation row. A DIRECT candidate may become writable only
+after exact inventory/matcher/projection/runtime receipts and Task
+receivability pass; missing seams, wrapper/runtime failures, or unavailable
+storage remain honestly fail-open. External ownership is unsupported and
+rejected before registration persistence. This source packaging is not live
+rollout evidence: post-merge R0, an explicit R1 canary GO, C1, and R2 remain
+separate gates.
 
 ### Per-repo mode (ON / OFF)
 

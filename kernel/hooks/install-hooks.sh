@@ -31,10 +31,11 @@ HOOKS_JSON="${AWA_HOOKS_JSON:-$HOME/.cursor/hooks.json}"
 V1_CONTRACT="$AWA_HOME/contracts/awa-contract.v1.json"
 V2_CONTRACT="$AWA_HOME/contracts/awa-hook-owner.v2.json"
 V3_CONTRACT="$AWA_HOME/contracts/awa-hook-owner.v3.json"
+V4_CONTRACT="$AWA_HOME/contracts/awa-hook-owner.v4.json"
 
 MODE="$MODE" HOOKS_JSON="$HOOKS_JSON" AWA_HOME="$AWA_HOME" \
 V1_CONTRACT="$V1_CONTRACT" V2_CONTRACT="$V2_CONTRACT" \
-V3_CONTRACT="$V3_CONTRACT" python3 - <<'PY'
+V3_CONTRACT="$V3_CONTRACT" V4_CONTRACT="$V4_CONTRACT" python3 - <<'PY'
 from __future__ import annotations
 
 import json
@@ -60,6 +61,7 @@ destination = pathlib.Path(os.environ["HOOKS_JSON"]).expanduser()
 v1_path = pathlib.Path(os.environ["V1_CONTRACT"])
 v2_path = pathlib.Path(os.environ["V2_CONTRACT"])
 v3_path = pathlib.Path(os.environ["V3_CONTRACT"])
+v4_path = pathlib.Path(os.environ["V4_CONTRACT"])
 
 
 def load_json(path: pathlib.Path, label: str) -> dict:
@@ -293,6 +295,91 @@ if v3_path.is_file():
     effective.extend(v3_roles)
     all_roles.extend(v3_roles)
     contract_name = "awa-hook-owner/v3"
+
+if v4_path.is_file():
+    v4 = load_json(v4_path, "awa-hook-owner.v4.json")
+    expected_v4 = [
+        (
+            "registration.tool-admission",
+            "preToolUse",
+            "kernel/hooks/awa-registration-admission.sh",
+            "host-policy-delegator",
+            {
+                "type": "command",
+                "matcher": "*",
+                "timeout": 20,
+                "failClosed": False,
+            },
+            None,
+        ),
+        (
+            "registration.subagent-admission",
+            "subagentStart",
+            "kernel/hooks/awa-registration-admission.sh",
+            "host-policy-delegator",
+            {
+                "type": "command",
+                "matcher": "*",
+                "timeout": 20,
+                "failClosed": False,
+            },
+            None,
+        ),
+        (
+            "registration.startup-reconcile",
+            "sessionStart",
+            "kernel/hooks/awa-registration-startup.sh",
+            "host-policy-delegator",
+            {"type": "command", "timeout": 5, "failClosed": False},
+            None,
+        ),
+    ]
+    v4_roles = v4.get("roles")
+    actual_v4 = [
+        (
+            role.get("id"),
+            role.get("event"),
+            role.get("direct_command_role"),
+            role.get("external_command_path_class"),
+            role.get("entry"),
+            role.get("dormant_until_milestone"),
+        )
+        for role in v4_roles
+        if isinstance(role, dict)
+    ] if isinstance(v4_roles, list) else []
+    if (
+        contract_name != "awa-hook-owner/v3"
+        or v4.get("schema") != "awa-hook-owner/v4"
+        or v4.get("version") != 4
+        or v4.get("successor_of") != "awa-hook-owner/v3"
+        or v4.get("v3_contract") != "contracts/awa-hook-owner.v3.json"
+        or v4.get("modes") != ["direct", "external"]
+        or v4.get("default_mode") != "direct"
+        or v4.get("selection_env") != "AWA_HOOK_OWNER"
+        or v4.get("selection_schema") != "awa-hook-owner-selection/v1"
+        or v4.get("external_real_hook_file_writes") is not False
+        or v4.get("supersedes_roles") != []
+        or v4.get("matcher_modes") != ["CATCH_ALL", "ENUMERATED"]
+        or not isinstance(v4.get("composition_rule"), str)
+        or not v4["composition_rule"]
+        or not isinstance(v4.get("activation_rule"), str)
+        or not v4["activation_rule"]
+        or not isinstance(v4.get("external_rule"), str)
+        or not v4["external_rule"]
+        or actual_v4 != expected_v4
+        or not all(valid_role(role, allow_dormant=False) for role in v4_roles or [])
+        or any(
+            role.get("external_command_path_class") != "host-policy-delegator"
+            or role["entry"].get("failClosed") is not False
+            for role in v4_roles or []
+        )
+    ):
+        refuse("awa-hook-owner/v4 contract validation failed", check=checking)
+    superseded = set(v4["supersedes_roles"])
+    effective = [role for role in effective if role["id"] not in superseded]
+    effective.extend(v4_roles)
+    all_roles.extend(v4_roles)
+    contract_name = "awa-hook-owner/v4"
 
 
 def resolved_command(role: dict) -> pathlib.Path:

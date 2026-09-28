@@ -1,4 +1,4 @@
-"""Hook-owner v2 compatibility under v3 preference and external boundaries."""
+"""Hook-owner v2 compatibility under v4 preference and external boundaries."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ _DOCTOR = _ROOT / "kernel" / "bin" / "dev-worktree.sh"
 _V1 = _ROOT / "contracts" / "awa-contract.v1.json"
 _V2 = _ROOT / "contracts" / "awa-hook-owner.v2.json"
 _V3 = _ROOT / "contracts" / "awa-hook-owner.v3.json"
+_V4 = _ROOT / "contracts" / "awa-hook-owner.v4.json"
 _M1_B_HEAD = "f42e6d5d77fb0244ae616109fbef261b530e3cb4"
 _V1_IDS = (
     "worktree.session-context",
@@ -132,7 +133,7 @@ class TestHookOwnerV2Matrix(unittest.TestCase):
             timeout=30,
         )
 
-    def test_v2_composes_under_preferred_v3_when_shipped(self):
+    def test_v2_composes_under_preferred_v4_when_shipped(self):
         installed = self._run_installer()
         self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
         checked = self._run_installer("--check")
@@ -153,9 +154,15 @@ class TestHookOwnerV2Matrix(unittest.TestCase):
             for role in effective
             if role["id"] not in set(v3["supersedes_roles"])
         ] + v3["roles"]
+        v4 = json.loads(_V4.read_text(encoding="utf-8"))
+        effective = [
+            role
+            for role in effective
+            if role["id"] not in set(v4["supersedes_roles"])
+        ] + v4["roles"]
         for role in effective:
             self.assertIn(_expected_row(_ROOT, role), hooks[role["event"]], role["id"])
-        self.assertEqual(sum(len(rows) for rows in hooks.values()), 7)
+        self.assertEqual(sum(len(rows) for rows in hooks.values()), 10)
         old_guard = str(
             (_ROOT / "kernel" / "hooks" / "worktree-guard.sh").resolve()
         )
@@ -176,7 +183,7 @@ class TestHookOwnerV2Matrix(unittest.TestCase):
             timeout=180,
         )
         self.assertEqual(static.returncode, 0, static.stdout + static.stderr)
-        self.assertIn("awa-hook-owner/v3", static.stdout)
+        self.assertIn("awa-hook-owner/v4", static.stdout)
 
         invalid_runtime = self._v1_only_runtime()
         (invalid_runtime / "contracts" / _V2.name).write_text(
@@ -317,7 +324,7 @@ class TestHookOwnerV2Matrix(unittest.TestCase):
         self.assertTrue(self.hooks.is_symlink())
         self.assertFalse(list(target.parent.glob("sentinel.json.bak-*")))
 
-    def test_doctor_reports_v2_compatibility_in_v3_role_matrix(self):
+    def test_doctor_reports_v2_compatibility_in_v4_role_matrix(self):
         result = subprocess.run(
             ["bash", str(_DOCTOR), "doctor"],
             cwd=_ROOT,
@@ -328,7 +335,8 @@ class TestHookOwnerV2Matrix(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("== hook-owner role matrix ==", result.stdout)
-        self.assertIn("preferred: awa-hook-owner/v3", result.stdout)
+        self.assertIn("preferred: awa-hook-owner/v4", result.stdout)
+        self.assertIn("compatibility: awa-hook-owner/v3", result.stdout)
         self.assertIn("compatibility: awa-hook-owner/v2", result.stdout)
         for role_id in _V2_IDS:
             self.assertIn(role_id, result.stdout)

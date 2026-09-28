@@ -32,6 +32,7 @@ GUARD = REPO / "kernel" / "hooks" / "worktree-guard.sh"
 CONTRACT = REPO / "contracts" / "awa-contract.v1.json"
 V2_CONTRACT = REPO / "contracts" / "awa-hook-owner.v2.json"
 V3_CONTRACT = REPO / "contracts" / "awa-hook-owner.v3.json"
+V4_CONTRACT = REPO / "contracts" / "awa-hook-owner.v4.json"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "hook-owner"
 V150_COMMIT = "331e633027aa489c08f22b96c979fde36079e220"
 
@@ -195,6 +196,14 @@ def _expected_direct_hooks(runtime):
                 "timeout": 5,
                 "failClosed": False,
             },
+            {
+                "command": str(
+                    (hooks / "awa-registration-startup.sh").resolve()
+                ),
+                "type": "command",
+                "timeout": 5,
+                "failClosed": False,
+            },
         ],
         "beforeShellExecution": [
             {
@@ -231,6 +240,28 @@ def _expected_direct_hooks(runtime):
                 "failClosed": False,
             },
         ],
+        "preToolUse": [
+            {
+                "command": str(
+                    (hooks / "awa-registration-admission.sh").resolve()
+                ),
+                "type": "command",
+                "matcher": "*",
+                "timeout": 20,
+                "failClosed": False,
+            },
+        ],
+        "subagentStart": [
+            {
+                "command": str(
+                    (hooks / "awa-registration-admission.sh").resolve()
+                ),
+                "type": "command",
+                "matcher": "*",
+                "timeout": 20,
+                "failClosed": False,
+            },
+        ],
     }
 
 
@@ -247,9 +278,16 @@ def _effective_direct_roles():
         return effective
     v3 = json.loads(V3_CONTRACT.read_text(encoding="utf-8"))
     superseded = set(v3["supersedes_roles"])
-    return [
+    effective = [
         role for role in effective if role["id"] not in superseded
     ] + v3["roles"]
+    if not V4_CONTRACT.is_file():
+        return effective
+    v4 = json.loads(V4_CONTRACT.read_text(encoding="utf-8"))
+    superseded = set(v4["supersedes_roles"])
+    return [
+        role for role in effective if role["id"] not in superseded
+    ] + v4["roles"]
 
 
 class HookOwnerSandbox(unittest.TestCase):
@@ -378,7 +416,7 @@ class TestHookOwnerContract(HookOwnerSandbox):
             entry["command"] = str(
                 (REPO / role["direct_command_role"]).resolve())
             self.assertIn(entry, hooks[role["event"]], role["id"])
-        self.assertEqual(sum(len(rows) for rows in hooks.values()), 7)
+        self.assertEqual(sum(len(rows) for rows in hooks.values()), 10)
 
     def test_hook_owner_fixtures_are_generic_and_token_bounded(self):
         for fixture in FIXTURES.iterdir():
@@ -410,7 +448,7 @@ class TestHookOwnerInstall(HookOwnerSandbox):
             pointer["hook_owner_contract_sha256"],
             _sha256(self.runtime / "contracts" / "awa-contract.v1.json"))
 
-    def test_clean_direct_install_creates_exact_seven_composed_roles(self):
+    def test_clean_direct_install_creates_exact_ten_composed_roles(self):
         first = self.run_install()
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         document = json.loads(self.hooks.read_text(encoding="utf-8"))
