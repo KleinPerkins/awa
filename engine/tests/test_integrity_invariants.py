@@ -1340,12 +1340,12 @@ class TestExternalOwnerHookFacts(unittest.TestCase):
         )
         return rows, row, role
 
-    def test_external_owner_seven_role_projection_is_green(self):
+    def test_external_owner_ten_role_projection_is_green(self):
         document, roles = self._projection()
-        self.assertEqual(len(roles), 7)
+        self.assertEqual(len(roles), 10)
         self.assertEqual(
             sum(len(rows) for rows in document["hooks"].values()),
-            7,
+            10,
         )
         self._write_projection(document)
 

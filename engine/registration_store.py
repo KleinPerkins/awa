@@ -746,6 +746,34 @@ class RegistrationStore:
             else None
         )
 
+    def storage_ready(self) -> bool:
+        """Fresh read-only profile/free-space readiness for aggregate status."""
+        with self._read_scope():
+            self._connection.execute("BEGIN")
+            try:
+                if self._profile_binding is not None:
+                    measured = self._profile_binding.recheck(
+                        self._connection
+                    )
+                else:
+                    descriptor = os.open(
+                        self.db_path,
+                        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    )
+                    try:
+                        assert self._free_bytes is not None
+                        measured = int(self._free_bytes(descriptor))
+                    finally:
+                        os.close(descriptor)
+                outstanding = self._outstanding_reservations()
+                return measured >= (
+                    FILESYSTEM_SAFETY_FLOOR
+                    + MAX_CONTROL_RESERVE
+                    + outstanding
+                )
+            finally:
+                self._connection.execute("ROLLBACK")
+
     def _validate_profile_targets(
         self, targets: list[tuple[str, Path, str, int]]
     ) -> None:

@@ -1863,6 +1863,42 @@ _V3_HOOK_LAYOUT = (
         None,
     ),
 )
+_V4_HOOK_LAYOUT = (
+    (
+        "registration.tool-admission",
+        "preToolUse",
+        "kernel/hooks/awa-registration-admission.sh",
+        "host-policy-delegator",
+        {
+            "type": "command",
+            "matcher": "*",
+            "timeout": 20,
+            "failClosed": False,
+        },
+        None,
+    ),
+    (
+        "registration.subagent-admission",
+        "subagentStart",
+        "kernel/hooks/awa-registration-admission.sh",
+        "host-policy-delegator",
+        {
+            "type": "command",
+            "matcher": "*",
+            "timeout": 20,
+            "failClosed": False,
+        },
+        None,
+    ),
+    (
+        "registration.startup-reconcile",
+        "sessionStart",
+        "kernel/hooks/awa-registration-startup.sh",
+        "host-policy-delegator",
+        {"type": "command", "timeout": 5, "failClosed": False},
+        None,
+    ),
+)
 
 
 def _roles_match_layout(roles: object, layout: tuple) -> bool:
@@ -2015,6 +2051,41 @@ def _valid_v3_hook_contract(source: Path, v3: object) -> bool:
     )
 
 
+def _valid_v4_hook_contract(source: Path, v4: object) -> bool:
+    if not isinstance(v4, dict):
+        return False
+    roles = v4.get("roles")
+    return (
+        v4.get("schema") == "awa-hook-owner/v4"
+        and v4.get("version") == 4
+        and v4.get("successor_of") == "awa-hook-owner/v3"
+        and v4.get("v3_contract") == "contracts/awa-hook-owner.v3.json"
+        and v4.get("modes") == ["direct", "external"]
+        and v4.get("default_mode") == "direct"
+        and v4.get("selection_env") == "AWA_HOOK_OWNER"
+        and v4.get("selection_schema") == "awa-hook-owner-selection/v1"
+        and v4.get("external_real_hook_file_writes") is False
+        and v4.get("supersedes_roles") == []
+        and v4.get("matcher_modes") == ["CATCH_ALL", "ENUMERATED"]
+        and isinstance(v4.get("composition_rule"), str)
+        and bool(v4["composition_rule"])
+        and isinstance(v4.get("activation_rule"), str)
+        and bool(v4["activation_rule"])
+        and isinstance(v4.get("external_rule"), str)
+        and bool(v4["external_rule"])
+        and _roles_match_layout(roles, _V4_HOOK_LAYOUT)
+        and all(
+            _valid_hook_role(source, role, allow_dormant=False)
+            for role in roles or []
+        )
+        and all(
+            role["external_command_path_class"] == "host-policy-delegator"
+            and role["entry"].get("failClosed") is False
+            for role in roles or []
+        )
+    )
+
+
 def _effective_hook_roles(source: Path) -> list[dict] | None:
     v1_path = source / "contracts" / "awa-contract.v1.json"
     try:
@@ -2046,8 +2117,9 @@ def _effective_hook_roles(source: Path) -> list[dict] | None:
     v1_roles = v1["roles"]
     v2_path = source / "contracts" / "awa-hook-owner.v2.json"
     v3_path = source / "contracts" / "awa-hook-owner.v3.json"
+    v4_path = source / "contracts" / "awa-hook-owner.v4.json"
     if not v2_path.exists():
-        if v3_path.exists():
+        if v3_path.exists() or v4_path.exists():
             return None
         return list(v1_roles)
     try:
@@ -2066,6 +2138,8 @@ def _effective_hook_roles(source: Path) -> list[dict] | None:
         role for role in v1_roles if role["id"] not in superseded
     ] + list(v2["roles"])
     if not v3_path.exists():
+        if v4_path.exists():
+            return None
         return effective
     try:
         v3 = json.loads(v3_path.read_text(encoding="utf-8"))
@@ -2079,9 +2153,26 @@ def _effective_hook_roles(source: Path) -> list[dict] | None:
     if not _valid_v3_hook_contract(source, v3):
         return None
     superseded = set(v3["supersedes_roles"])
-    return [
+    effective = [
         role for role in effective if role["id"] not in superseded
     ] + list(v3["roles"])
+    if not v4_path.exists():
+        return effective
+    try:
+        v4 = json.loads(v4_path.read_text(encoding="utf-8"))
+    except (
+        OSError,
+        TypeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ):
+        return None
+    if not _valid_v4_hook_contract(source, v4):
+        return None
+    superseded = set(v4["supersedes_roles"])
+    return [
+        role for role in effective if role["id"] not in superseded
+    ] + list(v4["roles"])
 
 
 def _bounded_json_object(path: Path) -> dict | None:

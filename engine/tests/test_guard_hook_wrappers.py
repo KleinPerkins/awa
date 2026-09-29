@@ -886,8 +886,14 @@ class TestBashGuardWrapperParity(unittest.TestCase):
     def test_classifier_unavailable_asks_not_denies(self):
         """classify_context fail-safe (include + reason fail-safe: ask) must ASK, not DENY."""
         installed = self._install_guard()
+        source_copy = self.root / "source-classifier-unavailable" / "kernel"
+        shutil.copytree(_REPO / "kernel", source_copy)
         for label, guard, lib in (
-            ("source", _GUARD, _REPO / "kernel" / "lib" / "awa_policy.py"),
+            (
+                "source",
+                source_copy / "hooks" / "worktree-guard.sh",
+                source_copy / "lib" / "awa_policy.py",
+            ),
             (
                 "installed",
                 installed,

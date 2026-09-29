@@ -15,6 +15,7 @@ AWA_HOME="${AWA_HOME:-$(cd "$KERNEL_DIR/.." && pwd)}"           # install root (
 CONTRACT="$AWA_HOME/contracts/awa-contract.v1.json"
 HOOK_OWNER_V2="$AWA_HOME/contracts/awa-hook-owner.v2.json"
 HOOK_OWNER_V3="$AWA_HOME/contracts/awa-hook-owner.v3.json"
+HOOK_OWNER_V4="$AWA_HOME/contracts/awa-hook-owner.v4.json"
 DEV_WORKTREE="$AWA_HOME/kernel/bin/dev-worktree.sh"
 GUARD="$AWA_HOME/kernel/hooks/worktree-guard.sh"
 COMPOSITE_GUARD="$AWA_HOME/kernel/hooks/worktree-guard-with-integrity.sh"
@@ -24,6 +25,10 @@ PROMPT_COMPOSITE="$AWA_HOME/kernel/hooks/before-submit-prompt-with-entry.sh"
 HANDOFF_AUTHORITY="$AWA_HOME/kernel/lib/awa_handoff.py"
 INTEGRITY_DETACHER="$AWA_HOME/engine/integrity_detach.py"
 PROMPT_ADAPTER="$AWA_HOME/engine/native_entry_prompt_adapter.py"
+REGISTRATION_ADMISSION="$AWA_HOME/kernel/hooks/awa-registration-admission.sh"
+REGISTRATION_STARTUP="$AWA_HOME/kernel/hooks/awa-registration-startup.sh"
+REGISTRATION_TICK="$AWA_HOME/kernel/bin/awa-registration-tick.sh"
+REGISTRATION_RECEIVER="$AWA_HOME/kernel/bin/awa-registration-receiver.sh"
 INSTALL_HOOKS="$AWA_HOME/kernel/hooks/install-hooks.sh"
 EMITTER="$AWA_HOME/dashboard/emitter.py"
 
@@ -64,15 +69,21 @@ if [ ! -f "$HOOK_OWNER_V3" ] ||
    ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$HOOK_OWNER_V3" 2>/dev/null; then
   bad "hook-owner v3 contract missing or invalid: $HOOK_OWNER_V3"
 fi
+if [ ! -f "$HOOK_OWNER_V4" ] ||
+   ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$HOOK_OWNER_V4" 2>/dev/null; then
+  bad "hook-owner v4 contract missing or invalid: $HOOK_OWNER_V4"
+fi
 for f in "$DEV_WORKTREE" "$GUARD" "$COMPOSITE_GUARD" \
     "$INTEGRITY_OBSERVER" "$SESSION_HANDOFF" "$PROMPT_COMPOSITE" \
     "$HANDOFF_AUTHORITY" "$INTEGRITY_DETACHER" "$PROMPT_ADAPTER" \
-  "$INSTALL_HOOKS" "$EMITTER"; do
+    "$REGISTRATION_ADMISSION" "$REGISTRATION_STARTUP" "$REGISTRATION_TICK" \
+    "$REGISTRATION_RECEIVER" \
+    "$INSTALL_HOOKS" "$EMITTER"; do
   [ -f "$f" ] || bad "role-resolved shim missing: $f"
 done
 
-# 0) awa-hook-owner/v3 is the preferred additive successor. The effective
-# direct projection composes frozen v1 plus v2 plus v3 supersession. External
+# 0) awa-hook-owner/v4 is the preferred additive successor. The effective
+# direct projection composes frozen v1 plus v2/v3 supersession plus v4. External
 # install/check must still exit before creating even the selected destination's parent.
 owner_tmp="$(mktemp -d)"
 owner_direct="$owner_tmp/direct-hooks.json"
@@ -93,7 +104,7 @@ if [ "$owner_install_rc" -eq 0 ] && [ "$owner_check_rc" -eq 0 ] && \
    [ "$owner_external_install_rc" -eq 0 ] && [ "$owner_external_check_rc" -eq 0 ] && \
    [ ! -e "$owner_tmp/external-parent" ] && \
    CONTRACT="$CONTRACT" HOOK_OWNER_V2="$HOOK_OWNER_V2" \
-   HOOK_OWNER_V3="$HOOK_OWNER_V3" \
+   HOOK_OWNER_V3="$HOOK_OWNER_V3" HOOK_OWNER_V4="$HOOK_OWNER_V4" \
    OWNER_DIRECT="$owner_direct" AWA_HOME="$AWA_HOME" python3 - <<'PY'
 import json
 import os
@@ -104,6 +115,7 @@ contract = json.load(open(os.environ["CONTRACT"], encoding="utf-8"))
 v1 = contract.get("hook_ownership")
 v2 = json.load(open(os.environ["HOOK_OWNER_V2"], encoding="utf-8"))
 v3 = json.load(open(os.environ["HOOK_OWNER_V3"], encoding="utf-8"))
+v4 = json.load(open(os.environ["HOOK_OWNER_V4"], encoding="utf-8"))
 v1_ids = [
     "worktree.session-context",
     "worktree.shell-guard",
@@ -139,6 +151,17 @@ v2_paths = [
 v3_ids = ["finish.prompt-recall-with-entry"]
 v3_events = ["beforeSubmitPrompt"]
 v3_paths = ["kernel/hooks/before-submit-prompt-with-entry.sh"]
+v4_ids = [
+    "registration.tool-admission",
+    "registration.subagent-admission",
+    "registration.startup-reconcile",
+]
+v4_events = ["preToolUse", "subagentStart", "sessionStart"]
+v4_paths = [
+    "kernel/hooks/awa-registration-admission.sh",
+    "kernel/hooks/awa-registration-admission.sh",
+    "kernel/hooks/awa-registration-startup.sh",
+]
 errors = []
 if not isinstance(v1, dict):
     errors.append("missing hook_ownership block")
@@ -259,6 +282,52 @@ if any(
 ):
     errors.append("v3 external path-class drift")
 
+required_v4 = {
+    "schema", "version", "successor_of", "v3_contract", "modes",
+    "default_mode", "selection_env", "selection_schema",
+    "external_real_hook_file_writes", "supersedes_roles",
+    "matcher_modes", "composition_rule", "activation_rule",
+    "external_rule", "roles",
+}
+if not required_v4.issubset(v4):
+    errors.append("v4 required field drift")
+if v4.get("schema") != "awa-hook-owner/v4" or v4.get("version") != 4:
+    errors.append("v4 schema/version drift")
+if v4.get("successor_of") != "awa-hook-owner/v3":
+    errors.append("v4 successor drift")
+if v4.get("v3_contract") != "contracts/awa-hook-owner.v3.json":
+    errors.append("v4 compatibility pointer drift")
+if v4.get("modes") != ["direct", "external"]:
+    errors.append("v4 mode vocabulary/order drift")
+if v4.get("default_mode") != "direct":
+    errors.append("v4 direct default drift")
+if v4.get("selection_env") != "AWA_HOOK_OWNER":
+    errors.append("v4 selection env drift")
+if v4.get("selection_schema") != "awa-hook-owner-selection/v1":
+    errors.append("v4 selection schema drift")
+if v4.get("external_real_hook_file_writes") is not False:
+    errors.append("v4 external write boundary drift")
+if v4.get("supersedes_roles") != []:
+    errors.append("v4 supersession drift")
+if v4.get("matcher_modes") != ["CATCH_ALL", "ENUMERATED"]:
+    errors.append("v4 matcher-mode drift")
+v4_roles = v4.get("roles")
+if not isinstance(v4_roles, list) or len(v4_roles) != 3:
+    errors.append("v4 role count drift")
+    v4_roles = []
+if [role.get("id") for role in v4_roles] != v4_ids:
+    errors.append("v4 role identity/order drift")
+if [role.get("event") for role in v4_roles] != v4_events:
+    errors.append("v4 event order drift")
+if [role.get("direct_command_role") for role in v4_roles] != v4_paths:
+    errors.append("v4 direct path drift")
+if any(
+    role.get("external_command_path_class") != "host-policy-delegator"
+    or role.get("entry", {}).get("failClosed") is not False
+    for role in v4_roles
+):
+    errors.append("v4 external/fail-open role drift")
+
 try:
     projection = json.load(open(os.environ["OWNER_DIRECT"], encoding="utf-8"))
 except Exception:
@@ -275,6 +344,9 @@ roles.extend(v2_roles)
 superseded = set(v3.get("supersedes_roles", []))
 roles = [role for role in roles if role.get("id") not in superseded]
 roles.extend(v3_roles)
+superseded = set(v4.get("supersedes_roles", []))
+roles = [role for role in roles if role.get("id") not in superseded]
+roles.extend(v4_roles)
 matched = 0
 for role in roles:
     required_role = {
@@ -293,9 +365,9 @@ for role in roles:
     if count != 1:
         errors.append(f"direct projection count drift: {role['id']}={count}")
     matched += count
-if sum(len(rows) for rows in hooks.values() if isinstance(rows, list)) != 7:
-    errors.append("direct v3 projection does not contain exactly seven rows")
-if matched != 7:
+if sum(len(rows) for rows in hooks.values() if isinstance(rows, list)) != 10:
+    errors.append("direct v4 projection does not contain exactly ten rows")
+if matched != 10:
     errors.append("direct projection/contract parity incomplete")
 
 if errors:
@@ -303,9 +375,9 @@ if errors:
     raise SystemExit(1)
 PY
 then
-  pass "awa-hook-owner/v3 preferred; seven-role direct projection matches; v1/v2 compatibility and external zero-access retained"
+  pass "awa-hook-owner/v4 preferred; ten-role direct projection matches; v1-v3 compatibility and external zero-access retained"
 else
-  bad "awa-hook-owner v3/v2/v1 contract or reconciler parity drifted"
+  bad "awa-hook-owner v4/v3/v2/v1 contract or reconciler parity drifted"
 fi
 rm -rf "$owner_tmp" 2>/dev/null || true
 
@@ -314,7 +386,9 @@ rm -rf "$owner_tmp" 2>/dev/null || true
 # its single metadata-only authority with fail-open sessionStart behavior.
 if has_executable_mode "$COMPOSITE_GUARD" "$INTEGRITY_OBSERVER" \
      "$SESSION_HANDOFF" "$PROMPT_COMPOSITE" "$INTEGRITY_DETACHER" \
-     "$PROMPT_ADAPTER" && \
+     "$PROMPT_ADAPTER" "$REGISTRATION_ADMISSION" \
+     "$REGISTRATION_STARTUP" "$REGISTRATION_TICK" \
+     "$REGISTRATION_RECEIVER" && \
    grep -Fq '[[ -z "${AWA_INTEGRITY_GUARD:-}" ]]' \
      "$COMPOSITE_GUARD" && \
    grep -Fq 'exec bash "$GUARD"' "$COMPOSITE_GUARD" && \
@@ -326,6 +400,12 @@ if has_executable_mode "$COMPOSITE_GUARD" "$INTEGRITY_OBSERVER" \
    grep -Fq '|| true' "$SESSION_HANDOFF" && \
    grep -Fq 'native_entry_prompt_adapter.py' "$PROMPT_COMPOSITE" && \
    grep -Fq 'before-submit-prompt.sh' "$PROMPT_COMPOSITE" && \
+   grep -Fq 'engine.registration_receiver admission' "$REGISTRATION_ADMISSION" && \
+   grep -Fq 'engine.registration_receiver startup' "$REGISTRATION_STARTUP" && \
+   grep -Fq 'engine.registration_receiver tick' "$REGISTRATION_TICK" && \
+   grep -Fq 'engine.registration_hook_runtime' "$REGISTRATION_RECEIVER" && \
+   grep -Fq 'engine.registration_host startup' "$REGISTRATION_RECEIVER" && \
+   grep -Fq 'engine.registration_host tick' "$REGISTRATION_RECEIVER" && \
    grep -Fq 'HARD_BUDGET_SECONDS = 2.0' "$PROMPT_ADAPTER" && \
    grep -Fq 'start_new_session=True' "$PROMPT_ADAPTER" && \
    grep -Fq 'close_fds=True' "$PROMPT_ADAPTER" && \

@@ -1,0 +1,59 @@
+{
+  "schema": "awa-hook-owner/v4",
+  "version": 4,
+  "successor_of": "awa-hook-owner/v3",
+  "v3_contract": "contracts/awa-hook-owner.v3.json",
+  "modes": [
+    "direct",
+    "external"
+  ],
+  "default_mode": "direct",
+  "selection_env": "AWA_HOOK_OWNER",
+  "selection_schema": "awa-hook-owner-selection/v1",
+  "external_real_hook_file_writes": false,
+  "supersedes_roles": [],
+  "matcher_modes": [
+    "CATCH_ALL",
+    "ENUMERATED"
+  ],
+  "composition_rule": "The effective direct projection is the fully composed awa-hook-owner/v1 through awa-hook-owner/v3 role set plus the three roles declared here. Registration roles do not supersede or authorize guard, finish, cleanup, active-root, or ADR 0020 alert behavior.",
+  "activation_rule": "CATCH_ALL requires an official preToolUse contract plus exact-build live discriminator receipts for ordinary, MCP, renamed, unknown, and Task launch tools. ENUMERATED requires exact installed inventory including every Task/subagent launch discriminator. Missing Task receivability yields HOOK_UNSUPPORTED and no WRITABLE activation.",
+  "external_rule": "External ownership is rejected before registration receipt construction or persistence. The external host remains sole owner of the selected hook file; AWA does not read, stat, render, back up, chmod, write, or remove it.",
+  "roles": [
+    {
+      "id": "registration.tool-admission",
+      "event": "preToolUse",
+      "direct_command_role": "kernel/hooks/awa-registration-admission.sh",
+      "external_command_path_class": "host-policy-delegator",
+      "entry": {
+        "type": "command",
+        "matcher": "*",
+        "timeout": 20,
+        "failClosed": false
+      }
+    },
+    {
+      "id": "registration.subagent-admission",
+      "event": "subagentStart",
+      "direct_command_role": "kernel/hooks/awa-registration-admission.sh",
+      "external_command_path_class": "host-policy-delegator",
+      "entry": {
+        "type": "command",
+        "matcher": "*",
+        "timeout": 20,
+        "failClosed": false
+      }
+    },
+    {
+      "id": "registration.startup-reconcile",
+      "event": "sessionStart",
+      "direct_command_role": "kernel/hooks/awa-registration-startup.sh",
+      "external_command_path_class": "host-policy-delegator",
+      "entry": {
+        "type": "command",
+        "timeout": 5,
+        "failClosed": false
+      }
+    }
+  ]
+}

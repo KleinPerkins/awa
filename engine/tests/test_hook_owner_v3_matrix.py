@@ -20,6 +20,7 @@ _DOCTOR = _ROOT / "kernel" / "bin" / "dev-worktree.sh"
 _V1 = _ROOT / "contracts" / "awa-contract.v1.json"
 _V2 = _ROOT / "contracts" / "awa-hook-owner.v2.json"
 _V3 = _ROOT / "contracts" / "awa-hook-owner.v3.json"
+_V4 = _ROOT / "contracts" / "awa-hook-owner.v4.json"
 _BASE = "ff978ade5ff9c7604f58f4b3810b1cd75ea3287f"
 
 
@@ -127,12 +128,12 @@ class TestHookOwnerV3Matrix(unittest.TestCase):
         )
         self.assertTrue(integrity._valid_v3_hook_contract(_ROOT, v3))
 
-    def test_direct_projection_prefers_v3_and_removes_old_finish_row(self) -> None:
+    def test_direct_projection_composes_v3_under_v4_and_removes_old_finish_row(self) -> None:
         installed = self._run()
         self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
         checked = self._run("--check")
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
-        self.assertIn("awa-hook-owner/v3", checked.stdout)
+        self.assertIn("awa-hook-owner/v4", checked.stdout)
         hooks = json.loads(self.hooks.read_text(encoding="utf-8"))["hooks"]
         prompt_rows = hooks["beforeSubmitPrompt"]
         self.assertEqual(len(prompt_rows), 1)
@@ -147,7 +148,7 @@ class TestHookOwnerV3Matrix(unittest.TestCase):
                 ).resolve()
             ),
         )
-        self.assertEqual(sum(len(rows) for rows in hooks.values()), 7)
+        self.assertEqual(sum(len(rows) for rows in hooks.values()), 10)
         self.assertNotIn(
             str((_ROOT / "kernel" / "hooks" / "before-submit-prompt.sh").resolve()),
             [row.get("command") for row in prompt_rows],
@@ -232,7 +233,7 @@ class TestHookOwnerV3Matrix(unittest.TestCase):
         )
         self.assertEqual(blocked.read_bytes(), b"sentinel\n")
 
-    def test_doctor_prefers_v3_and_lists_compatibility(self) -> None:
+    def test_doctor_prefers_v4_and_lists_v3_compatibility(self) -> None:
         result = subprocess.run(
             ["bash", str(_DOCTOR), "doctor"],
             cwd=_ROOT,
@@ -242,7 +243,8 @@ class TestHookOwnerV3Matrix(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("preferred: awa-hook-owner/v3", result.stdout)
+        self.assertIn("preferred: awa-hook-owner/v4", result.stdout)
+        self.assertIn("compatibility: awa-hook-owner/v3", result.stdout)
         self.assertIn("compatibility: awa-hook-owner/v2", result.stdout)
         self.assertIn("compatibility: awa-hook-owner/v1", result.stdout)
         self.assertIn("finish.prompt-recall-with-entry", result.stdout)
