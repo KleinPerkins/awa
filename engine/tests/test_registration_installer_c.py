@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
@@ -294,6 +295,10 @@ class CutoverMatrixTest(unittest.TestCase):
             "enter_containment:DRAIN_BOOT_CHANGED", control.calls
         )
 
+    @unittest.skipIf(
+        sqlite3.sqlite_version_info < registration_store.MIN_SQLITE_VERSION,
+        "ADR 0025 requires stock SQLite >=3.51.3",
+    )
     def test_real_body_a_control_adapter_owns_every_protocol_transition(
         self,
     ) -> None:
@@ -414,6 +419,10 @@ class CutoverMatrixTest(unittest.TestCase):
 
 
 class InstallerAuthenticationTest(unittest.TestCase):
+    @unittest.skipIf(
+        sqlite3.sqlite_version_info < registration_store.MIN_SQLITE_VERSION,
+        "ADR 0025 requires stock SQLite >=3.51.3",
+    )
     def test_typed_storage_readiness_remeasures_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             db = Path(raw) / "state/registration-v1/registration.db"
