@@ -65,6 +65,7 @@ lands — this directory already follows the reference shape it derived from.
 | `native-entry-first-prompt-recovery-v1.md` | ACCEPTED — FROZEN — 2026-09-25 | Plan for ADR 0024's payload-bound first-prompt recovery, monotonic `awa-native-entry/v2` evidence, timeout-contained prompt adapter, and hook-owner v3; implementation GO recorded against `ff978ade5ff9c7604f58f4b3810b1cd75ea3287f`. |
 | `native-entry-durable-registration-v2.md` | SUPERSEDED DRAFT — 2026-09-26 | Rejected as non-minimal and superseded by the v3 draft indexed immediately below; preserved byte-identically for provenance and never implementation authority. |
 | `native-entry-durable-registration-v3.md` | ACCEPTED — C0-DESIGN NO-GO — 2026-09-26 | Single-root candidate with one merged request/effect authority and member epoch, exact 7-table/9-trigger/97-generated-leaf manifest, direct OPEN authority, audit-only transition witness, stateless rendering, member-isolated admission, and distinct implementation/R1/C1/R2 gates; fresh exact-hash review/verifier adjudication remain C0 gates. |
+| `native-entry-durable-registration-v4.md` | ACCEPTED — GOVERNANCE ONLY; IMPLEMENTATION AND R0 NO-GO — 2026-09-29 | Conditional v3 successor with exact SQL v2, typed exhaustion, measured installer-selected interpreter, staged custody and >8 recovery, closed authority vectors, generation bundles, offline signing, status-last acceptance, three bodies, and finite-scope R0. |
 
 ## Related conventions
 
