@@ -421,7 +421,7 @@ def _intent(
             request_basis_hash=observation.identity.current_basis_hash,
             actions=(),
             external_growth_reservation_bytes=0,
-            outcome_reservation_bytes=64 * 1024,
+            outcome_reservation_bytes=96 * 1024,
             successor_reservation_bytes=64 * 1024,
             blocked_basis_fingerprint=observation.blocked_basis_fingerprint,
         )
@@ -458,7 +458,7 @@ def _intent(
         request_basis_hash=observation.identity.current_basis_hash,
         actions=tuple(actions),
         external_growth_reservation_bytes=64 * 1024,
-        outcome_reservation_bytes=64 * 1024,
+        outcome_reservation_bytes=96 * 1024,
         successor_reservation_bytes=64 * 1024,
     )
 

@@ -971,11 +971,6 @@ def _run_member_scenario(
             if name == "reacquire_adopted":
                 execution.close()
                 execution = None
-                scenario.store.advance_generation(
-                    scenario.harness.control(),
-                    scenario.candidate,
-                    quiescence_proof_hash="bb" * 32,
-                )
                 status = scenario.harness.connection.execute(
                     "SELECT member_id,status_hash FROM registration_runtime_status"
                 ).fetchone()
@@ -984,6 +979,11 @@ def _run_member_scenario(
                     scenario.candidate,
                     member_id=status["member_id"],
                     expected_status_hash=status["status_hash"],
+                )
+                scenario.store.advance_generation(
+                    scenario.harness.control(),
+                    scenario.candidate,
+                    quiescence_proof_hash="bb" * 32,
                 )
                 row = scenario.current()
                 before = _snapshot(scenario.store)
@@ -1053,12 +1053,25 @@ def _run_member_scenario(
             row = scenario.current()
             scenario.harness.sample_boot_id = "boot-b"
             before = _snapshot(scenario.store)
-            operation_id = scenario.store.reboot_status(
-                scenario.harness.data(),
-                scenario.candidate,
-                member_id=row["member_id"],
-                expected_status_hash=row["status_hash"],
-            ).operation_id
+            if variant in {
+                "requested_dirty",
+                "requested_operation",
+                "resolved_success",
+                "resolved_conflict",
+            }:
+                operation_id = (
+                    scenario.harness.reboot_sql_only_predecessor(
+                        row["member_id"],
+                        expected_status_hash=row["status_hash"],
+                    ).operation_id
+                )
+            else:
+                operation_id = scenario.store.reboot_status(
+                    scenario.harness.data(),
+                    scenario.candidate,
+                    member_id=row["member_id"],
+                    expected_status_hash=row["status_hash"],
+                ).operation_id
         elif name == "schedule":
             row = scenario.current()
             before = _snapshot(scenario.store)

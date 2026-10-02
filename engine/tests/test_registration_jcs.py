@@ -123,6 +123,15 @@ class RegistrationJcsTest(unittest.TestCase):
                 columns,
                 {"effect_id": H0, "member_id": H1},
             )
+        for boolean in (False, True):
+            with self.subTest(boolean=boolean), self.assertRaises(
+                registration_jcs.JcsError
+            ):
+                registration_jcs.row_hash(
+                    "awa-test-row/v1",
+                    columns,
+                    {**row, "member_epoch": boolean},
+                )
 
     def test_size_depth_and_node_limits_are_closed(self) -> None:
         with self.assertRaises(registration_jcs.JcsError):

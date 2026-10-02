@@ -13,6 +13,7 @@ class RegistrationHarness:
     _IDENTITY = b"fixture-installer-identity"
     _CAPABILITY = b"fixture-installer-capability"
     _WRITER = b"fixture-writer-capability"
+    _STAGED_WRITER = b"fixture-staged-writer-capability"
 
     def __init__(self, db_path: Path, *, measured_free_bytes: int) -> None:
         self.measured_free_bytes = measured_free_bytes
@@ -112,6 +113,34 @@ class RegistrationHarness:
             self._WRITER, candidate.writer_capability_hash
         )
 
+    def staged_candidate(self) -> registration_store.ProtocolCandidate:
+        def digest(label: str) -> str:
+            return hashlib.sha256(f"staged:{label}".encode()).hexdigest()
+
+        return registration_store.ProtocolCandidate(
+            profile_hash=digest("profile"),
+            runtime_capability_hash=digest("runtime"),
+            writer_binary_hash=digest("writer-binary"),
+            writer_capability_hash=registration_store._domain_hash(
+                "awa-registration-writer-capability/v1", self._STAGED_WRITER
+            ),
+            tool_inventory_hash=digest("tool-inventory"),
+            hook_projection_hash=digest("hook-projection"),
+            hook_matcher_mode="ENUMERATED",
+            hook_matcher_hash=digest("hook-matcher"),
+            projection_receipt_hash=digest("projection-receipt"),
+            projection_file_generation=2,
+            installer_identity_hash=digest("installer-identity"),
+            installer_capability_hash=digest("installer-capability"),
+            storage_dev=1,
+        )
+
+    def staged_data(self) -> registration_store.DataCapability:
+        candidate = self.staged_candidate()
+        return registration_store.authenticate_data(
+            self._STAGED_WRITER, candidate.writer_capability_hash
+        )
+
     def identity(
         self, *, ordinal: int = 1
     ) -> registration_store.MemberIdentity:
@@ -175,8 +204,8 @@ class RegistrationHarness:
                 )
             ),
             external_growth_reservation_bytes=64 * 1024,
-            outcome_reservation_bytes=64 * 1024,
-            successor_reservation_bytes=64 * 1024,
+            outcome_reservation_bytes=96 * 1024,
+            successor_reservation_bytes=32 * 1024,
         )
 
     def blocked_intent(
@@ -189,8 +218,8 @@ class RegistrationHarness:
             ).hexdigest(),
             actions=(),
             external_growth_reservation_bytes=0,
-            outcome_reservation_bytes=64 * 1024,
-            successor_reservation_bytes=64 * 1024,
+            outcome_reservation_bytes=96 * 1024,
+            successor_reservation_bytes=32 * 1024,
             blocked_basis_fingerprint=hashlib.sha256(
                 f"blocked:{ordinal}".encode()
             ).hexdigest(),
@@ -221,19 +250,24 @@ class RegistrationHarness:
         )
 
     def seed_reboot_target(self, member_id: str, *, boot_id: str) -> None:
-        """Seed an A01-only valid predecessor before the real T09 witness."""
+        """Create the SQL-v2-only stale-schedule predecessor for T09."""
+        if boot_id != self.sample_boot_id:
+            raise ValueError("seed boot must match the current harness boot")
         status = dict(
             self.connection.execute(
                 "SELECT * FROM registration_runtime_status WHERE member_id=?",
                 (member_id,),
             ).fetchone()
         )
+        sample_mono_ns = self._next_mono()
+        old_status_hash = status["status_hash"]
         status.update(
             {
+                "status_version": int(status["status_version"]) + 1,
                 "schedule_boot_id": boot_id,
-                "observed_now_mono_ns": 1,
-                "next_due_mono_ns": 1,
-                "due_since_mono_ns": 1,
+                "observed_now_mono_ns": sample_mono_ns,
+                "next_due_mono_ns": sample_mono_ns,
+                "due_since_mono_ns": sample_mono_ns,
                 "attempt_count": 0,
                 "backoff_ns": 0,
             }
@@ -241,36 +275,96 @@ class RegistrationHarness:
         status["status_hash"] = registration_hashes.derive(
             "status_hash", status
         )
-        trigger_sql = self.connection.execute(
-            "SELECT sql FROM sqlite_schema "
-            "WHERE name='trg_runtime_status_update'"
-        ).fetchone()[0]
+        operation_id = self._next_operation_id()
+        operation = self.store._operation_base(
+            operation_id=operation_id,
+            operation_class="DATA",
+            operation_kind="SCHEDULE_STATUS",
+            measured_free_bytes=self.measured_free_bytes,
+            projected_db_growth_bytes=0,
+            candidate=self.candidate(),
+            control=None,
+            data=self.data(),
+            overrides={
+                "target_member_id": member_id,
+                "target_effect_id": status["current_effect_id"],
+                "expected_target_status_hash": old_status_hash,
+                "target_subject_key": status["subject_key"],
+                "target_status_hash": status["status_hash"],
+                "sample_boot_id": boot_id,
+                "sample_mono_ns": sample_mono_ns,
+            },
+        )
+        status["write_operation_seq"] = operation["operation_seq"]
+        status["write_operation_id"] = operation_id
+        status["write_operation_hash"] = operation[
+            "operation_envelope_hash"
+        ]
+
+        # These predecessors are deliberately unreachable through SCHEDULE_STATUS
+        # but are accepted inputs to the pinned SQL-v2 REBOOT_STATUS leaves. Seed
+        # one with a complete, hash-valid audit companion instead of leaving the
+        # backlink incoherent.
+        trigger_names = (
+            "trg_operation_audit_insert",
+            "trg_runtime_status_update",
+        )
+        trigger_sql = {
+            name: self.connection.execute(
+                "SELECT sql FROM sqlite_schema WHERE name=?", (name,)
+            ).fetchone()[0]
+            for name in trigger_names
+        }
         external = sqlite3.connect(
             str(self.store.db_path), timeout=5.0, isolation_level=None
         )
         try:
             external.execute("BEGIN IMMEDIATE")
-            external.execute("DROP TRIGGER trg_runtime_status_update")
+            for name in trigger_names:
+                external.execute(f"DROP TRIGGER {name}")
+            columns = tuple(operation)
+            external.execute(
+                "INSERT INTO registration_operation_audit"
+                f"({','.join(columns)}) VALUES"
+                f"({','.join('?' for _ in columns)})",
+                tuple(operation[column] for column in columns),
+            )
+            status_columns = tuple(
+                column for column in status if column != "subject_key"
+            )
             external.execute(
                 "UPDATE registration_runtime_status SET "
-                "schedule_boot_id=?,observed_now_mono_ns=?,next_due_mono_ns=?,"
-                "due_since_mono_ns=?,attempt_count=?,backoff_ns=?,status_hash=? "
-                "WHERE member_id=?",
-                (
-                    status["schedule_boot_id"],
-                    status["observed_now_mono_ns"],
-                    status["next_due_mono_ns"],
-                    status["due_since_mono_ns"],
-                    status["attempt_count"],
-                    status["backoff_ns"],
-                    status["status_hash"],
-                    member_id,
-                ),
+                + ",".join(f"{column}=?" for column in status_columns)
+                + " WHERE subject_key=?",
+                tuple(status[column] for column in status_columns)
+                + (status["subject_key"],),
             )
-            external.execute(trigger_sql)
+            for name in trigger_names:
+                external.execute(trigger_sql[name])
             external.execute("COMMIT")
+        except BaseException:
+            if external.in_transaction:
+                external.execute("ROLLBACK")
+            raise
         finally:
             external.close()
+
+    def reboot_sql_only_predecessor(
+        self, member_id: str, *, expected_status_hash: str
+    ) -> registration_store.OperationResult:
+        """Exercise a T09 SQL leaf whose predecessor runtime rejects."""
+        original = self.store._outstanding_reservations
+        self.store._outstanding_reservations = lambda **_kwargs: 0
+        try:
+            return self.store.reboot_status(
+                self.data(),
+                self.candidate(),
+                member_id=member_id,
+                expected_status_hash=expected_status_hash,
+            )
+        finally:
+            del self.store._outstanding_reservations
+            assert self.store._outstanding_reservations == original
 
     def close(self) -> None:
         self.store.close()
