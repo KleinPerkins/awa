@@ -21,7 +21,9 @@ class StagedSecretTransferTest(unittest.TestCase):
             protocol_hash="6" * 64,
             staged_epoch_hash="7" * 64,
         )
-        transfer = registration_executor.StagedSecretTransfer.precreate()
+        transfer = registration_executor.StagedSecretTransfer.precreate(
+            clock_ns=lambda: 100
+        )
         self.addCleanup(transfer.close)
         deadline = transfer.deadline_after()
         transfer.send_frame(frame, b"q" * 32, deadline_ns=deadline)
@@ -52,7 +54,9 @@ class StagedSecretTransferTest(unittest.TestCase):
         self.assertEqual(unbounded.sender_fd, -1)
         self.assertEqual(unbounded.receiver_fd, -1)
 
-        timeout = registration_executor.StagedSecretTransfer.precreate()
+        timeout = registration_executor.StagedSecretTransfer.precreate(
+            clock_ns=lambda: 100
+        )
         with self.assertRaises(registration_executor.SecretTransferError):
             timeout.receive_frame(
                 deadline_ns=timeout.deadline_after(0.01),
@@ -73,7 +77,9 @@ class StagedSecretTransferTest(unittest.TestCase):
             protocol_hash="6" * 64,
             staged_epoch_hash="7" * 64,
         )
-        mismatch = registration_executor.StagedSecretTransfer.precreate()
+        mismatch = registration_executor.StagedSecretTransfer.precreate(
+            clock_ns=lambda: 100
+        )
         deadline = mismatch.deadline_after()
         mismatch.send_frame(frame, b"q" * 32, deadline_ns=deadline)
         with self.assertRaises(registration_executor.SecretTransferError):
