@@ -284,11 +284,6 @@ class RegistrationCoordinatorTest(unittest.TestCase):
                 expected_status_hash=authority.status["status_hash"],
             )
             adopted.execution.close()
-            harness.store.advance_generation(
-                harness.control(),
-                harness.candidate(),
-                quiescence_proof_hash="bb" * 32,
-            )
             status = harness.store.read_selected_authority(
                 ensured.member_id
             ).status
@@ -297,6 +292,11 @@ class RegistrationCoordinatorTest(unittest.TestCase):
                 harness.candidate(),
                 member_id=ensured.member_id,
                 expected_status_hash=status["status_hash"],
+            )
+            harness.store.advance_generation(
+                harness.control(),
+                harness.candidate(),
+                quiescence_proof_hash="bb" * 32,
             )
             helpers = {
                 kind: FakeActionHelper()

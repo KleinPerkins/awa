@@ -310,11 +310,9 @@ def validate_blob(
 
 
 def _row_value(value: Any) -> Any:
-    if value is None or isinstance(value, (str, bool)):
+    if value is None or isinstance(value, str):
         return value
-    if isinstance(value, int) and not isinstance(value, bool):
-        if value < 0:
-            return str(value)
+    if type(value) is int:
         return str(value)
     raise JcsError(f"unsupported relational hash value: {type(value).__name__}")
 

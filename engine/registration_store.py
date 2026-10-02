@@ -15,6 +15,7 @@ import secrets
 import sqlite3
 import threading
 import time
+from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,14 @@ FILESYSTEM_SAFETY_FLOOR = 1024**3
 MAX_CONTROL_RESERVE = 14 * 1024**2
 MIN_SQLITE_VERSION = (3, 51, 3)
 ZERO_HASH = "0" * 64
+BASE_OUTCOME_RESERVATION = 49_152
+RECOVERY_RESERVATION = 49_152
+MIN_OUTCOME_RESERVATION = BASE_OUTCOME_RESERVATION + RECOVERY_RESERVATION
+MIN_SUCCESSOR_RESERVATION = 32_768
+RECOVERY_OPERATION_BYTES = 8_192
+MAX_RECOVERY_OPERATIONS = 6
+UNVALIDATED_EFFECT_CHARGE = 18_874_368
+UNVALIDATED_SUCCESSOR_CHARGE = 1_048_576
 PROJECTED_DB_BYTES = {
     "BOOTSTRAP": 1024**2,
     "INSTALL_MEMBER": 32 * 1024,
@@ -64,6 +73,59 @@ PROJECTED_DB_BYTES = {
     "ENTER_CONTAINMENT": 16 * 1024,
     "BEGIN_REPAIR": 16 * 1024,
 }
+_CONTROL_OPERATION_KINDS = frozenset(
+    {
+        "ACTIVATE",
+        "BEGIN_DRAIN",
+        "STAGE_NEXT",
+        "CANCEL_DRAIN",
+        "ADOPT_EFFECT",
+        "ADVANCE_GENERATION",
+        "PRE_EFFECT_DORMANT",
+        "ENTER_CONTAINMENT",
+        "BEGIN_REPAIR",
+    }
+)
+_EFFECT_CREATION_KINDS = frozenset(
+    {
+        "INSTALL_MEMBER",
+        "INVALIDATE_REQUESTED",
+        "SET_PENDING",
+        "REPLACE_PENDING",
+        "HANDOFF_RESOLVED",
+        "ADOPT_EFFECT",
+    }
+)
+_MEMBER_WRITE_KINDS = frozenset(
+    {
+        "INSTALL_MEMBER",
+        "OPEN_EFFECT",
+        "INVALIDATE_REQUESTED",
+        "SET_PENDING",
+        "REPLACE_PENDING",
+        "HANDOFF_RESOLVED",
+        "ADOPT_EFFECT",
+        "CLOSE_SUCCESS",
+        "CLOSE_CONFLICT",
+    }
+)
+_STATUS_WRITE_KINDS = frozenset(
+    {
+        "INSTALL_MEMBER",
+        "OPEN_EFFECT",
+        "REACQUIRE_EFFECT",
+        "ADOPT_EFFECT",
+        "MARK_UNAVAILABLE",
+        "REBOOT_STATUS",
+        "SCHEDULE_STATUS",
+        "INVALIDATE_REQUESTED",
+        "SET_PENDING",
+        "REPLACE_PENDING",
+        "HANDOFF_RESOLVED",
+        "CLOSE_SUCCESS",
+        "CLOSE_CONFLICT",
+    }
+)
 
 _PROTOCOL_COLUMNS = registration_hashes.PREIMAGES["protocol_hash"].columns
 _OPERATION_COLUMNS = registration_hashes.PREIMAGES[
@@ -88,6 +150,10 @@ class StaleAuthority(StoreError):
 
 
 class StoreUnavailable(StoreError):
+    pass
+
+
+class SemanticClosureError(StoreUnavailable):
     pass
 
 
@@ -144,6 +210,12 @@ class ProtocolCandidate:
                 raise ValueError(f"{field} must be lowercase 64-hex")
         if self.hook_matcher_mode not in {"CATCH_ALL", "ENUMERATED"}:
             raise ValueError("invalid hook matcher mode")
+        _require_int(
+            self.projection_file_generation,
+            "projection_file_generation",
+            minimum=1,
+        )
+        _require_int(self.storage_dev, "storage_dev", minimum=0)
         if self.projection_file_generation < 1 or self.storage_dev < 0:
             raise ValueError("invalid candidate generation/device")
 
@@ -153,6 +225,8 @@ _DATA_SEAL = object()
 _EXECUTION_SEAL = object()
 _TEST_PROFILE_SEAL = object()
 _CREATION_LOCK_SEAL = object()
+_RECOVERY_EXHAUSTION_SEAL = object()
+_UNSPECIFIED = object()
 
 
 class ControlCapability:
@@ -257,6 +331,68 @@ class OperationResult:
     target_hash: str
 
 
+class RecoveryReserveExhausted:
+    """Sealed, process-only evidence that no recovery audit byte remains."""
+
+    __slots__ = (
+        "protocol_hash",
+        "staged_epoch_hash",
+        "member_id",
+        "effect_id",
+        "member_tuple_hash",
+        "status_hash",
+        "executor_token_hash",
+        "recovery_operation_count",
+        "recovery_bytes_consumed",
+        "recovery_bytes_reserved",
+        "_seal",
+    )
+
+    def __init__(
+        self,
+        *,
+        protocol_hash: str,
+        staged_epoch_hash: str | None,
+        member_id: str,
+        effect_id: str,
+        member_tuple_hash: str,
+        status_hash: str,
+        executor_token_hash: str | None,
+        _seal: object,
+    ) -> None:
+        if _seal is not _RECOVERY_EXHAUSTION_SEAL:
+            raise AuthorizationError("recovery exhaustion is store-authenticated")
+        for field, value in (
+            ("protocol_hash", protocol_hash),
+            ("member_id", member_id),
+            ("effect_id", effect_id),
+            ("member_tuple_hash", member_tuple_hash),
+            ("status_hash", status_hash),
+        ):
+            _require_hash(value, field)
+        if staged_epoch_hash is not None:
+            _require_hash(staged_epoch_hash, "staged_epoch_hash")
+        if executor_token_hash is not None:
+            _require_hash(executor_token_hash, "executor_token_hash")
+        object.__setattr__(self, "protocol_hash", protocol_hash)
+        object.__setattr__(self, "staged_epoch_hash", staged_epoch_hash)
+        object.__setattr__(self, "member_id", member_id)
+        object.__setattr__(self, "effect_id", effect_id)
+        object.__setattr__(self, "member_tuple_hash", member_tuple_hash)
+        object.__setattr__(self, "status_hash", status_hash)
+        object.__setattr__(self, "executor_token_hash", executor_token_hash)
+        object.__setattr__(self, "recovery_operation_count", "6")
+        object.__setattr__(self, "recovery_bytes_consumed", "49152")
+        object.__setattr__(self, "recovery_bytes_reserved", "49152")
+        object.__setattr__(self, "_seal", _seal)
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        raise AuthorizationError("recovery exhaustion is immutable")
+
+    def __reduce__(self) -> object:
+        raise TypeError("recovery exhaustion is process-memory-only")
+
+
 class MemberExecution:
     """Opaque, non-serializable post-commit helper-I/O authority."""
 
@@ -273,6 +409,7 @@ class MemberExecution:
         "target_status_hash",
         "target_protocol_hash",
         "target_staged_epoch_hash",
+        "_transferred",
         "_sealed",
     )
 
@@ -314,6 +451,7 @@ class MemberExecution:
         self.target_status_hash = target_status_hash
         self.target_protocol_hash = target_protocol_hash
         self.target_staged_epoch_hash = target_staged_epoch_hash
+        object.__setattr__(self, "_transferred", False)
         object.__setattr__(self, "_sealed", True)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -326,7 +464,7 @@ class MemberExecution:
         return self._member_lock.held
 
     def verify_owner(self, store: "RegistrationStore") -> None:
-        if self._store_identity != id(store) or not self.held:
+        if self._store_identity != id(store) or not self.held or self._transferred:
             raise AuthorizationError("executor capability is not live for this store")
         self._member_lock.verify()
 
@@ -335,15 +473,37 @@ class MemberExecution:
             self._secret[index] = 0
         self._member_lock.release()
 
-    def transfer_staged(
-        self, transfer: registration_executor.StagedSecretTransfer
+    def _transfer_staged(
+        self,
+        transfer: registration_executor.StagedSecretTransfer,
+        *,
+        deadline_ns: int,
     ) -> None:
-        if not self.held:
+        if not self.held or self._transferred:
             raise AuthorizationError("executor capability is not live")
-        payload = bytearray(self._secret)
-        transfer.send(payload, self.executor_token_hash)
-        for index in range(len(self._secret)):
-            self._secret[index] = 0
+        if self.target_staged_epoch_hash is None:
+            raise AuthorizationError("only staged executors may transfer custody")
+        frame = registration_executor.StagedGrantFrame(
+            member_id=self.member_id,
+            effect_id=self.effect_id,
+            executor_token_hash=self.executor_token_hash,
+            operation_id=self.operation_id,
+            member_tuple_hash=self.target_member_hash,
+            status_hash=self.target_status_hash,
+            protocol_hash=self.target_protocol_hash,
+            staged_epoch_hash=self.target_staged_epoch_hash,
+        )
+        try:
+            transfer.send_frame(frame, self._secret, deadline_ns=deadline_ns)
+            transfer.wait_received(frame.digest, deadline_ns=deadline_ns)
+            object.__setattr__(self, "_transferred", True)
+            self._member_lock.release()
+            transfer.wait_activated(frame.digest, deadline_ns=deadline_ns)
+        finally:
+            if self._transferred:
+                for index in range(len(self._secret)):
+                    self._secret[index] = 0
+            transfer.close()
 
     def __enter__(self) -> "MemberExecution":
         return self
@@ -362,14 +522,67 @@ class ExecutionResult:
 
 
 @dataclass(frozen=True)
+class _ValidatedMapping(MappingABC[str, Any]):
+    _items: tuple[tuple[str, Any], ...]
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> "_ValidatedMapping":
+        return cls(tuple((key, row[key]) for key in row))
+
+    def __getitem__(self, key: str) -> Any:
+        for candidate, value in self._items:
+            if candidate == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return (key for key, _value in self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+class ValidatedProtocol(_ValidatedMapping):
+    pass
+
+
+class ValidatedOperation(_ValidatedMapping):
+    pass
+
+
+class ValidatedMember(_ValidatedMapping):
+    pass
+
+
+class ValidatedStatus(_ValidatedMapping):
+    pass
+
+
+class ValidatedEffect(_ValidatedMapping):
+    pass
+
+
+class ValidatedAction(_ValidatedMapping):
+    pass
+
+
+class ValidatedEpisode(_ValidatedMapping):
+    pass
+
+
+@dataclass(frozen=True)
 class SelectedAuthority:
-    protocol: dict[str, Any]
-    member: dict[str, Any]
-    status: dict[str, Any]
-    effect: dict[str, Any]
-    actions: tuple[dict[str, Any], ...]
-    episodes: tuple[dict[str, Any], ...]
+    protocol: ValidatedProtocol
+    member: ValidatedMember
+    status: ValidatedStatus
+    effect: ValidatedEffect
+    actions: tuple[ValidatedAction, ...]
+    episodes: tuple[ValidatedEpisode, ...]
     revision_token: tuple[Any, ...]
+    pending_effect: ValidatedEffect | None = None
+    predecessor_effect: ValidatedEffect | None = None
+    successor_effect: ValidatedEffect | None = None
+    operations: tuple[ValidatedOperation, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -394,6 +607,19 @@ class RebootCandidate:
     effect_id: str
     status_hash: str
     stored_boot_id: str
+
+
+@dataclass(frozen=True)
+class StagedCustodyObligation:
+    operation_id: str
+    operation_kind: str
+    member_id: str
+    effect_id: str
+    status_hash: str
+    executor_token_hash: str
+    executor_generation: int
+    staged_epoch_hash: str
+    member_tuple_hash: str
 
 
 @dataclass(frozen=True)
@@ -434,23 +660,24 @@ class MemberIdentity:
                 or os.path.normpath(value) != value
             ):
                 raise ValueError(f"{field} must be an absolute path")
-        devices = {
+        device_values = (
             self.root_dev,
             self.git_dir_dev,
             self.git_common_dev,
             self.proof_dev,
             self.projection_dev,
             self.legacy_state_dev,
-        }
+        )
+        devices = set(device_values)
         if (
-            any(isinstance(value, bool) or not isinstance(value, int) for value in devices)
+            any(type(value) is not int for value in device_values)
             or len(devices) != 1
             or min(devices) < 0
         ):
             raise ValueError("member identity must be same-device")
         for field in ("root_ino", "git_dir_ino", "git_common_ino"):
             value = getattr(self, field)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if type(value) is not int or value < 0:
                 raise ValueError(f"{field} must be a nonnegative integer")
         for field in (
             "physical_basis_hash",
@@ -508,11 +735,30 @@ class EffectIntent:
             )
         else:
             raise ValueError("unknown request kind")
+        _require_int(
+            self.external_growth_reservation_bytes,
+            "external_growth_reservation_bytes",
+            minimum=0,
+        )
+        _require_int(
+            self.outcome_reservation_bytes,
+            "outcome_reservation_bytes",
+            minimum=MIN_OUTCOME_RESERVATION,
+        )
+        _require_int(
+            self.successor_reservation_bytes,
+            "successor_reservation_bytes",
+            minimum=MIN_SUCCESSOR_RESERVATION,
+        )
         if not 0 <= self.external_growth_reservation_bytes <= 16 * 1024**2:
             raise ValueError("external reservation out of bounds")
-        if not 1 <= self.outcome_reservation_bytes <= 1024**2:
+        if not MIN_OUTCOME_RESERVATION <= self.outcome_reservation_bytes <= 1024**2:
             raise ValueError("outcome reservation out of bounds")
-        if not 1 <= self.successor_reservation_bytes <= 1024**2:
+        if (
+            not MIN_SUCCESSOR_RESERVATION
+            <= self.successor_reservation_bytes
+            <= 1024**2
+        ):
             raise ValueError("successor reservation out of bounds")
 
 
@@ -573,6 +819,14 @@ def _require_hash(value: object, field: str) -> None:
         or any(char not in "0123456789abcdef" for char in value)
     ):
         raise ValueError(f"{field} must be lowercase 64-hex")
+
+
+def _require_int(value: object, field: str, *, minimum: int | None = None) -> int:
+    if type(value) is not int:
+        raise ValueError(f"{field} must be an integer")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{field} must be at least {minimum}")
+    return value
 
 
 class RegistrationStore:
@@ -656,6 +910,8 @@ class RegistrationStore:
         self._authorizer_local = threading.local()
         self._closed = False
         self._allow_test_profile = allow_test_profile
+        self._activated_staged_grants: set[str] = set()
+        fresh_publication = False
         if _creation_control is not None and (
             not isinstance(_creation_control, ControlCapability)
             or _creation_control._seal is not _CONTROL_SEAL
@@ -669,8 +925,24 @@ class RegistrationStore:
             )
         if allow_test_profile:
             self._prepare_parent()
+            if (
+                self.db_path.exists()
+                and registration_schema.has_fresh_schema_residue(
+                    self.db_path
+                )
+            ):
+                raise StoreUnavailable(
+                    "unclassified fresh-schema residue blocks startup"
+                )
+            if not self.db_path.exists():
+                registration_schema.publish_fresh_schema(
+                    self.db_path, fault=self._fault
+                )
+                fresh_publication = True
         else:
-            self._prepare_supported_file(_creation_control)
+            fresh_publication = self._prepare_supported_file(
+                _creation_control
+            )
         old_umask = os.umask(0o077)
         try:
             self._connection = sqlite3.connect(
@@ -690,20 +962,24 @@ class RegistrationStore:
                         raise StoreUnavailable(
                             "database object changed across SQLite open"
                         )
-            self._configure()
             existing_objects = self._connection.execute(
                 "SELECT COUNT(*) FROM sqlite_schema "
                 "WHERE name NOT LIKE 'sqlite_%'"
             ).fetchone()[0]
-            if (
-                not allow_test_profile
-                and existing_objects == 0
-                and _creation_control is None
-            ):
-                raise AuthorizationError(
-                    "schema creation requires installer CONTROL"
+            if existing_objects == 0:
+                raise StoreUnavailable(
+                    "existing empty database is not canonical authority"
                 )
-            registration_schema.install_or_verify(self._connection)
+            try:
+                registration_schema.verify_canonical_schema(self._connection)
+            except RuntimeError as error:
+                raise StoreUnavailable(
+                    "registration schema is not canonical v2 authority"
+                ) from error
+            self._configure()
+            if fresh_publication:
+                self._connection.execute("BEGIN IMMEDIATE")
+                self._connection.execute("ROLLBACK")
             self._tighten_files()
             self._locks = registration_lock.LockManager(
                 self.db_path.parent / "locks"
@@ -715,10 +991,17 @@ class RegistrationStore:
                 if profile_targets is not None
                 else None
             )
+            self._current_typed_profile_binding: (
+                registration_profile.CurrentProfileBinding | None
+            ) = None
+            self._staged_typed_profile_binding: (
+                registration_profile.StagedProfileBinding | None
+            ) = None
             if not allow_test_profile and self._profile_binding is None:
                 raise StoreUnavailable(
                     "supported profile measurement is required"
                 )
+            self._require_live_profile_matches_protocol()
             self._connection.set_authorizer(self._authorize)
         except Exception:
             self._connection.close()
@@ -755,6 +1038,7 @@ class RegistrationStore:
                     measured = self._profile_binding.recheck(
                         self._connection
                     )
+                    self._require_live_profile_matches_protocol()
                 else:
                     descriptor = os.open(
                         self.db_path,
@@ -773,6 +1057,63 @@ class RegistrationStore:
                 )
             finally:
                 self._connection.execute("ROLLBACK")
+
+    def _require_live_profile_matches_protocol(self) -> None:
+        if self._profile_binding is None:
+            return
+        current = self._connection.execute(
+            "SELECT profile_hash,storage_dev "
+            "FROM registration_protocol_epoch "
+            "ORDER BY protocol_seq DESC LIMIT 1"
+        ).fetchone()
+        if current is not None and (
+            current["profile_hash"] != self._profile_binding.digest
+            or type(current["storage_dev"]) is not int
+            or current["storage_dev"] != self._profile_binding.storage_dev
+        ):
+            raise registration_profile.ProfileError(
+                "live profile/device does not match protocol authority"
+            )
+
+    def _require_typed_profile_binding(
+        self,
+        candidate: ProtocolCandidate,
+        binding: registration_profile.TypedProfileBinding | None,
+        *,
+        staged: bool,
+    ) -> registration_profile.TypedProfileBinding | None:
+        if self._allow_test_profile and binding is None:
+            return None
+        expected_type = (
+            registration_profile.StagedProfileBinding
+            if staged
+            else registration_profile.CurrentProfileBinding
+        )
+        if type(binding) is not expected_type:
+            raise registration_profile.ProfileError(
+                f"{expected_type.role.lower()} typed profile is required"
+            )
+        assert binding is not None
+        measured = binding.recheck(self._connection)
+        if (
+            binding.digest != candidate.profile_hash
+            or binding.storage_dev != candidate.storage_dev
+            or type(measured) is not int
+            or measured < 0
+        ):
+            raise registration_profile.ProfileError(
+                "typed profile does not match candidate authority"
+            )
+        if not staged and self._profile_binding is not None and (
+            binding.profile.descriptor_digest
+            != self._profile_binding.descriptor_digest
+            or binding.digest != self._profile_binding.digest
+            or binding.storage_dev != self._profile_binding.storage_dev
+        ):
+            raise registration_profile.ProfileError(
+                "current typed profile changed"
+            )
+        return binding
 
     def _validate_profile_targets(
         self, targets: list[tuple[str, Path, str, int]]
@@ -808,7 +1149,8 @@ class RegistrationStore:
 
     def _prepare_supported_file(
         self, creation_control: ControlCapability | None
-    ) -> None:
+    ) -> bool:
+        fresh_publication = False
         if not self.db_path.parent.exists():
             raise StoreUnavailable(
                 "installer must pre-create the private registration directory"
@@ -818,28 +1160,29 @@ class RegistrationStore:
             kind="directory",
             required_mode=0o700,
         ) as parent:
+            if (
+                self.db_path.exists()
+                and registration_schema.has_fresh_schema_residue(
+                    self.db_path
+                )
+            ):
+                raise StoreUnavailable(
+                    "unclassified fresh-schema residue blocks startup"
+                )
             if not self.db_path.exists():
                 if creation_control is None:
                     raise AuthorizationError(
                         "database creation requires installer CONTROL"
                     )
-                flags = (
-                    os.O_RDWR
-                    | os.O_CREAT
-                    | os.O_EXCL
-                    | getattr(os, "O_NOFOLLOW", 0)
+                registration_schema.publish_fresh_schema(
+                    self.db_path, fault=self._fault
                 )
-                descriptor = os.open(
-                    self.db_path.name,
-                    flags,
-                    0o600,
-                    dir_fd=parent.fd,
-                )
-                os.close(descriptor)
+                fresh_publication = True
             with registration_profile.bind_secure_path(
                 self.db_path, kind="file", required_mode=0o600
             ) as bound:
                 self._initial_db_identity = bound.identity
+        return fresh_publication
 
     def _configure(self) -> None:
         connection = self._connection
@@ -975,16 +1318,17 @@ class RegistrationStore:
         self._fault("after_begin")
         if self._profile_binding is not None:
             value = self._profile_binding.recheck(self._connection)
+            self._require_live_profile_matches_protocol()
         else:
             fd = os.open(
                 self.db_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
             )
             try:
                 assert self._free_bytes is not None
-                value = int(self._free_bytes(fd))
+                value = self._free_bytes(fd)
             finally:
                 os.close(fd)
-        if value < 0:
+        if type(value) is not int or value < 0:
             raise StoreUnavailable("negative free-space measurement")
         return value
 
@@ -993,7 +1337,10 @@ class RegistrationStore:
             "SELECT operation_id FROM registration_operation_audit "
             "ORDER BY operation_seq DESC LIMIT 1"
         ).fetchone()
-        if latest is None or self.resolve_operation(latest["operation_id"]) != "COMMITTED":
+        if (
+            latest is None
+            or self._resolve_operation_tx(latest["operation_id"]) != "COMMITTED"
+        ):
             raise StoreError("mandatory operation closure SELECT failed")
         self._fault("before_commit")
         self._connection.execute("COMMIT")
@@ -1002,9 +1349,20 @@ class RegistrationStore:
     def _fresh_sample(self) -> tuple[str, int]:
         boot = self._boot_id()
         mono = self._mono_ns()
-        if not isinstance(boot, str) or not boot or not isinstance(mono, int) or mono < 0:
+        if (
+            not isinstance(boot, str)
+            or not boot
+            or type(mono) is not int
+            or mono < 0
+        ):
             raise StoreUnavailable("boot/continuous-time sample unavailable")
         return boot, mono
+
+    def _fresh_wall_ns(self) -> int:
+        value = self._wall_ns()
+        if type(value) is not int or value < 0:
+            raise StoreUnavailable("wall-clock sample unavailable")
+        return value
 
     def _insert(self, table: str, row: Mapping[str, Any]) -> None:
         if table == "registration_operation_audit":
@@ -1018,6 +1376,196 @@ class RegistrationStore:
         self._connection.execute(sql, tuple(row[column] for column in columns))
         self._fault(f"after_insert:{table}")
 
+    @staticmethod
+    def _effect_outcome_is_total(effect: Mapping[str, Any]) -> bool:
+        fields = frozenset(
+            {
+                "outcome_helper_generation",
+                "outcome_tuple_hash",
+                "ledger_head_hash",
+                "first_conflict_event_seq",
+                "completion_blob",
+                "completion_hash",
+                "final_basis_hash",
+                "proof_blob",
+                "proof_hash",
+                "certificate_inputs_blob",
+                "certificate_inputs_hash",
+                "certificate_hash",
+                "conflict_code",
+                "conflict_blob",
+                "conflict_hash",
+                "superseded_by_effect_id",
+                "successor_transition_id",
+                "outcome_operation_seq",
+                "outcome_operation_id",
+                "outcome_operation_hash",
+            }
+        )
+        outcome = effect["outcome_kind"]
+        if outcome is None:
+            required: frozenset[str] = frozenset()
+        elif outcome == "SUCCESS" and effect["request_kind"] == "CLEAN_ELIGIBLE":
+            required = frozenset(
+                {
+                    "outcome_helper_generation",
+                    "outcome_tuple_hash",
+                    "ledger_head_hash",
+                    "completion_blob",
+                    "completion_hash",
+                    "final_basis_hash",
+                    "proof_blob",
+                    "proof_hash",
+                    "certificate_inputs_blob",
+                    "certificate_inputs_hash",
+                    "certificate_hash",
+                    "outcome_operation_seq",
+                    "outcome_operation_id",
+                    "outcome_operation_hash",
+                }
+            )
+        elif (
+            outcome == "LOGICAL_CONFLICT"
+            and effect["request_kind"] == "CLEAN_ELIGIBLE"
+        ):
+            required = frozenset(
+                {
+                    "outcome_helper_generation",
+                    "outcome_tuple_hash",
+                    "ledger_head_hash",
+                    "first_conflict_event_seq",
+                    "conflict_code",
+                    "conflict_blob",
+                    "conflict_hash",
+                    "outcome_operation_seq",
+                    "outcome_operation_id",
+                    "outcome_operation_hash",
+                }
+            )
+        elif outcome == "SUPERSEDED":
+            required = frozenset(
+                {
+                    "outcome_tuple_hash",
+                    "superseded_by_effect_id",
+                    "successor_transition_id",
+                    "outcome_operation_seq",
+                    "outcome_operation_id",
+                    "outcome_operation_hash",
+                }
+            )
+        else:
+            return False
+        return all(
+            (effect[field] is not None) == (field in required)
+            for field in fields
+        )
+
+    def _effect_has_terminal_witness(
+        self, effect: Mapping[str, Any]
+    ) -> bool:
+        if (
+            effect["outcome_kind"] is None
+            or not self._effect_outcome_is_total(effect)
+        ):
+            return False
+        try:
+            member_row = self._connection.execute(
+                "SELECT * FROM registration_member WHERE member_id=?",
+                (effect["member_id"],),
+            ).fetchone()
+            if member_row is None:
+                return False
+            member = dict(member_row)
+            if (
+                registration_hashes.derive("member_tuple_hash", member)
+                != member["member_tuple_hash"]
+            ):
+                return False
+            operations: dict[str, ValidatedOperation] = {}
+            validated, _actions = self._validate_effect_row(
+                effect,
+                member=member,
+                operations=operations,
+                include_actions=True,
+            )
+            self._validate_effect_predecessor(
+                validated,
+                member=member,
+                operations=operations,
+            )
+            if effect["outcome_kind"] == "SUPERSEDED":
+                successor_row = self._connection.execute(
+                    "SELECT * FROM registration_effect WHERE effect_id=?",
+                    (effect["superseded_by_effect_id"],),
+                ).fetchone()
+                if successor_row is None:
+                    return False
+                successor, _ignored = self._validate_effect_row(
+                    successor_row,
+                    member=member,
+                    operations=operations,
+                    include_actions=False,
+                )
+                if successor["predecessor_effect_id"] != effect["effect_id"]:
+                    return False
+                operation = operations.get(effect["outcome_operation_id"])
+                if operation is None:
+                    return False
+                self._validate_successor_transition(
+                    predecessor=validated,
+                    successor=successor,
+                    operation=operation,
+                )
+            return True
+        except (KeyError, TypeError, ValueError, sqlite3.Error, StoreError):
+            return False
+
+    def _effect_is_resolved_current(
+        self, effect: Mapping[str, Any]
+    ) -> bool:
+        try:
+            member_rows = self._connection.execute(
+                "SELECT * FROM registration_member "
+                "WHERE current_effect_id=?",
+                (effect["effect_id"],),
+            ).fetchall()
+            if len(member_rows) != 1:
+                return False
+            member = dict(member_rows[0])
+            if (
+                registration_hashes.derive("member_tuple_hash", member)
+                != member["member_tuple_hash"]
+                or member["member_id"] != effect["member_id"]
+                or member["member_epoch"] != effect["member_epoch"]
+                or member["phase"] != "RESOLVED"
+                or member["current_outcome_kind"] != effect["outcome_kind"]
+                or member["current_completion_hash"]
+                != effect["completion_hash"]
+                or member["current_proof_hash"] != effect["proof_hash"]
+                or member["current_certificate_hash"]
+                != effect["certificate_hash"]
+                or member["current_conflict_hash"] != effect["conflict_hash"]
+            ):
+                return False
+            operation = self._validated_operation(
+                member["write_operation_id"]
+            )
+            return bool(
+                member["write_operation_seq"] == operation["operation_seq"]
+                and member["write_operation_hash"]
+                == operation["operation_envelope_hash"]
+                and operation["operation_kind"]
+                in {"CLOSE_SUCCESS", "CLOSE_CONFLICT"}
+                and operation["target_member_id"] == member["member_id"]
+                and operation["target_effect_id"] == effect["effect_id"]
+                and operation["target_member_tuple_hash"]
+                == member["member_tuple_hash"]
+                and operation["target_effect_outcome_hash"]
+                == effect["outcome_tuple_hash"]
+            )
+        except (KeyError, TypeError, ValueError, sqlite3.Error, StoreError):
+            return False
+
     def _outstanding_reservations(
         self,
         *,
@@ -1026,12 +1574,10 @@ class RegistrationStore:
         target_member_id: str | None = None,
     ) -> int:
         rows = self._connection.execute(
-            "SELECT e.effect_id,e.outcome_kind,"
-            "e.external_growth_reservation_bytes,e.outcome_reservation_bytes,"
-            "e.successor_reservation_bytes,"
+            "SELECT e.*,"
             "EXISTS(SELECT 1 FROM registration_member m "
-            "WHERE m.current_effect_id=e.effect_id AND m.phase='RESOLVED') "
-            "AS is_resolved_current,"
+            "WHERE m.current_effect_id=e.effect_id "
+            "OR m.pending_effect_id=e.effect_id) AS is_live_reference,"
             "EXISTS(SELECT 1 FROM registration_member m "
             "WHERE m.member_id=? AND m.phase='EFFECT_IN_FLIGHT' "
             "AND m.pending_effect_id=e.effect_id) AS is_target_pending "
@@ -1044,15 +1590,11 @@ class RegistrationStore:
                 continue
             if exclude_adopted_pending and row["is_target_pending"]:
                 continue
-            if row["outcome_kind"] is None or row["is_resolved_current"]:
-                if row["outcome_kind"] is None:
-                    total += (
-                        row["external_growth_reservation_bytes"]
-                        + row["outcome_reservation_bytes"]
-                        + row["successor_reservation_bytes"]
-                    )
-                else:
-                    total += row["successor_reservation_bytes"]
+            terminal = self._effect_has_terminal_witness(row)
+            if terminal and self._effect_is_resolved_current(row):
+                total += UNVALIDATED_SUCCESSOR_CHARGE
+            elif row["is_live_reference"] or not terminal:
+                total += UNVALIDATED_EFFECT_CHARGE
         return int(total)
 
     def _preflight_operation_space(self, row: Mapping[str, Any]) -> None:
@@ -1108,6 +1650,13 @@ class RegistrationStore:
             ).fetchone()
             if target_row is None:
                 raise StaleAuthority("reservation target missing")
+            if (
+                int(target_row["outcome_reservation_bytes"])
+                < MIN_OUTCOME_RESERVATION
+                or int(target_row["successor_reservation_bytes"])
+                < MIN_SUCCESSOR_RESERVATION
+            ):
+                raise StoreUnavailable("effect reservation floor corrupted")
             if kind == "APPEND_ACTION":
                 spent_projected = int(
                     self._connection.execute(
@@ -1129,6 +1678,7 @@ class RegistrationStore:
                     target_row["outcome_reservation_bytes"]
                     - spent_projected
                     - projected
+                    - RECOVERY_RESERVATION
                 )
                 remaining_external = (
                     target_row["external_growth_reservation_bytes"]
@@ -1137,11 +1687,7 @@ class RegistrationStore:
                 )
                 if remaining_outcome < 0 or remaining_external < 0:
                     raise InsufficientSpace("effect reservation exhausted")
-                required += (
-                    target_row["successor_reservation_bytes"]
-                    + remaining_outcome
-                    + remaining_external
-                )
+                required += UNVALIDATED_EFFECT_CHARGE
             elif kind in {"CLOSE_SUCCESS", "CLOSE_CONFLICT"}:
                 spent_projected = int(
                     self._connection.execute(
@@ -1155,9 +1701,10 @@ class RegistrationStore:
                 if (
                     spent_projected + projected
                     > target_row["outcome_reservation_bytes"]
+                    - RECOVERY_RESERVATION
                 ):
                     raise InsufficientSpace("outcome reservation exhausted")
-                required += target_row["successor_reservation_bytes"]
+                required += UNVALIDATED_SUCCESSOR_CHARGE
             elif kind in {"INVALIDATE_REQUESTED", "REPLACE_PENDING"}:
                 if projected > (
                     target_row["outcome_reservation_bytes"]
@@ -1193,6 +1740,291 @@ class RegistrationStore:
             raise InsufficientSpace(
                 f"measured {measured} below required {required}"
             )
+
+    def _recovery_reserve_exhaustion(
+        self,
+        *,
+        protocol: Mapping[str, Any],
+        member: Mapping[str, Any],
+        effect: Mapping[str, Any],
+        status: Mapping[str, Any],
+    ) -> RecoveryReserveExhausted | None:
+        activation_rows = self._connection.execute(
+            "SELECT operation_id,operation_seq "
+            "FROM registration_operation_audit "
+            "WHERE operation_kind IN"
+            "('INSTALL_MEMBER','INVALIDATE_REQUESTED',"
+            "'HANDOFF_RESOLVED') "
+            "AND target_successor_effect_id=? "
+            "ORDER BY operation_seq",
+            (effect["effect_id"],),
+        ).fetchall()
+        if len(activation_rows) != 1:
+            raise SemanticClosureError(
+                "effect activation boundary is not unique"
+            )
+        activation = self._validated_operation(
+            activation_rows[0]["operation_id"]
+        )
+        if (
+            activation["operation_seq"]
+            != activation_rows[0]["operation_seq"]
+        ):
+            raise SemanticClosureError(
+                "effect activation boundary is corrupt"
+            )
+        rows = self._connection.execute(
+            "SELECT * "
+            "FROM registration_operation_audit "
+            "WHERE operation_seq>? "
+            "AND (target_effect_id=? OR target_member_id=?) "
+            "AND (operation_kind IN"
+            "('MARK_UNAVAILABLE','REACQUIRE_EFFECT') "
+            "OR (projected_db_growth_bytes=? "
+            "AND target_executor_token_hash IS NOT NULL "
+            "AND target_status_hash IS NOT NULL)) "
+            "ORDER BY operation_seq",
+            (
+                activation["operation_seq"],
+                effect["effect_id"],
+                member["member_id"],
+                RECOVERY_OPERATION_BYTES,
+            ),
+        ).fetchall()
+        validated = [self._validated_operation(row["operation_id"]) for row in rows]
+        count = len(validated)
+        consumed = sum(
+            int(operation["projected_db_growth_bytes"])
+            for operation in validated
+        )
+        if (
+            count > MAX_RECOVERY_OPERATIONS
+            or consumed != count * RECOVERY_OPERATION_BYTES
+        ):
+            raise SemanticClosureError("recovery reservation history is corrupt")
+        for index, operation in enumerate(validated):
+            previous = validated[index - 1] if index else None
+            expected_kind = "MARK_UNAVAILABLE"
+            if (
+                previous is not None
+                and previous["operation_kind"] == "MARK_UNAVAILABLE"
+            ):
+                intervening_adopt = self._connection.execute(
+                    "SELECT operation_id "
+                    "FROM registration_operation_audit "
+                    "WHERE operation_seq>? AND operation_seq<? "
+                    "AND operation_kind='ADOPT_EFFECT' "
+                    "AND target_member_id=? AND lineage_effect_id=? "
+                    "AND target_executor_token_hash IS NOT NULL "
+                    "ORDER BY operation_seq DESC LIMIT 1",
+                    (
+                        previous["operation_seq"],
+                        operation["operation_seq"],
+                        member["member_id"],
+                        effect["effect_id"],
+                    ),
+                ).fetchone()
+                if intervening_adopt is None:
+                    expected_kind = "REACQUIRE_EFFECT"
+                else:
+                    self._validated_operation(
+                        intervening_adopt["operation_id"]
+                    )
+            protocol_row = self._connection.execute(
+                "SELECT * FROM registration_protocol_epoch "
+                "WHERE protocol_seq=?",
+                (operation["protocol_seq"],),
+            ).fetchone()
+            if protocol_row is None:
+                raise SemanticClosureError(
+                    "recovery protocol companion is missing"
+                )
+            recovery_protocol = self._validate_protocol_row(protocol_row)
+            draining = recovery_protocol["mode"] == "DRAINING"
+            expected_runtime = recovery_protocol[
+                (
+                    "staged_runtime_capability_hash"
+                    if draining
+                    else "runtime_capability_hash"
+                )
+            ]
+            expected_writer = recovery_protocol[
+                (
+                    "staged_writer_binary_hash"
+                    if draining
+                    else "writer_binary_hash"
+                )
+            ]
+            expected_profile = recovery_protocol[
+                "staged_profile_hash" if draining else "profile_hash"
+            ]
+            expected_capability = recovery_protocol[
+                (
+                    "staged_writer_capability_hash"
+                    if draining
+                    else "writer_capability_hash"
+                )
+            ]
+            expected_staged_epoch = (
+                recovery_protocol["staged_epoch_hash"]
+                if draining
+                else None
+            )
+            prior_status_row = self._connection.execute(
+                "SELECT operation_id,target_status_hash "
+                "FROM registration_operation_audit "
+                "WHERE operation_seq<? AND target_member_id=? "
+                "AND target_status_hash IS NOT NULL "
+                "ORDER BY operation_seq DESC LIMIT 1",
+                (operation["operation_seq"], member["member_id"]),
+            ).fetchone()
+            if prior_status_row is None:
+                raise SemanticClosureError(
+                    "recovery status predecessor is missing"
+                )
+            prior_status = self._validated_operation(
+                prior_status_row["operation_id"]
+            )
+            if (
+                operation["operation_kind"] != expected_kind
+                or operation["target_member_id"] != member["member_id"]
+                or operation["target_effect_id"] != effect["effect_id"]
+                or operation["target_subject_key"]
+                != member["runtime_subject_key"]
+                or operation["projected_db_growth_bytes"]
+                != RECOVERY_OPERATION_BYTES
+                or operation["target_executor_token_hash"] is None
+                or operation["target_status_hash"] is None
+                or operation["target_status_hash"]
+                == operation["expected_target_status_hash"]
+                or operation["expected_target_status_hash"]
+                != prior_status["target_status_hash"]
+                or operation["expected_mode"]
+                != recovery_protocol["mode"]
+                or operation["expected_generation"]
+                != recovery_protocol["protocol_generation"]
+                or operation["expected_protocol_hash"]
+                != recovery_protocol["protocol_hash"]
+                or operation["runtime_capability_hash"]
+                != expected_runtime
+                or operation["writer_binary_hash"] != expected_writer
+                or operation["profile_hash"] != expected_profile
+                or operation["writer_capability_receipt_hash"]
+                != expected_capability
+                or operation["target_staged_epoch_hash"]
+                != expected_staged_epoch
+                or operation["sample_boot_id"] is None
+                or operation["sample_mono_ns"] is None
+                or (
+                    draining
+                    and (
+                        operation["sample_boot_id"]
+                        != recovery_protocol["drain_boot_id"]
+                        or operation["sample_mono_ns"]
+                        > recovery_protocol["drain_deadline_mono_ns"]
+                    )
+                )
+            ):
+                raise SemanticClosureError(
+                    "recovery operation companion is corrupt"
+                )
+            if expected_kind == "MARK_UNAVAILABLE":
+                grant_row = self._connection.execute(
+                    "SELECT operation_id "
+                    "FROM registration_operation_audit "
+                    "WHERE operation_seq<? AND target_member_id=? "
+                    "AND target_executor_token_hash IS NOT NULL "
+                    "AND ((operation_kind IN"
+                    "('OPEN_EFFECT','REACQUIRE_EFFECT') "
+                    "AND target_effect_id=?) "
+                    "OR (operation_kind='ADOPT_EFFECT' "
+                    "AND lineage_effect_id=?)) "
+                    "ORDER BY operation_seq DESC LIMIT 1",
+                    (
+                        operation["operation_seq"],
+                        member["member_id"],
+                        effect["effect_id"],
+                        effect["effect_id"],
+                    ),
+                ).fetchone()
+                if grant_row is None:
+                    raise SemanticClosureError(
+                        "recovery executor grant is missing"
+                    )
+                grant = self._validated_operation(
+                    grant_row["operation_id"]
+                )
+                if (
+                    operation["target_executor_token_hash"]
+                    != grant["target_executor_token_hash"]
+                    or operation["target_protocol_hash"] is not None
+                    or operation["expected_target_member_tuple_hash"]
+                    is not None
+                    or operation["expected_target_effect_tuple_hash"]
+                    is not None
+                    or operation["target_member_tuple_hash"] is not None
+                    or operation["target_effect_tuple_hash"] is not None
+                    or operation["target_action_plan_hash"] is not None
+                    or operation["target_action_ledger_hash"] is not None
+                ):
+                    raise SemanticClosureError(
+                        "recovery mark companion is corrupt"
+                    )
+            else:
+                prior_member_row = self._connection.execute(
+                    "SELECT operation_id,target_member_tuple_hash "
+                    "FROM registration_operation_audit "
+                    "WHERE operation_seq<? AND target_member_id=? "
+                    "AND target_member_tuple_hash IS NOT NULL "
+                    "ORDER BY operation_seq DESC LIMIT 1",
+                    (operation["operation_seq"], member["member_id"]),
+                ).fetchone()
+                if prior_member_row is None:
+                    raise SemanticClosureError(
+                        "recovery member predecessor is missing"
+                    )
+                prior_member = self._validated_operation(
+                    prior_member_row["operation_id"]
+                )
+                ledger_row = self._connection.execute(
+                    "SELECT ledger_hash "
+                    "FROM registration_effect_action "
+                    "WHERE effect_id=? AND write_operation_seq<? "
+                    "ORDER BY event_seq DESC LIMIT 1",
+                    (effect["effect_id"], operation["operation_seq"]),
+                ).fetchone()
+                expected_ledger = ledger_row[0] if ledger_row else ZERO_HASH
+                if (
+                    operation["expected_target_member_tuple_hash"]
+                    != prior_member["target_member_tuple_hash"]
+                    or operation["target_member_tuple_hash"]
+                    != prior_member["target_member_tuple_hash"]
+                    or operation["expected_target_effect_tuple_hash"]
+                    != effect["request_tuple_hash"]
+                    or operation["target_effect_tuple_hash"]
+                    != effect["request_tuple_hash"]
+                    or operation["target_action_plan_hash"]
+                    != effect["action_plan_hash"]
+                    or operation["target_action_ledger_hash"]
+                    != expected_ledger
+                    or operation["target_protocol_hash"]
+                    != recovery_protocol["protocol_hash"]
+                ):
+                    raise SemanticClosureError(
+                        "recovery reacquire companion is corrupt"
+                    )
+        if count < MAX_RECOVERY_OPERATIONS:
+            return None
+        return RecoveryReserveExhausted(
+            protocol_hash=protocol["protocol_hash"],
+            staged_epoch_hash=protocol["staged_epoch_hash"],
+            member_id=member["member_id"],
+            effect_id=effect["effect_id"],
+            member_tuple_hash=member["member_tuple_hash"],
+            status_hash=status["status_hash"],
+            executor_token_hash=status["executor_token_hash"],
+            _seal=_RECOVERY_EXHAUSTION_SEAL,
+        )
 
     def _update_row(
         self,
@@ -1231,6 +2063,12 @@ class RegistrationStore:
         target_protocol_hash: str | None = None,
         overrides: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        _require_int(measured_free_bytes, "measured_free_bytes", minimum=0)
+        _require_int(
+            projected_db_growth_bytes,
+            "projected_db_growth_bytes",
+            minimum=0,
+        )
         current = self.current_protocol()
         revision = self.table_count("registration_operation_audit")
         projected_db_growth_bytes = max(
@@ -1279,7 +2117,7 @@ class RegistrationStore:
                 "new_outcome_reservation_bytes": 0,
                 "new_successor_reservation_bytes": 0,
                 "control_reserve_bytes": MAX_CONTROL_RESERVE,
-                "created_wall_ns": self._wall_ns(),
+                "created_wall_ns": self._fresh_wall_ns(),
             }
         )
         if overrides:
@@ -1491,6 +2329,94 @@ class RegistrationStore:
             new_effect_id,
         )
 
+    def _validate_successor_transition(
+        self,
+        *,
+        predecessor: Mapping[str, Any],
+        successor: Mapping[str, Any],
+        operation: Mapping[str, Any],
+    ) -> None:
+        kind = operation["operation_kind"]
+        cause = operation["target_cause_code"]
+        fixed_causes = {
+            "INVALIDATE_REQUESTED": "BASIS_CHANGED",
+            "REPLACE_PENDING": "PENDING_REPLACED",
+            "ADOPT_EFFECT": "STAGED_CAPABILITY_INCOMPATIBLE",
+        }
+        if kind in fixed_causes:
+            valid_cause = cause == fixed_causes[kind]
+        elif kind == "HANDOFF_RESOLVED":
+            created_during_handoff = (
+                successor["created_operation_id"]
+                == operation["operation_id"]
+            )
+            if not created_during_handoff:
+                valid_cause = cause == "BASIS_CHANGED"
+            elif cause == "EXPLICIT_CONFLICT_RETRY":
+                valid_cause = (
+                    predecessor["outcome_kind"] == "LOGICAL_CONFLICT"
+                )
+            else:
+                valid_cause = (
+                    cause
+                    in {"BASIS_CHANGED", "CURRENT_CLOSURE_CHANGED"}
+                    and successor["request_basis_hash"]
+                    != predecessor["request_basis_hash"]
+                )
+        else:
+            self._semantic_failure("unknown successor transition kind")
+        if not valid_cause:
+            self._semantic_failure("successor transition cause mismatch")
+        expected_old_effect_hash = (
+            predecessor["outcome_tuple_hash"]
+            if kind == "HANDOFF_RESOLVED"
+            else predecessor["request_tuple_hash"]
+        )
+        expected_transition = self._successor_transition_id(
+            operation_kind=kind,
+            cause=cause,
+            old_member_hash=operation[
+                "expected_target_member_tuple_hash"
+            ],
+            old_status_hash=operation["expected_target_status_hash"],
+            old_effect_hash=expected_old_effect_hash,
+            new_member_hash=operation["target_member_tuple_hash"],
+            new_status_hash=operation["target_status_hash"],
+            new_effect_hash=successor["request_tuple_hash"],
+            old_epoch=predecessor["member_epoch"],
+            old_basis=predecessor["request_basis_hash"],
+            new_epoch=successor["member_epoch"],
+            new_basis=successor["request_basis_hash"],
+            old_effect_id=predecessor["effect_id"],
+            new_effect_id=successor["effect_id"],
+        )
+        if (
+            operation["target_effect_id"] != predecessor["effect_id"]
+            or operation["target_successor_effect_id"]
+            != successor["effect_id"]
+            or operation["expected_target_effect_tuple_hash"]
+            != expected_old_effect_hash
+            or operation["target_effect_tuple_hash"]
+            != successor["request_tuple_hash"]
+            or operation["target_successor_member_epoch"]
+            != successor["member_epoch"]
+            or operation["target_successor_basis_hash"]
+            != successor["request_basis_hash"]
+            or operation["target_transition_id"] != expected_transition
+            or (
+                predecessor["outcome_kind"] == "SUPERSEDED"
+                and (
+                    predecessor["successor_transition_id"]
+                    != expected_transition
+                    or operation["target_effect_outcome_hash"]
+                    != predecessor["outcome_tuple_hash"]
+                )
+            )
+        ):
+            self._semantic_failure(
+                "successor transition companion mismatch"
+            )
+
     def bootstrap(
         self,
         control: ControlCapability,
@@ -1500,6 +2426,11 @@ class RegistrationStore:
         projected_db_growth_bytes: int = 0,
         _protocol_locked: bool = False,
     ) -> OperationResult:
+        _require_int(
+            projected_db_growth_bytes,
+            "projected_db_growth_bytes",
+            minimum=0,
+        )
         if not isinstance(control, ControlCapability) or control._seal is not _CONTROL_SEAL:
             raise AuthorizationError("invalid BOOTSTRAP control capability")
         if (
@@ -1575,7 +2506,7 @@ class RegistrationStore:
                         "storage_dev": candidate.storage_dev,
                         "transition_kind": "BOOTSTRAP",
                         "transition_reason_code": "BOOTSTRAP",
-                        "created_wall_ns": self._wall_ns(),
+                        "created_wall_ns": self._fresh_wall_ns(),
                     }
                 )
                 protocol_hash = registration_hashes.derive(
@@ -1622,7 +2553,7 @@ class RegistrationStore:
 
     def _require_current_candidate(
         self, candidate: ProtocolCandidate, *, mode: str | None = None
-    ) -> dict[str, Any]:
+    ) -> ValidatedProtocol:
         current = self.current_protocol()
         if current is None:
             raise StaleAuthority("registration authority is not bootstrapped")
@@ -1672,15 +2603,95 @@ class RegistrationStore:
         ):
             raise AuthorizationError("candidate/DATA mismatch")
 
+    def _require_recovery_candidate(
+        self, data: DataCapability, candidate: ProtocolCandidate
+    ) -> tuple[ValidatedProtocol, bool]:
+        self._require_data(data, candidate)
+        current = self.current_protocol()
+        if current is None:
+            raise StaleAuthority("registration authority is not bootstrapped")
+        if current["mode"] == "WRITABLE":
+            return self._require_current_candidate(
+                candidate, mode="WRITABLE"
+            ), False
+        return self._require_staged_candidate(candidate, current=current), True
+
+    def _require_recovery_profile_binding(
+        self,
+        candidate: ProtocolCandidate,
+        staged_recovery: bool,
+        binding: registration_profile.TypedProfileBinding | None,
+    ) -> registration_profile.TypedProfileBinding | None:
+        return self._require_typed_profile_binding(
+            candidate,
+            binding,
+            staged=staged_recovery,
+        )
+
+    def _cached_profile_binding_for_candidate(
+        self, candidate: ProtocolCandidate
+    ) -> registration_profile.TypedProfileBinding | None:
+        current = self.current_protocol()
+        if (
+            current is not None
+            and current["mode"] == "DRAINING"
+            and current["staged_profile_hash"] == candidate.profile_hash
+            and current["storage_dev"] == candidate.storage_dev
+        ):
+            return self._staged_typed_profile_binding
+        return self._current_typed_profile_binding
+
+    def _require_staged_candidate(
+        self,
+        candidate: ProtocolCandidate,
+        *,
+        current: ValidatedProtocol | None = None,
+    ) -> ValidatedProtocol:
+        if current is None:
+            current = self.current_protocol()
+            if current is None:
+                raise StaleAuthority(
+                    "registration authority is not bootstrapped"
+                )
+        if current["mode"] != "DRAINING" or current["staged_generation"] is None:
+            raise StaleAuthority("recovery requires WRITABLE or staged DRAINING")
+        staged_pairs = {
+            "staged_schema_hash": SCHEMA_SHA256,
+            "staged_profile_hash": candidate.profile_hash,
+            "staged_runtime_capability_hash": candidate.runtime_capability_hash,
+            "staged_writer_binary_hash": candidate.writer_binary_hash,
+            "staged_writer_capability_hash": candidate.writer_capability_hash,
+            "staged_tool_inventory_hash": candidate.tool_inventory_hash,
+            "staged_hook_projection_hash": candidate.hook_projection_hash,
+            "staged_hook_matcher_mode": candidate.hook_matcher_mode,
+            "staged_hook_matcher_hash": candidate.hook_matcher_hash,
+            "staged_projection_receipt_hash": candidate.projection_receipt_hash,
+            "staged_projection_file_generation": candidate.projection_file_generation,
+            "staged_installer_identity_hash": candidate.installer_identity_hash,
+            "staged_installer_capability_hash": candidate.installer_capability_hash,
+            "storage_dev": candidate.storage_dev,
+        }
+        if any(current[key] != value for key, value in staged_pairs.items()):
+            raise StaleAuthority("candidate does not match staged protocol")
+        return current
+
     def activate(
         self,
         control: ControlCapability,
         candidate: ProtocolCandidate,
         *,
+        profile_binding: (
+            registration_profile.CurrentProfileBinding | None
+        ) = None,
         operation_id: str | None = None,
         projected_db_growth_bytes: int = 0,
         _protocol_locked: bool = False,
     ) -> OperationResult:
+        _require_int(
+            projected_db_growth_bytes,
+            "projected_db_growth_bytes",
+            minimum=0,
+        )
         self._require_control(control, candidate)
         if not _protocol_locked:
             with self._locks.acquire_protocol() as held:
@@ -1688,10 +2699,14 @@ class RegistrationStore:
                 return self.activate(
                     control,
                     candidate,
+                    profile_binding=profile_binding,
                     operation_id=operation_id,
                     projected_db_growth_bytes=projected_db_growth_bytes,
                     _protocol_locked=True,
                 )
+        typed_binding = self._require_typed_profile_binding(
+            candidate, profile_binding, staged=False
+        )
         current = self._require_current_candidate(candidate, mode="DORMANT")
         operation_id = operation_id or self._operation_ids()
         with self._write_scope(
@@ -1714,7 +2729,7 @@ class RegistrationStore:
                         "previous_protocol_hash": current["protocol_hash"],
                         "absence_proof_hash": None,
                         "quiescence_proof_hash": None,
-                        "created_wall_ns": self._wall_ns(),
+                        "created_wall_ns": self._fresh_wall_ns(),
                     }
                 )
                 target_hash = registration_hashes.derive(
@@ -1747,6 +2762,8 @@ class RegistrationStore:
                 if closure is None:
                     raise StoreError("ACTIVATE closure failed")
                 self._commit()
+                if typed_binding is not None:
+                    self._current_typed_profile_binding = typed_binding
                 self._tighten_files()
                 return OperationResult(
                     "COMMITTED",
@@ -1764,6 +2781,9 @@ class RegistrationStore:
         control: ControlCapability,
         candidate: ProtocolCandidate,
         *,
+        profile_binding: (
+            registration_profile.CurrentProfileBinding | None
+        ) = None,
         operation_id: str | None = None,
     ) -> OperationResult:
         return self._control_protocol_transition(
@@ -1775,6 +2795,8 @@ class RegistrationStore:
             quiescence_proof_hash=None,
             absence_proof_hash=None,
             operation_id=operation_id,
+            current_profile_binding=profile_binding,
+            staged_profile_binding=None,
         )
 
     def stage_next(
@@ -1784,6 +2806,12 @@ class RegistrationStore:
         staged_candidate: ProtocolCandidate,
         *,
         quiescence_proof_hash: str,
+        current_profile_binding: (
+            registration_profile.CurrentProfileBinding | None
+        ) = None,
+        staged_profile_binding: (
+            registration_profile.StagedProfileBinding | None
+        ) = None,
         operation_id: str | None = None,
     ) -> OperationResult:
         _require_hash(quiescence_proof_hash, "quiescence_proof_hash")
@@ -1796,6 +2824,8 @@ class RegistrationStore:
             quiescence_proof_hash=quiescence_proof_hash,
             absence_proof_hash=None,
             operation_id=operation_id,
+            current_profile_binding=current_profile_binding,
+            staged_profile_binding=staged_profile_binding,
         )
 
     def cancel_drain(
@@ -1804,6 +2834,9 @@ class RegistrationStore:
         candidate: ProtocolCandidate,
         *,
         quiescence_proof_hash: str,
+        profile_binding: (
+            registration_profile.CurrentProfileBinding | None
+        ) = None,
         operation_id: str | None = None,
     ) -> OperationResult:
         _require_hash(quiescence_proof_hash, "quiescence_proof_hash")
@@ -1816,7 +2849,179 @@ class RegistrationStore:
             quiescence_proof_hash=quiescence_proof_hash,
             absence_proof_hash=None,
             operation_id=operation_id,
+            current_profile_binding=profile_binding,
+            staged_profile_binding=None,
         )
+
+    def _custody_grant_closed_tx(
+        self,
+        grant: ValidatedOperation,
+        *,
+        effect_id: str,
+    ) -> bool:
+        if grant["operation_id"] in self._activated_staged_grants:
+            return True
+        later = self._connection.execute(
+            "SELECT operation_id,operation_kind,target_executor_token_hash,"
+            "expected_target_status_hash FROM registration_operation_audit "
+            "WHERE operation_seq>? AND target_member_id=? "
+            "AND target_effect_id=? ORDER BY operation_seq",
+            (
+                grant["operation_seq"],
+                grant["target_member_id"],
+                effect_id,
+            ),
+        ).fetchall()
+        for row in later:
+            exact_token_use = (
+                row["operation_kind"]
+                in {
+                    "APPEND_ACTION",
+                    "CLOSE_SUCCESS",
+                    "CLOSE_CONFLICT",
+                    "MARK_UNAVAILABLE",
+                }
+                and row["target_executor_token_hash"]
+                == grant["target_executor_token_hash"]
+            )
+            old_boot_clear = (
+                row["operation_kind"] == "REBOOT_STATUS"
+                and row["expected_target_status_hash"]
+                == grant["target_status_hash"]
+            )
+            if (
+                exact_token_use or old_boot_clear
+            ) and self._resolve_operation_tx(row["operation_id"]) == "COMMITTED":
+                return True
+        return False
+
+    def _unresolved_custody_obligations_tx(
+        self, protocol: Mapping[str, Any]
+    ) -> tuple[StagedCustodyObligation, ...]:
+        if (
+            protocol["mode"] != "DRAINING"
+            or protocol["staged_generation"] is None
+            or protocol["staged_epoch_hash"] is None
+        ):
+            return ()
+        result: list[StagedCustodyObligation] = []
+        after_member = ""
+        while True:
+            member_rows = self._connection.execute(
+                "SELECT DISTINCT target_member_id "
+                "FROM registration_operation_audit "
+                "WHERE operation_kind IN('ADOPT_EFFECT','REACQUIRE_EFFECT') "
+                "AND target_staged_epoch_hash=? AND target_member_id>? "
+                "ORDER BY target_member_id COLLATE BINARY LIMIT 8",
+                (protocol["staged_epoch_hash"], after_member),
+            ).fetchall()
+            if not member_rows:
+                break
+            for member_row in member_rows:
+                member_id = member_row["target_member_id"]
+                authority = self._validate_semantic_closure_tx(
+                    member_id, episode_id=None
+                )
+                if authority is None:
+                    self._semantic_failure(
+                        "staged custody member closure is absent"
+                    )
+                grant_rows = self._connection.execute(
+                    "SELECT operation_id FROM registration_operation_audit "
+                    "WHERE operation_kind "
+                    "IN('ADOPT_EFFECT','REACQUIRE_EFFECT') "
+                    "AND target_staged_epoch_hash=? "
+                    "AND target_member_id=? ORDER BY operation_seq",
+                    (protocol["staged_epoch_hash"], member_id),
+                ).fetchall()
+                for grant_row in grant_rows:
+                    grant = self._validated_operation(
+                        grant_row["operation_id"]
+                    )
+                    grant_protocol_row = self._connection.execute(
+                        "SELECT * FROM registration_protocol_epoch "
+                        "WHERE protocol_seq=?",
+                        (grant["protocol_seq"],),
+                    ).fetchone()
+                    if grant_protocol_row is None:
+                        self._semantic_failure(
+                            "staged custody protocol is absent"
+                        )
+                    grant_protocol = self._validate_protocol_row(
+                        grant_protocol_row
+                    )
+                    effect_id = (
+                        grant["lineage_effect_id"]
+                        if grant["operation_kind"] == "ADOPT_EFFECT"
+                        else grant["target_effect_id"]
+                    )
+                    if (
+                        self._resolve_operation_tx(grant["operation_id"])
+                        != "COMMITTED"
+                        or effect_id is None
+                        or grant["target_status_hash"] is None
+                        or grant["target_executor_token_hash"] is None
+                        or grant["target_member_tuple_hash"] is None
+                        or grant_protocol["mode"] != "DRAINING"
+                        or grant_protocol["staged_generation"]
+                        != protocol["staged_generation"]
+                        or grant_protocol["staged_epoch_hash"]
+                        != protocol["staged_epoch_hash"]
+                    ):
+                        self._semantic_failure(
+                            "staged custody grant companion mismatch"
+                        )
+                    if self._custody_grant_closed_tx(
+                        grant, effect_id=effect_id
+                    ):
+                        continue
+                    result.append(
+                        StagedCustodyObligation(
+                            operation_id=grant["operation_id"],
+                            operation_kind=grant["operation_kind"],
+                            member_id=member_id,
+                            effect_id=effect_id,
+                            status_hash=grant["target_status_hash"],
+                            executor_token_hash=grant[
+                                "target_executor_token_hash"
+                            ],
+                            executor_generation=int(
+                                protocol["staged_generation"]
+                            ),
+                            staged_epoch_hash=protocol[
+                                "staged_epoch_hash"
+                            ],
+                            member_tuple_hash=grant[
+                                "target_member_tuple_hash"
+                            ],
+                        )
+                    )
+            after_member = member_rows[-1]["target_member_id"]
+        return tuple(result)
+
+    def unresolved_custody_obligations(
+        self,
+    ) -> tuple[StagedCustodyObligation, ...]:
+        with self._read_scope():
+            self._connection.execute("BEGIN")
+            try:
+                protocol_row = self._connection.execute(
+                    "SELECT * FROM registration_protocol_epoch "
+                    "ORDER BY protocol_seq DESC LIMIT 1"
+                ).fetchone()
+                if protocol_row is None:
+                    result: tuple[StagedCustodyObligation, ...] = ()
+                else:
+                    protocol = self._validate_protocol_row(protocol_row)
+                    result = self._unresolved_custody_obligations_tx(
+                        protocol
+                    )
+                self._connection.execute("COMMIT")
+                return result
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
 
     def advance_generation(
         self,
@@ -1824,6 +3029,13 @@ class RegistrationStore:
         candidate: ProtocolCandidate,
         *,
         quiescence_proof_hash: str,
+        staged_candidate: ProtocolCandidate | None = None,
+        current_profile_binding: (
+            registration_profile.CurrentProfileBinding | None
+        ) = None,
+        staged_profile_binding: (
+            registration_profile.StagedProfileBinding | None
+        ) = None,
         operation_id: str | None = None,
     ) -> OperationResult:
         _require_hash(quiescence_proof_hash, "quiescence_proof_hash")
@@ -1836,6 +3048,9 @@ class RegistrationStore:
             quiescence_proof_hash=quiescence_proof_hash,
             absence_proof_hash=None,
             operation_id=operation_id,
+            current_profile_binding=current_profile_binding,
+            staged_profile_binding=staged_profile_binding,
+            profile_staged_candidate=staged_candidate,
         )
 
     def pre_effect_dormant(
@@ -1844,6 +3059,9 @@ class RegistrationStore:
         candidate: ProtocolCandidate,
         *,
         absence_proof_hash: str,
+        profile_binding: (
+            registration_profile.CurrentProfileBinding | None
+        ) = None,
         operation_id: str | None = None,
     ) -> OperationResult:
         _require_hash(absence_proof_hash, "absence_proof_hash")
@@ -1856,6 +3074,8 @@ class RegistrationStore:
             quiescence_proof_hash=None,
             absence_proof_hash=absence_proof_hash,
             operation_id=operation_id,
+            current_profile_binding=profile_binding,
+            staged_profile_binding=None,
         )
 
     def enter_containment(
@@ -1864,6 +3084,9 @@ class RegistrationStore:
         candidate: ProtocolCandidate,
         *,
         reason: str,
+        profile_binding: (
+            registration_profile.CurrentProfileBinding | None
+        ) = None,
         operation_id: str | None = None,
     ) -> OperationResult:
         if reason not in {
@@ -1882,6 +3105,8 @@ class RegistrationStore:
             quiescence_proof_hash=None,
             absence_proof_hash=None,
             operation_id=operation_id,
+            current_profile_binding=profile_binding,
+            staged_profile_binding=None,
         )
 
     def begin_repair(
@@ -1889,6 +3114,13 @@ class RegistrationStore:
         control: ControlCapability,
         candidate: ProtocolCandidate,
         *,
+        current_profile_binding: (
+            registration_profile.CurrentProfileBinding | None
+        ) = None,
+        staged_candidate: ProtocolCandidate | None = None,
+        staged_profile_binding: (
+            registration_profile.StagedProfileBinding | None
+        ) = None,
         operation_id: str | None = None,
     ) -> OperationResult:
         return self._control_protocol_transition(
@@ -1900,6 +3132,9 @@ class RegistrationStore:
             quiescence_proof_hash=None,
             absence_proof_hash=None,
             operation_id=operation_id,
+            current_profile_binding=current_profile_binding,
+            staged_profile_binding=staged_profile_binding,
+            profile_staged_candidate=staged_candidate,
         )
 
     def _control_protocol_transition(
@@ -1913,6 +3148,13 @@ class RegistrationStore:
         quiescence_proof_hash: str | None,
         absence_proof_hash: str | None,
         operation_id: str | None,
+        current_profile_binding: (
+            registration_profile.CurrentProfileBinding | None
+        ),
+        staged_profile_binding: (
+            registration_profile.StagedProfileBinding | None
+        ),
+        profile_staged_candidate: ProtocolCandidate | None = None,
         _protocol_locked: bool = False,
     ) -> OperationResult:
         self._require_control(control, candidate)
@@ -1928,9 +3170,64 @@ class RegistrationStore:
                     quiescence_proof_hash=quiescence_proof_hash,
                     absence_proof_hash=absence_proof_hash,
                     operation_id=operation_id,
+                    current_profile_binding=current_profile_binding,
+                    staged_profile_binding=staged_profile_binding,
+                    profile_staged_candidate=profile_staged_candidate,
                     _protocol_locked=True,
                 )
+        typed_current = self._require_typed_profile_binding(
+            candidate, current_profile_binding, staged=False
+        )
+        typed_staged = None
+        if transition_kind in {
+            "STAGE_NEXT",
+            "ADVANCE_GENERATION",
+        }:
+            profile_candidate = (
+                staged_candidate
+                if transition_kind == "STAGE_NEXT"
+                else profile_staged_candidate
+            )
+            if profile_candidate is None and not self._allow_test_profile:
+                raise registration_profile.ProfileError(
+                    "staged candidate profile is required"
+                )
+            if profile_candidate is not None:
+                typed_staged = self._require_typed_profile_binding(
+                    profile_candidate,
+                    staged_profile_binding,
+                    staged=True,
+                )
         current = self._require_current_candidate(candidate)
+        if (
+            transition_kind == "BEGIN_REPAIR"
+            and current["staged_generation"] is not None
+        ):
+            if profile_staged_candidate is None and not self._allow_test_profile:
+                raise registration_profile.ProfileError(
+                    "staged candidate profile is required"
+                )
+            if profile_staged_candidate is not None:
+                typed_staged = self._require_typed_profile_binding(
+                    profile_staged_candidate,
+                    staged_profile_binding,
+                    staged=True,
+                )
+        if (
+            transition_kind in {"ADVANCE_GENERATION", "BEGIN_REPAIR"}
+            and profile_staged_candidate is not None
+        ):
+            self._require_staged_candidate(
+                profile_staged_candidate, current=current
+            )
+        promoted_typed_current = (
+            registration_profile.CurrentProfileBinding.promote(
+                typed_staged
+            )
+            if transition_kind == "ADVANCE_GENERATION"
+            and typed_staged is not None
+            else None
+        )
         operation_id = operation_id or self._operation_ids()
         with self._write_scope(
             {
@@ -1952,7 +3249,7 @@ class RegistrationStore:
                         "previous_protocol_hash": current["protocol_hash"],
                         "absence_proof_hash": absence_proof_hash,
                         "quiescence_proof_hash": quiescence_proof_hash,
-                        "created_wall_ns": self._wall_ns(),
+                        "created_wall_ns": self._fresh_wall_ns(),
                     }
                 )
                 operation_staged_hash: str | None = current["staged_epoch_hash"]
@@ -1977,6 +3274,10 @@ class RegistrationStore:
                         or sample_mono_ns > current["drain_deadline_mono_ns"]
                     ):
                         raise StaleAuthority("drain sample expired or changed boot")
+                    if staged_candidate.storage_dev != current["storage_dev"]:
+                        raise StaleAuthority(
+                            "staged candidate storage device mismatch"
+                        )
                     staged_fields = {
                         "staged_generation": int(
                             current["protocol_generation"]
@@ -2065,6 +3366,10 @@ class RegistrationStore:
                         or sample_mono_ns > current["drain_deadline_mono_ns"]
                     ):
                         raise StaleAuthority("drain sample expired or changed boot")
+                    if self._unresolved_custody_obligations_tx(current):
+                        raise StaleAuthority(
+                            "ADVANCE_GENERATION has unresolved staged custody"
+                        )
                     mappings = {
                         "protocol_generation": "staged_generation",
                         "schema_hash": "staged_schema_hash",
@@ -2237,6 +3542,27 @@ class RegistrationStore:
                 if closure is None:
                     raise StoreError(f"{transition_kind} closure failed")
                 self._commit()
+                if transition_kind == "ADVANCE_GENERATION":
+                    if promoted_typed_current is not None:
+                        self._profile_binding = (
+                            promoted_typed_current.profile
+                        )
+                    self._current_typed_profile_binding = (
+                        promoted_typed_current
+                    )
+                    self._staged_typed_profile_binding = None
+                else:
+                    if typed_current is not None:
+                        self._current_typed_profile_binding = typed_current
+                    if transition_kind == "STAGE_NEXT":
+                        self._staged_typed_profile_binding = typed_staged
+                    elif transition_kind in {
+                        "CANCEL_DRAIN",
+                        "PRE_EFFECT_DORMANT",
+                    }:
+                        self._staged_typed_profile_binding = None
+                    elif typed_staged is not None:
+                        self._staged_typed_profile_binding = typed_staged
                 self._tighten_files()
                 return OperationResult(
                     "COMMITTED",
@@ -2262,6 +3588,13 @@ class RegistrationStore:
         projected_db_growth_bytes: int = 0,
         _member_lock: registration_lock.HeldLock | None = None,
     ) -> OperationResult:
+        _require_int(
+            projected_db_growth_bytes,
+            "projected_db_growth_bytes",
+            minimum=0,
+        )
+        if sample_mono_ns is not None:
+            _require_int(sample_mono_ns, "sample_mono_ns", minimum=0)
         self._require_data(data, candidate)
         current = self._require_current_candidate(candidate, mode="WRITABLE")
         if identity.root_dev != int(current["storage_dev"]):
@@ -2448,6 +3781,58 @@ class RegistrationStore:
         with self._write_scope(writes):
             try:
                 measured = self._begin()
+                live_current = self._require_current_candidate(
+                    candidate, mode="WRITABLE"
+                )
+                if (
+                    live_current["protocol_hash"]
+                    != current["protocol_hash"]
+                ):
+                    raise StaleAuthority(
+                        "member install protocol changed under lock"
+                    )
+                existing_member = self._connection.execute(
+                    "SELECT * FROM registration_member WHERE member_id=?",
+                    (member_id,),
+                ).fetchone()
+                if existing_member is not None:
+                    authority = self._validate_semantic_closure_tx(
+                        member_id, episode_id=None
+                    )
+                    existing_effect = self._connection.execute(
+                        "SELECT * FROM registration_effect WHERE effect_id=?",
+                        (effect_id,),
+                    ).fetchone()
+                    if authority is None or existing_effect is None:
+                        raise StaleAuthority(
+                            "duplicate member closure is incomplete"
+                        )
+                    install_operation = self._validated_operation(
+                        existing_effect["created_operation_id"]
+                    )
+                    if (
+                        install_operation["operation_kind"]
+                        != "INSTALL_MEMBER"
+                        or install_operation["target_member_id"] != member_id
+                        or install_operation["target_successor_effect_id"]
+                        != effect_id
+                        or install_operation["target_member_tuple_hash"]
+                        != member["member_tuple_hash"]
+                        or install_operation["target_effect_tuple_hash"]
+                        != effect["request_tuple_hash"]
+                        or existing_effect["request_tuple_hash"]
+                        != effect["request_tuple_hash"]
+                    ):
+                        raise StaleAuthority(
+                            "duplicate member tuple conflicts"
+                        )
+                    self._connection.execute("ROLLBACK")
+                    return OperationResult(
+                        "COMMITTED",
+                        install_operation["operation_id"],
+                        install_operation["operation_envelope_hash"],
+                        install_operation["target_member_tuple_hash"],
+                    )
                 fresh_boot, fresh_mono = self._fresh_sample()
                 if sample_boot_id is not None and (
                     fresh_boot,
@@ -2584,6 +3969,11 @@ class RegistrationStore:
         operation_id: str | None = None,
         projected_db_growth_bytes: int = 0,
     ) -> OperationResult:
+        _require_int(
+            projected_db_growth_bytes,
+            "projected_db_growth_bytes",
+            minimum=0,
+        )
         self._require_data(data, candidate)
         current = self._require_current_candidate(candidate, mode="WRITABLE")
         _require_hash(member_id, "member_id")
@@ -2598,6 +3988,9 @@ class RegistrationStore:
             ):
                 try:
                     measured = self._begin()
+                    current = self._require_current_candidate(
+                        candidate, mode="WRITABLE"
+                    )
                     member = self._connection.execute(
                         "SELECT member_tuple_hash FROM registration_member "
                         "WHERE member_id=?",
@@ -2617,6 +4010,67 @@ class RegistrationStore:
                         current["tool_inventory_hash"],
                         current["hook_projection_hash"],
                     )
+                    existing_episode = self._connection.execute(
+                        "SELECT * FROM registration_episode "
+                        "WHERE episode_id=?",
+                        (episode_id,),
+                    ).fetchone()
+                    if existing_episode is not None:
+                        authority = self._validate_semantic_closure_tx(
+                            member_id, episode_id=episode_id
+                        )
+                        if (
+                            authority is None
+                            or len(authority.episodes) != 1
+                        ):
+                            raise StaleAuthority(
+                                "duplicate episode closure is incomplete"
+                            )
+                        episode_value = authority.episodes[0]
+                        operation = self._validated_operation(
+                            episode_value["write_operation_id"]
+                        )
+                        expected_fields = {
+                            "conversation_id": source.conversation_id,
+                            "generation_id": source.generation_id,
+                            "source_contract": source.source_contract,
+                            "source_event": source.source_event,
+                            "protocol_generation": current[
+                                "protocol_generation"
+                            ],
+                            "member_id": member_id,
+                            "workspace_root_count": 1,
+                            "workspace_roots_hash": (
+                                source.workspace_roots_hash
+                            ),
+                            "tool_inventory_hash": current[
+                                "tool_inventory_hash"
+                            ],
+                            "hook_projection_hash": current[
+                                "hook_projection_hash"
+                            ],
+                        }
+                        if (
+                            any(
+                                episode_value[key] != value
+                                for key, value in expected_fields.items()
+                            )
+                            or operation["operation_kind"]
+                            != "BIND_EPISODE"
+                            or operation["target_episode_id"] != episode_id
+                            or operation["target_episode_hash"]
+                            != episode_value["envelope_hash"]
+                        ):
+                            raise StaleAuthority(
+                                "duplicate episode tuple conflicts"
+                            )
+                        self._connection.execute("ROLLBACK")
+                        return OperationResult(
+                            "COMMITTED",
+                            operation["operation_id"],
+                            operation["operation_envelope_hash"],
+                            episode_value["envelope_hash"],
+                        )
                     episode: dict[str, Any] = {
                         "episode_id": episode_id,
                         "conversation_id": source.conversation_id,
@@ -2631,7 +4085,7 @@ class RegistrationStore:
                         "hook_projection_hash": current[
                             "hook_projection_hash"
                         ],
-                        "created_wall_ns": self._wall_ns(),
+                        "created_wall_ns": self._fresh_wall_ns(),
                     }
                     episode["envelope_hash"] = registration_hashes.derive(
                         "episode_envelope_hash", episode
@@ -2693,6 +4147,11 @@ class RegistrationStore:
         operation_id: str | None = None,
         projected_db_growth_bytes: int = 0,
     ) -> OperationResult:
+        _require_int(
+            projected_db_growth_bytes,
+            "projected_db_growth_bytes",
+            minimum=0,
+        )
         self._require_data(data, candidate)
         self._require_current_candidate(candidate, mode="WRITABLE")
         if basis.current_basis_hash != intent.request_basis_hash:
@@ -2715,25 +4174,16 @@ class RegistrationStore:
                     current = self._require_current_candidate(
                         candidate, mode="WRITABLE"
                     )
-                    member = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_member WHERE member_id=?",
-                            (member_id,),
-                        ).fetchone()
+                    authority = self._validate_semantic_closure_tx(
+                        member_id, episode_id=None
                     )
-                    old_effect = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_effect WHERE effect_id=?",
-                            (member["current_effect_id"],),
-                        ).fetchone()
-                    )
-                    old_status = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_runtime_status "
-                            "WHERE member_id=?",
-                            (member_id,),
-                        ).fetchone()
-                    )
+                    if authority is None:
+                        raise StaleAuthority(
+                            "INVALIDATE_REQUESTED authority is absent"
+                        )
+                    member = dict(authority.member)
+                    old_effect = dict(authority.effect)
+                    old_status = dict(authority.status)
                     if (
                         member["phase"] != "REQUESTED"
                         or member["member_tuple_hash"] != expected_member_hash
@@ -3056,35 +4506,24 @@ class RegistrationStore:
                     current = self._require_current_candidate(
                         candidate, mode="WRITABLE"
                     )
-                    member = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_member WHERE member_id=?",
-                            (member_id,),
-                        ).fetchone()
+                    authority = self._validate_semantic_closure_tx(
+                        member_id, episode_id=None
                     )
-                    status = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_runtime_status "
-                            "WHERE member_id=?",
-                            (member_id,),
-                        ).fetchone()
-                    )
-                    active = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_effect WHERE effect_id=?",
-                            (member["current_effect_id"],),
-                        ).fetchone()
-                    )
+                    if authority is None:
+                        raise StaleAuthority(
+                            f"{operation_kind} authority is absent"
+                        )
+                    member = dict(authority.member)
+                    status = dict(authority.status)
+                    active = dict(authority.effect)
                     old_pending = None
                     expected_source = active
                     if replace and member["pending_effect_id"] is not None:
-                        old_pending = dict(
-                            self._connection.execute(
-                                "SELECT * FROM registration_effect "
-                                "WHERE effect_id=?",
-                                (member["pending_effect_id"],),
-                            ).fetchone()
-                        )
+                        if authority.pending_effect is None:
+                            self._semantic_failure(
+                                "pending effect closure is absent"
+                            )
+                        old_pending = dict(authority.pending_effect)
                         expected_source = old_pending
                     if (
                         member["phase"] != "EFFECT_IN_FLIGHT"
@@ -3357,25 +4796,16 @@ class RegistrationStore:
                     current = self._require_current_candidate(
                         candidate, mode="WRITABLE"
                     )
-                    member = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_member WHERE member_id=?",
-                            (member_id,),
-                        ).fetchone()
+                    authority = self._validate_semantic_closure_tx(
+                        member_id, episode_id=None
                     )
-                    old_effect = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_effect WHERE effect_id=?",
-                            (member["current_effect_id"],),
-                        ).fetchone()
-                    )
-                    old_status = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_runtime_status "
-                            "WHERE member_id=?",
-                            (member_id,),
-                        ).fetchone()
-                    )
+                    if authority is None:
+                        raise StaleAuthority(
+                            "HANDOFF_RESOLVED authority is absent"
+                        )
+                    member = dict(authority.member)
+                    old_effect = dict(authority.effect)
+                    old_status = dict(authority.status)
                     if (
                         member["phase"] != "RESOLVED"
                         or member["member_tuple_hash"] != expected_member_hash
@@ -3393,13 +4823,11 @@ class RegistrationStore:
                                 "pending handoff uses BASIS_CHANGED cause"
                             )
                         cause = "BASIS_CHANGED"
-                        successor = dict(
-                            self._connection.execute(
-                                "SELECT * FROM registration_effect "
-                                "WHERE effect_id=?",
-                                (member["pending_effect_id"],),
-                            ).fetchone()
-                        )
+                        if authority.pending_effect is None:
+                            self._semantic_failure(
+                                "pending handoff closure is absent"
+                            )
+                        successor = dict(authority.pending_effect)
                         applied_basis = BasisUpdate(
                             policy_basis_hash=(
                                 basis.policy_basis_hash
@@ -3796,6 +5224,8 @@ class RegistrationStore:
         backoff_ns: int,
         operation_id: str | None = None,
     ) -> OperationResult:
+        _require_int(attempt_count, "attempt_count", minimum=0)
+        _require_int(backoff_ns, "backoff_ns", minimum=0)
         self._require_data(data, candidate)
         self._require_current_candidate(candidate, mode="WRITABLE")
         if not 0 <= attempt_count <= 255 or not 0 <= backoff_ns <= 15_000_000_000:
@@ -3897,6 +5327,13 @@ class RegistrationStore:
         member_id: str,
         expected_member_hash: str,
         expected_status_hash: str,
+        current_profile_binding: (
+            registration_profile.CurrentProfileBinding | None
+        ) = None,
+        staged_candidate: ProtocolCandidate | None = None,
+        staged_profile_binding: (
+            registration_profile.StagedProfileBinding | None
+        ) = None,
         executor_secret: bytes | None = None,
         replacement_intent: EffectIntent | None = None,
         replacement_basis_hash: str | None = None,
@@ -3910,8 +5347,34 @@ class RegistrationStore:
         protocol_lock = self._locks.acquire_protocol()
         member_lock: registration_lock.HeldLock | None = None
         committed = False
+        grant_durable = False
+        execution: MemberExecution | None = None
+        token_hash: str | None = None
         try:
             protocol_lock.verify()
+            current = self._require_current_candidate(
+                candidate, mode="DRAINING"
+            )
+            typed_current = self._require_typed_profile_binding(
+                candidate, current_profile_binding, staged=False
+            )
+            if staged_candidate is None and not self._allow_test_profile:
+                raise registration_profile.ProfileError(
+                    "staged candidate profile is required"
+                )
+            typed_staged = (
+                self._require_typed_profile_binding(
+                    staged_candidate,
+                    staged_profile_binding,
+                    staged=True,
+                )
+                if staged_candidate is not None
+                else None
+            )
+            if staged_candidate is not None:
+                self._require_staged_candidate(
+                    staged_candidate, current=current
+                )
             member_lock = self._locks.acquire_member(member_id)
             member_lock.verify()
             with self._write_scope(
@@ -3934,25 +5397,18 @@ class RegistrationStore:
                         or sample_mono_ns > current["drain_deadline_mono_ns"]
                     ):
                         raise StaleAuthority("ADOPT_EFFECT drain sample expired")
-                    member = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_member WHERE member_id=?",
-                            (member_id,),
-                        ).fetchone()
+                    authority = self._validate_semantic_closure_tx(
+                        member_id, episode_id=None
                     )
-                    active = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_effect WHERE effect_id=?",
-                            (member["current_effect_id"],),
-                        ).fetchone()
-                    )
-                    old_status = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_runtime_status "
-                            "WHERE member_id=?",
-                            (member_id,),
-                        ).fetchone()
-                    )
+                    if (
+                        authority is None
+                        or authority.protocol["protocol_hash"]
+                        != current["protocol_hash"]
+                    ):
+                        raise StaleAuthority("ADOPT_EFFECT closure changed")
+                    member = dict(authority.member)
+                    active = dict(authority.effect)
+                    old_status = dict(authority.status)
                     if (
                         member["phase"] != "EFFECT_IN_FLIGHT"
                         or member["member_tuple_hash"] != expected_member_hash
@@ -4026,13 +5482,11 @@ class RegistrationStore:
                     target_effect_hash = active["request_tuple_hash"]
                     cause = None
                     if member["pending_effect_id"] is not None:
-                        pending = dict(
-                            self._connection.execute(
-                                "SELECT * FROM registration_effect "
-                                "WHERE effect_id=?",
-                                (member["pending_effect_id"],),
-                            ).fetchone()
-                        )
+                        if authority.pending_effect is None:
+                            raise SemanticClosureError(
+                                "pending effect closure is missing"
+                            )
+                        pending = dict(authority.pending_effect)
                         if (
                             pending["required_protocol_generation"]
                             == current["staged_generation"]
@@ -4256,7 +5710,21 @@ class RegistrationStore:
                         expected_column="member_tuple_hash",
                         expected_value=member["member_tuple_hash"],
                     )
-                    self._commit()
+                    try:
+                        self._commit()
+                    except BaseException:
+                        grant_durable = self._grant_is_durable(
+                            operation_id=operation_id,
+                            operation_kind="ADOPT_EFFECT",
+                            member_id=member_id,
+                            executor_token_hash=token_hash,
+                        )
+                        raise
+                    grant_durable = True
+                    if typed_current is not None:
+                        self._current_typed_profile_binding = typed_current
+                    if typed_staged is not None:
+                        self._staged_typed_profile_binding = typed_staged
                     self._tighten_files()
                     execution = MemberExecution(
                         store_identity=id(self),
@@ -4273,13 +5741,13 @@ class RegistrationStore:
                         target_staged_epoch_hash=current["staged_epoch_hash"],
                         _seal=_EXECUTION_SEAL,
                     )
-                    committed = True
                 except Exception:
                     if self._connection.in_transaction:
                         self._connection.execute("ROLLBACK")
                     raise
-            protocol_lock.release()
             self.verify_execution(execution)
+            self._fault("before_grant_return")
+            committed = True
             return ExecutionResult(
                 operation=OperationResult(
                     "COMMITTED",
@@ -4289,17 +5757,138 @@ class RegistrationStore:
                 ),
                 execution=execution,
             )
-        except Exception:
+        except BaseException as primary:
             if self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
-            if committed and member_lock is not None:
-                member_lock.release()
+            if not grant_durable and token_hash is not None:
+                try:
+                    grant_durable = self._grant_is_durable(
+                        operation_id=operation_id,
+                        operation_kind="ADOPT_EFFECT",
+                        member_id=member_id,
+                        executor_token_hash=token_hash,
+                    )
+                except sqlite3.Error as check_error:
+                    primary.add_note(
+                        "grant durability classification failed secondarily: "
+                        f"{type(check_error).__name__}"
+                    )
+            if grant_durable and member_lock is not None:
+                if execution is None:
+                    execution = MemberExecution(
+                        store_identity=id(self),
+                        member_lock=member_lock,
+                        secret=secret,
+                        member_id=member_id,
+                        effect_id=active["effect_id"],
+                        executor_token_hash=token_hash,
+                        operation_id=operation_id,
+                        target_member_hash=member_target["member_tuple_hash"],
+                        target_effect_hash=active["request_tuple_hash"],
+                        target_status_hash=status["status_hash"],
+                        target_protocol_hash=current["protocol_hash"],
+                        target_staged_epoch_hash=current["staged_epoch_hash"],
+                        _seal=_EXECUTION_SEAL,
+                    )
+                cleanup_data, cleanup_candidate = (
+                    self._staged_cleanup_credentials(current)
+                )
+                self._cleanup_failed_grant(
+                    data=cleanup_data,
+                    candidate=cleanup_candidate,
+                    execution=execution,
+                    primary=primary,
+                )
             raise
         finally:
             if protocol_lock.held:
                 protocol_lock.release()
             if not committed and member_lock is not None and member_lock.held:
                 member_lock.release()
+
+    def _grant_is_durable(
+        self,
+        *,
+        operation_id: str,
+        operation_kind: str,
+        member_id: str,
+        executor_token_hash: str,
+    ) -> bool:
+        row = self._connection.execute(
+            "SELECT 1 FROM registration_operation_audit o "
+            "JOIN registration_runtime_status s "
+            "ON s.member_id=o.target_member_id "
+            "WHERE o.operation_id=? AND o.operation_kind=? "
+            "AND o.target_member_id=? "
+            "AND o.target_executor_token_hash=? "
+            "AND s.executor_token_hash=?",
+            (
+                operation_id,
+                operation_kind,
+                member_id,
+                executor_token_hash,
+                executor_token_hash,
+            ),
+        ).fetchone()
+        return row is not None
+
+    def _cleanup_failed_grant(
+        self,
+        *,
+        data: DataCapability,
+        candidate: ProtocolCandidate,
+        execution: MemberExecution,
+        primary: BaseException,
+    ) -> None:
+        try:
+            result = self.mark_unavailable(
+                data,
+                candidate,
+                execution,
+                profile_binding=self._cached_profile_binding_for_candidate(
+                    candidate
+                ),
+            )
+            if isinstance(result, RecoveryReserveExhausted):
+                primary.add_note(
+                    "grant cleanup could not persist: recovery reserve exhausted"
+                )
+        except BaseException as cleanup:
+            primary.add_note(
+                f"grant cleanup failed secondarily: {type(cleanup).__name__}"
+            )
+        finally:
+            execution.close()
+
+    @staticmethod
+    def _staged_cleanup_credentials(
+        current: Mapping[str, Any],
+    ) -> tuple[DataCapability, ProtocolCandidate]:
+        if current["mode"] != "DRAINING" or current["staged_generation"] is None:
+            raise AuthorizationError("staged cleanup authority is unavailable")
+        candidate = ProtocolCandidate(
+            profile_hash=current["staged_profile_hash"],
+            runtime_capability_hash=current["staged_runtime_capability_hash"],
+            writer_binary_hash=current["staged_writer_binary_hash"],
+            writer_capability_hash=current["staged_writer_capability_hash"],
+            tool_inventory_hash=current["staged_tool_inventory_hash"],
+            hook_projection_hash=current["staged_hook_projection_hash"],
+            hook_matcher_mode=current["staged_hook_matcher_mode"],
+            hook_matcher_hash=current["staged_hook_matcher_hash"],
+            projection_receipt_hash=current["staged_projection_receipt_hash"],
+            projection_file_generation=current[
+                "staged_projection_file_generation"
+            ],
+            installer_identity_hash=current["staged_installer_identity_hash"],
+            installer_capability_hash=current[
+                "staged_installer_capability_hash"
+            ],
+            storage_dev=current["storage_dev"],
+        )
+        return (
+            DataCapability(candidate.writer_capability_hash, _seal=_DATA_SEAL),
+            candidate,
+        )
 
     def open_effect(
         self,
@@ -4314,6 +5903,11 @@ class RegistrationStore:
         operation_id: str | None = None,
         projected_db_growth_bytes: int = 0,
     ) -> ExecutionResult:
+        _require_int(
+            projected_db_growth_bytes,
+            "projected_db_growth_bytes",
+            minimum=0,
+        )
         self._require_data(data, candidate)
         self._require_current_candidate(candidate, mode="WRITABLE")
         for value, field in (
@@ -4328,9 +5922,14 @@ class RegistrationStore:
             raise AuthorizationError("executor secret must contain at least 256 bits")
         token_hash = _domain_hash("awa-registration-executor/v1", secret)
         operation_id = operation_id or self._operation_ids()
-        held = self._locks.acquire_member(member_id)
+        protocol_lock = self._locks.acquire_protocol()
+        held: registration_lock.HeldLock | None = None
         committed = False
+        grant_durable = False
+        execution: MemberExecution | None = None
         try:
+            protocol_lock.verify()
+            held = self._locks.acquire_member(member_id)
             held.verify()
             with self._write_scope(
                 {
@@ -4346,25 +5945,18 @@ class RegistrationStore:
                     current = self._require_current_candidate(
                         candidate, mode="WRITABLE"
                     )
-                    member_row = self._connection.execute(
-                        "SELECT * FROM registration_member WHERE member_id=?",
-                        (member_id,),
-                    ).fetchone()
-                    if member_row is None:
-                        raise StaleAuthority("member missing")
-                    member = dict(member_row)
-                    effect_row = self._connection.execute(
-                        "SELECT * FROM registration_effect WHERE effect_id=?",
-                        (member["current_effect_id"],),
-                    ).fetchone()
-                    status_row = self._connection.execute(
-                        "SELECT * FROM registration_runtime_status WHERE member_id=?",
-                        (member_id,),
-                    ).fetchone()
-                    if effect_row is None or status_row is None:
+                    authority = self._validate_semantic_closure_tx(
+                        member_id, episode_id=None
+                    )
+                    if (
+                        authority is None
+                        or authority.protocol["protocol_hash"]
+                        != current["protocol_hash"]
+                    ):
                         raise StaleAuthority("member closure missing")
-                    effect = dict(effect_row)
-                    old_status = dict(status_row)
+                    member = dict(authority.member)
+                    effect = dict(authority.effect)
+                    old_status = dict(authority.status)
                     if (
                         member["member_tuple_hash"] != expected_member_hash
                         or effect["request_tuple_hash"] != expected_effect_hash
@@ -4426,7 +6018,7 @@ class RegistrationStore:
                                 "transition_kind": "FIRST_EFFECT",
                                 "transition_reason_code": "FIRST_EFFECT",
                                 "previous_protocol_hash": current["protocol_hash"],
-                                "created_wall_ns": self._wall_ns(),
+                                "created_wall_ns": self._fresh_wall_ns(),
                             }
                         )
                         target_protocol_hash = registration_hashes.derive(
@@ -4518,7 +6110,17 @@ class RegistrationStore:
                     ).fetchone()
                     if closure is None:
                         raise StoreError("OPEN_EFFECT closure failed")
-                    self._commit()
+                    try:
+                        self._commit()
+                    except BaseException:
+                        grant_durable = self._grant_is_durable(
+                            operation_id=operation_id,
+                            operation_kind="OPEN_EFFECT",
+                            member_id=member_id,
+                            executor_token_hash=token_hash,
+                        )
+                        raise
+                    grant_durable = True
                     self._tighten_files()
                     execution = MemberExecution(
                         store_identity=id(self),
@@ -4534,8 +6136,9 @@ class RegistrationStore:
                         target_protocol_hash=target_protocol_hash,
                         _seal=_EXECUTION_SEAL,
                     )
-                    committed = True
                     self.verify_execution(execution)
+                    self._fault("before_grant_return")
+                    committed = True
                     return ExecutionResult(
                         operation=OperationResult(
                             "COMMITTED",
@@ -4549,28 +6152,153 @@ class RegistrationStore:
                     if self._connection.in_transaction:
                         self._connection.execute("ROLLBACK")
                     raise
+        except BaseException as primary:
+            if not grant_durable and not self._connection.in_transaction:
+                try:
+                    grant_durable = self._grant_is_durable(
+                        operation_id=operation_id,
+                        operation_kind="OPEN_EFFECT",
+                        member_id=member_id,
+                        executor_token_hash=token_hash,
+                    )
+                except sqlite3.Error as check_error:
+                    primary.add_note(
+                        "grant durability classification failed secondarily: "
+                        f"{type(check_error).__name__}"
+                    )
+            if grant_durable:
+                if execution is None:
+                    execution = MemberExecution(
+                        store_identity=id(self),
+                        member_lock=held,
+                        secret=secret,
+                        member_id=member_id,
+                        effect_id=effect["effect_id"],
+                        executor_token_hash=token_hash,
+                        operation_id=operation_id,
+                        target_member_hash=member_target["member_tuple_hash"],
+                        target_effect_hash=effect["request_tuple_hash"],
+                        target_status_hash=status["status_hash"],
+                        target_protocol_hash=target_protocol_hash,
+                        _seal=_EXECUTION_SEAL,
+                    )
+                self._cleanup_failed_grant(
+                    data=data,
+                    candidate=candidate,
+                    execution=execution,
+                    primary=primary,
+                )
+            raise
         finally:
-            if not committed:
+            if protocol_lock.held:
+                protocol_lock.release()
+            if not committed and held is not None:
                 held.release()
+
+    def _require_transfer_deadline(self, deadline_ns: int) -> float:
+        _require_int(deadline_ns, "deadline_ns", minimum=0)
+        protocol = self.current_protocol()
+        sample_boot_id, sample_mono_ns = self._fresh_sample()
+        if (
+            protocol is None
+            or protocol["mode"] != "DRAINING"
+            or protocol["staged_generation"] is None
+            or sample_boot_id != protocol["drain_boot_id"]
+            or sample_mono_ns >= deadline_ns
+            or deadline_ns - sample_mono_ns > 5_000_000_000
+            or deadline_ns > protocol["drain_deadline_mono_ns"]
+        ):
+            raise AuthorizationError(
+                "staged transfer deadline exceeds drain authority"
+            )
+        return (deadline_ns - sample_mono_ns) / 1_000_000_000
+
+    def _validate_execution_grant(
+        self,
+        authority: SelectedAuthority,
+        execution: MemberExecution,
+    ) -> ValidatedOperation:
+        operations: dict[str, ValidatedOperation] = {}
+        grant = self._validated_operation(
+            execution.operation_id, operations
+        )
+        staged = execution.target_staged_epoch_hash is not None
+        allowed_kinds = (
+            {"ADOPT_EFFECT", "REACQUIRE_EFFECT"}
+            if staged
+            else {"OPEN_EFFECT", "REACQUIRE_EFFECT"}
+        )
+        effect_companion = (
+            grant["lineage_effect_id"]
+            if grant["operation_kind"] == "ADOPT_EFFECT"
+            else grant["target_effect_id"]
+        )
+        if (
+            grant["operation_kind"] not in allowed_kinds
+            or grant["target_member_id"] != execution.member_id
+            or effect_companion != execution.effect_id
+            or grant["target_executor_token_hash"]
+            != execution.executor_token_hash
+            or grant["target_member_tuple_hash"]
+            != execution.target_member_hash
+            or grant["target_status_hash"] != execution.target_status_hash
+            or grant["target_protocol_hash"]
+            != execution.target_protocol_hash
+            or grant["target_staged_epoch_hash"]
+            != execution.target_staged_epoch_hash
+            or authority.status["write_operation_id"]
+            != execution.operation_id
+            or authority.status["write_operation_seq"]
+            != grant["operation_seq"]
+            or authority.status["write_operation_hash"]
+            != grant["operation_envelope_hash"]
+        ):
+            raise AuthorizationError(
+                "executor granting operation companion changed"
+            )
+        if grant["operation_kind"] == "ADOPT_EFFECT":
+            if (
+                grant["target_action_plan_hash"]
+                != authority.effect["action_plan_hash"]
+                or grant["lineage_effect_id"]
+                != authority.effect["effect_id"]
+            ):
+                raise AuthorizationError(
+                    "adopted executor lineage changed"
+                )
+        elif (
+            grant["target_effect_tuple_hash"]
+            != authority.effect["request_tuple_hash"]
+            or grant["expected_target_effect_tuple_hash"]
+            != authority.effect["request_tuple_hash"]
+        ):
+            raise AuthorizationError(
+                "executor effect companion changed"
+            )
+        return grant
 
     def verify_execution(self, execution: MemberExecution) -> None:
         execution.verify_owner(self)
         if self._connection.in_transaction:
             raise AuthorizationError("helper I/O check cannot nest a transaction")
-        row = self._connection.execute(
-            "SELECT m.member_tuple_hash,s.status_hash,s.executor_token_hash,"
-            "e.request_tuple_hash,p.protocol_hash,p.staged_epoch_hash,"
-            "m.helper_generation,s.executor_generation,p.staged_generation,p.mode "
-            "FROM registration_member m "
-            "JOIN registration_runtime_status s USING(member_id) "
-            "JOIN registration_effect e ON e.effect_id=m.current_effect_id "
-            "JOIN registration_protocol_epoch p "
-            "ON p.protocol_seq=(SELECT MAX(protocol_seq) "
-            "FROM registration_protocol_epoch) "
-            "WHERE m.member_id=? AND e.effect_id=?",
-            (execution.member_id, execution.effect_id),
-        ).fetchone()
-        if row is None or tuple(row[:4]) != (
+        authority = (
+            self._validate_semantic_closure_tx(
+                execution.member_id, episode_id=None
+            )
+            if getattr(self._authorizer_local, "active", False)
+            else self.validate_semantic_closure(execution.member_id)
+        )
+        if authority is None or (
+            authority.effect["effect_id"] != execution.effect_id
+        ):
+            raise AuthorizationError("post-commit executor authority is absent")
+        grant = self._validate_execution_grant(authority, execution)
+        if (
+            authority.member["member_tuple_hash"],
+            authority.status["status_hash"],
+            authority.status["executor_token_hash"],
+            authority.effect["request_tuple_hash"],
+        ) != (
             execution.target_member_hash,
             execution.target_status_hash,
             execution.executor_token_hash,
@@ -4578,42 +6306,180 @@ class RegistrationStore:
         ):
             raise AuthorizationError("post-commit executor authority changed")
         if execution.target_staged_epoch_hash is None:
-            if row["protocol_hash"] != execution.target_protocol_hash:
+            if authority.protocol["protocol_hash"] != execution.target_protocol_hash:
                 raise AuthorizationError("post-commit protocol authority changed")
             return
         draining = (
-            row["protocol_hash"] == execution.target_protocol_hash
-            and row["staged_epoch_hash"] == execution.target_staged_epoch_hash
-            and row["helper_generation"] == row["staged_generation"]
-            and row["executor_generation"] == row["staged_generation"]
-            and row["mode"] == "DRAINING"
+            authority.protocol["protocol_hash"] == execution.target_protocol_hash
+            and authority.protocol["staged_epoch_hash"]
+            == execution.target_staged_epoch_hash
+            and authority.member["helper_generation"]
+            == authority.protocol["staged_generation"]
+            and authority.status["executor_generation"]
+            == authority.protocol["staged_generation"]
+            and authority.protocol["mode"] == "DRAINING"
         )
         advanced = (
-            row["mode"] == "WRITABLE"
-            and row["helper_generation"] == row["executor_generation"]
-            and self._connection.execute(
-                "SELECT 1 FROM registration_operation_audit a "
-                "JOIN registration_protocol_epoch staged "
-                "ON staged.protocol_seq=a.protocol_seq "
-                "JOIN registration_protocol_epoch current "
-                "ON current.protocol_seq=(SELECT MAX(protocol_seq) "
-                "FROM registration_protocol_epoch) "
-                "WHERE a.operation_id=? AND a.operation_kind='ADOPT_EFFECT' "
-                "AND a.target_staged_epoch_hash=? "
-                "AND staged.staged_epoch_hash=? "
-                "AND staged.staged_generation=current.protocol_generation "
-                "AND staged.staged_runtime_capability_hash="
-                "current.runtime_capability_hash",
-                (
-                    execution.operation_id,
-                    execution.target_staged_epoch_hash,
-                    execution.target_staged_epoch_hash,
-                ),
-            ).fetchone()
+            authority.protocol["mode"] == "WRITABLE"
+            and authority.member["helper_generation"]
+            == authority.status["executor_generation"]
+            and grant["operation_kind"]
+            in {"ADOPT_EFFECT", "REACQUIRE_EFFECT"}
+            and (
+                staged_protocol_row := self._connection.execute(
+                    "SELECT * FROM registration_protocol_epoch "
+                    "WHERE protocol_seq=?",
+                    (grant["protocol_seq"],),
+                ).fetchone()
+            )
             is not None
+            and (
+                staged_protocol := self._validate_protocol_row(
+                    staged_protocol_row
+                )
+            )["staged_epoch_hash"]
+            == execution.target_staged_epoch_hash
+            and staged_protocol["staged_generation"]
+            == authority.protocol["protocol_generation"]
+            and staged_protocol["staged_runtime_capability_hash"]
+            == authority.protocol["runtime_capability_hash"]
         )
         if not draining and not advanced:
             raise AuthorizationError("staged executor lineage changed")
+
+    def receive_staged_execution(
+        self,
+        transfer: registration_executor.StagedSecretTransfer,
+        *,
+        expected_frame_digest: str,
+        deadline_ns: int,
+        staged_candidate: ProtocolCandidate | None = None,
+        staged_profile_binding: (
+            registration_profile.StagedProfileBinding | None
+        ) = None,
+    ) -> MemberExecution:
+        _require_hash(expected_frame_digest, "expected_frame_digest")
+        self._require_transfer_deadline(deadline_ns)
+        protocol = self.current_protocol()
+        if protocol is None:
+            raise AuthorizationError("staged protocol authority is absent")
+        if staged_candidate is None and not self._allow_test_profile:
+            raise registration_profile.ProfileError(
+                "staged candidate profile is required"
+            )
+        typed_staged = None
+        if staged_candidate is not None:
+            self._require_staged_candidate(
+                staged_candidate, current=protocol
+            )
+            typed_staged = self._require_typed_profile_binding(
+                staged_candidate,
+                staged_profile_binding,
+                staged=True,
+            )
+        received = transfer.receive_frame(
+            deadline_ns=deadline_ns,
+            expected_frame_digest=expected_frame_digest,
+        )
+        held: registration_lock.HeldLock | None = None
+        execution: MemberExecution | None = None
+        try:
+            frame = received.frame
+            if staged_candidate is not None:
+                latest = self.current_protocol()
+                if latest is None:
+                    raise AuthorizationError(
+                        "staged protocol authority is absent"
+                    )
+                self._require_staged_candidate(
+                    staged_candidate, current=latest
+                )
+                typed_staged = self._require_typed_profile_binding(
+                    staged_candidate,
+                    staged_profile_binding,
+                    staged=True,
+                )
+            remaining = self._require_transfer_deadline(deadline_ns)
+            held = self._locks.acquire_member(
+                frame.member_id, timeout=min(remaining, 5.0)
+            )
+            held.verify()
+            effect = self._connection.execute(
+                "SELECT request_tuple_hash FROM registration_effect "
+                "WHERE effect_id=?",
+                (frame.effect_id,),
+            ).fetchone()
+            if effect is None:
+                raise AuthorizationError("staged executor effect is absent")
+            execution = MemberExecution(
+                store_identity=id(self),
+                member_lock=held,
+                secret=received.take_secret(),
+                member_id=frame.member_id,
+                effect_id=frame.effect_id,
+                executor_token_hash=frame.executor_token_hash,
+                operation_id=frame.operation_id,
+                target_member_hash=frame.member_tuple_hash,
+                target_effect_hash=effect["request_tuple_hash"],
+                target_status_hash=frame.status_hash,
+                target_protocol_hash=frame.protocol_hash,
+                target_staged_epoch_hash=frame.staged_epoch_hash,
+                _seal=_EXECUTION_SEAL,
+            )
+            self.verify_execution(execution)
+            self._require_transfer_deadline(deadline_ns)
+            transfer.acknowledge_activated(
+                frame.digest, deadline_ns=deadline_ns
+            )
+            if typed_staged is not None:
+                self._staged_typed_profile_binding = typed_staged
+            return execution
+        except Exception:
+            if execution is not None:
+                execution.close()
+            elif held is not None:
+                held.release()
+            raise
+        finally:
+            received.close()
+
+    def transfer_staged_execution(
+        self,
+        execution: MemberExecution,
+        transfer: registration_executor.StagedSecretTransfer,
+        *,
+        deadline_ns: int,
+    ) -> None:
+        execution.verify_owner(self)
+        try:
+            self._require_transfer_deadline(deadline_ns)
+            execution._transfer_staged(transfer, deadline_ns=deadline_ns)
+            self._activated_staged_grants.add(execution.operation_id)
+        except BaseException as primary:
+            if execution.held:
+                try:
+                    current = self.current_protocol()
+                    if current is None:
+                        raise AuthorizationError(
+                            "staged cleanup authority is unavailable"
+                        )
+                    cleanup_data, cleanup_candidate = (
+                        self._staged_cleanup_credentials(current)
+                    )
+                except BaseException as cleanup:
+                    primary.add_note(
+                        "grant cleanup authority failed secondarily: "
+                        f"{type(cleanup).__name__}"
+                    )
+                    execution.close()
+                else:
+                    self._cleanup_failed_grant(
+                        data=cleanup_data,
+                        candidate=cleanup_candidate,
+                        execution=execution,
+                        primary=primary,
+                    )
+            raise
 
     def append_action(
         self,
@@ -4627,6 +6493,12 @@ class RegistrationStore:
         operation_id: str | None = None,
         projected_db_growth_bytes: int = 0,
     ) -> OperationResult:
+        _require_int(external_growth_bytes, "external_growth_bytes", minimum=0)
+        _require_int(
+            projected_db_growth_bytes,
+            "projected_db_growth_bytes",
+            minimum=0,
+        )
         self._require_data(data, candidate)
         self._require_current_candidate(candidate, mode="WRITABLE")
         execution.verify_owner(self)
@@ -4649,19 +6521,22 @@ class RegistrationStore:
         ):
             try:
                 measured = self._begin()
-                effect = dict(
-                    self._connection.execute(
-                        "SELECT * FROM registration_effect WHERE effect_id=?",
-                        (execution.effect_id,),
-                    ).fetchone()
+                authority = self._validate_semantic_closure_tx(
+                    execution.member_id, episode_id=None
                 )
-                status = dict(
-                    self._connection.execute(
-                        "SELECT * FROM registration_runtime_status "
-                        "WHERE member_id=?",
-                        (execution.member_id,),
-                    ).fetchone()
-                )
+                if (
+                    authority is None
+                    or authority.effect["effect_id"] != execution.effect_id
+                    or authority.member["member_tuple_hash"]
+                    != execution.target_member_hash
+                    or authority.status["status_hash"]
+                    != execution.target_status_hash
+                    or authority.status["executor_token_hash"]
+                    != execution.executor_token_hash
+                ):
+                    raise StaleAuthority("APPEND_ACTION semantic closure changed")
+                effect = dict(authority.effect)
+                status = dict(authority.status)
                 event_seq = int(
                     self._connection.execute(
                         "SELECT COALESCE(MAX(event_seq),0)+1 "
@@ -4726,7 +6601,7 @@ class RegistrationStore:
                     "observation_hash": observation_hash,
                     "prior_ledger_hash": prior_hash,
                     "external_growth_bytes": external_growth_bytes,
-                    "observed_wall_ns": self._wall_ns(),
+                    "observed_wall_ns": self._fresh_wall_ns(),
                 }
                 action["ledger_hash"] = registration_hashes.derive(
                     "ledger_hash", action
@@ -4790,13 +6665,29 @@ class RegistrationStore:
         candidate: ProtocolCandidate,
         execution: MemberExecution,
         *,
+        profile_binding: (
+            registration_profile.TypedProfileBinding | None
+        ) = None,
         operation_id: str | None = None,
         projected_db_growth_bytes: int = 0,
-    ) -> OperationResult:
-        self._require_data(data, candidate)
-        self._require_current_candidate(candidate, mode="WRITABLE")
+    ) -> OperationResult | RecoveryReserveExhausted:
+        if type(projected_db_growth_bytes) is not int or projected_db_growth_bytes not in {
+            0,
+            RECOVERY_OPERATION_BYTES,
+        }:
+            raise ValueError("recovery projection must be exactly 8192 bytes")
+        current, staged_recovery = self._require_recovery_candidate(
+            data, candidate
+        )
+        typed_binding = self._require_recovery_profile_binding(
+            candidate, staged_recovery, profile_binding
+        )
         execution.verify_owner(self)
         self.verify_execution(execution)
+        if staged_recovery and (
+            execution.target_staged_epoch_hash != current["staged_epoch_hash"]
+        ):
+            raise StaleAuthority("staged unavailable executor lineage mismatch")
         operation_id = operation_id or self._operation_ids()
         committed = False
         try:
@@ -4816,6 +6707,35 @@ class RegistrationStore:
                             (execution.member_id,),
                         ).fetchone()
                     )
+                    closure = self._validate_semantic_closure_tx(
+                        execution.member_id, episode_id=None
+                    )
+                    if (
+                        closure is None
+                        or closure.status["status_hash"] != old["status_hash"]
+                        or closure.effect["effect_id"] != execution.effect_id
+                    ):
+                        raise StaleAuthority("unavailable semantic closure changed")
+                    exhausted = self._recovery_reserve_exhaustion(
+                        protocol=closure.protocol,
+                        member=closure.member,
+                        effect=closure.effect,
+                        status=closure.status,
+                    )
+                    if exhausted is not None:
+                        self._connection.execute("COMMIT")
+                        execution.close()
+                        return exhausted
+                    current = closure.protocol
+                    if current["mode"] == "DRAINING" and (
+                        sample_boot_id != current["drain_boot_id"]
+                        or sample_mono_ns > current["drain_deadline_mono_ns"]
+                        or closure.member["helper_generation"]
+                        != current["staged_generation"]
+                        or execution.target_staged_epoch_hash
+                        != current["staged_epoch_hash"]
+                    ):
+                        raise StaleAuthority("staged unavailable drain lineage changed")
                     if old["executor_boot_id"] != sample_boot_id:
                         raise StaleAuthority(
                             "same-boot unavailable cannot clear old-boot executor"
@@ -4866,6 +6786,11 @@ class RegistrationStore:
                             "expected_target_status_hash": old["status_hash"],
                             "target_subject_key": status["subject_key"],
                             "target_status_hash": status["status_hash"],
+                            "target_staged_epoch_hash": (
+                                current["staged_epoch_hash"]
+                                if current["mode"] == "DRAINING"
+                                else None
+                            ),
                             "sample_boot_id": sample_boot_id,
                             "sample_mono_ns": sample_mono_ns,
                         },
@@ -4884,6 +6809,11 @@ class RegistrationStore:
                         expected_value=old["status_hash"],
                     )
                     self._commit()
+                    if typed_binding is not None:
+                        if staged_recovery:
+                            self._staged_typed_profile_binding = typed_binding
+                        else:
+                            self._current_typed_profile_binding = typed_binding
                     self._tighten_files()
                     committed = True
                     result = OperationResult(
@@ -4912,11 +6842,18 @@ class RegistrationStore:
         *,
         member_id: str,
         expected_status_hash: str,
+        profile_binding: (
+            registration_profile.TypedProfileBinding | None
+        ) = None,
         operation_id: str | None = None,
-    ) -> OperationResult:
+    ) -> OperationResult | RecoveryReserveExhausted:
         """Member-lock takeover after same-boot executor process death."""
-        self._require_data(data, candidate)
-        self._require_current_candidate(candidate, mode="WRITABLE")
+        _current, staged_recovery = self._require_recovery_candidate(
+            data, candidate
+        )
+        typed_binding = self._require_recovery_profile_binding(
+            candidate, staged_recovery, profile_binding
+        )
         operation_id = operation_id or self._operation_ids()
         with self._locks.acquire_member(member_id) as held:
             held.verify()
@@ -4936,6 +6873,32 @@ class RegistrationStore:
                             (member_id,),
                         ).fetchone()
                     )
+                    closure = self._validate_semantic_closure_tx(
+                        member_id, episode_id=None
+                    )
+                    if (
+                        closure is None
+                        or closure.status["status_hash"] != old["status_hash"]
+                    ):
+                        raise StaleAuthority("dead-executor semantic closure changed")
+                    exhausted = self._recovery_reserve_exhaustion(
+                        protocol=closure.protocol,
+                        member=closure.member,
+                        effect=closure.effect,
+                        status=closure.status,
+                    )
+                    if exhausted is not None:
+                        self._connection.execute("COMMIT")
+                        return exhausted
+                    current = closure.protocol
+                    if current["mode"] == "DRAINING" and (
+                        sample_boot_id != current["drain_boot_id"]
+                        or sample_mono_ns > current["drain_deadline_mono_ns"]
+                        or closure.member["helper_generation"]
+                        != current["staged_generation"]
+                        or old["executor_generation"] != current["staged_generation"]
+                    ):
+                        raise StaleAuthority("staged dead-executor lineage changed")
                     if (
                         old["status_hash"] != expected_status_hash
                         or old["executor_token_hash"] is None
@@ -4988,6 +6951,11 @@ class RegistrationStore:
                             "expected_target_status_hash": old["status_hash"],
                             "target_subject_key": status["subject_key"],
                             "target_status_hash": status["status_hash"],
+                            "target_staged_epoch_hash": (
+                                current["staged_epoch_hash"]
+                                if current["mode"] == "DRAINING"
+                                else None
+                            ),
                             "sample_boot_id": sample_boot_id,
                             "sample_mono_ns": sample_mono_ns,
                         },
@@ -5006,6 +6974,11 @@ class RegistrationStore:
                         expected_value=old["status_hash"],
                     )
                     self._commit()
+                    if typed_binding is not None:
+                        if staged_recovery:
+                            self._staged_typed_profile_binding = typed_binding
+                        else:
+                            self._current_typed_profile_binding = typed_binding
                     self._tighten_files()
                     return OperationResult(
                         "COMMITTED",
@@ -5027,20 +7000,40 @@ class RegistrationStore:
         expected_member_hash: str,
         expected_effect_hash: str,
         expected_status_hash: str,
+        profile_binding: (
+            registration_profile.TypedProfileBinding | None
+        ) = None,
         executor_secret: bytes | None = None,
         operation_id: str | None = None,
         projected_db_growth_bytes: int = 0,
-    ) -> ExecutionResult:
-        self._require_data(data, candidate)
-        self._require_current_candidate(candidate, mode="WRITABLE")
+    ) -> ExecutionResult | RecoveryReserveExhausted:
+        if type(projected_db_growth_bytes) is not int or projected_db_growth_bytes not in {
+            0,
+            RECOVERY_OPERATION_BYTES,
+        }:
+            raise ValueError("recovery projection must be exactly 8192 bytes")
+        _current, staged_recovery = self._require_recovery_candidate(
+            data, candidate
+        )
         secret = executor_secret or secrets.token_bytes(32)
         if not isinstance(secret, bytes) or len(secret) < 32:
             raise AuthorizationError("executor secret must contain at least 256 bits")
         token_hash = _domain_hash("awa-registration-executor/v1", secret)
         operation_id = operation_id or self._operation_ids()
-        held = self._locks.acquire_member(member_id)
+        protocol_lock = self._locks.acquire_protocol()
+        held: registration_lock.HeldLock | None = None
         committed = False
+        grant_durable = False
+        execution: MemberExecution | None = None
         try:
+            protocol_lock.verify()
+            current, staged_recovery = self._require_recovery_candidate(
+                data, candidate
+            )
+            typed_binding = self._require_recovery_profile_binding(
+                candidate, staged_recovery, profile_binding
+            )
+            held = self._locks.acquire_member(member_id)
             held.verify()
             with self._write_scope(
                 {
@@ -5051,29 +7044,23 @@ class RegistrationStore:
                 try:
                     measured = self._begin()
                     sample_boot_id, sample_mono_ns = self._fresh_sample()
-                    current = self._require_current_candidate(
-                        candidate, mode="WRITABLE"
+                    current, staged_recovery = self._require_recovery_candidate(
+                        data, candidate
                     )
-                    member = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_member WHERE member_id=?",
-                            (member_id,),
-                        ).fetchone()
+                    closure = self._validate_semantic_closure_tx(
+                        member_id, episode_id=None
                     )
-                    effect = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_effect "
-                            "WHERE effect_id=?",
-                            (member["current_effect_id"],),
-                        ).fetchone()
-                    )
-                    old = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_runtime_status "
-                            "WHERE member_id=?",
-                            (member_id,),
-                        ).fetchone()
-                    )
+                    if (
+                        closure is None
+                        or closure.protocol["protocol_hash"]
+                        != current["protocol_hash"]
+                    ):
+                        raise StaleAuthority(
+                            "reacquire semantic closure changed"
+                        )
+                    member = dict(closure.member)
+                    effect = dict(closure.effect)
+                    old = dict(closure.status)
                     if (
                         member["member_tuple_hash"] != expected_member_hash
                         or effect["request_tuple_hash"] != expected_effect_hash
@@ -5084,8 +7071,27 @@ class RegistrationStore:
                         or old["schedule_boot_id"] != sample_boot_id
                         or old["next_due_mono_ns"] is None
                         or int(old["next_due_mono_ns"]) > sample_mono_ns
+                        or (
+                            staged_recovery
+                            and (
+                                sample_boot_id != current["drain_boot_id"]
+                                or sample_mono_ns
+                                > current["drain_deadline_mono_ns"]
+                                or member["helper_generation"]
+                                != current["staged_generation"]
+                            )
+                        )
                     ):
                         raise StaleAuthority("REACQUIRE_EFFECT stale tuple")
+                    exhausted = self._recovery_reserve_exhaustion(
+                        protocol=closure.protocol,
+                        member=closure.member,
+                        effect=closure.effect,
+                        status=closure.status,
+                    )
+                    if exhausted is not None:
+                        self._connection.execute("COMMIT")
+                        return exhausted
                     ledger_head = self._connection.execute(
                         "SELECT ledger_hash FROM registration_effect_action "
                         "WHERE effect_id=? ORDER BY event_seq DESC LIMIT 1",
@@ -5106,7 +7112,11 @@ class RegistrationStore:
                             "executor_token_hash": token_hash,
                             "executor_boot_id": sample_boot_id,
                             "executor_generation": current[
-                                "protocol_generation"
+                                (
+                                    "staged_generation"
+                                    if staged_recovery
+                                    else "protocol_generation"
+                                )
                             ],
                             "blocked_basis_fingerprint": None,
                             "reason_code": "EFFECT_IN_FLIGHT",
@@ -5148,6 +7158,11 @@ class RegistrationStore:
                             "target_action_plan_hash": effect["action_plan_hash"],
                             "target_action_ledger_hash": ledger_hash,
                             "target_status_hash": status["status_hash"],
+                            "target_staged_epoch_hash": (
+                                current["staged_epoch_hash"]
+                                if staged_recovery
+                                else None
+                            ),
                             "sample_boot_id": sample_boot_id,
                             "sample_mono_ns": sample_mono_ns,
                         },
@@ -5165,7 +7180,22 @@ class RegistrationStore:
                         expected_column="status_hash",
                         expected_value=old["status_hash"],
                     )
-                    self._commit()
+                    try:
+                        self._commit()
+                    except BaseException:
+                        grant_durable = self._grant_is_durable(
+                            operation_id=operation_id,
+                            operation_kind="REACQUIRE_EFFECT",
+                            member_id=member_id,
+                            executor_token_hash=token_hash,
+                        )
+                        raise
+                    grant_durable = True
+                    if typed_binding is not None:
+                        if staged_recovery:
+                            self._staged_typed_profile_binding = typed_binding
+                        else:
+                            self._current_typed_profile_binding = typed_binding
                     self._tighten_files()
                     execution = MemberExecution(
                         store_identity=id(self),
@@ -5179,10 +7209,16 @@ class RegistrationStore:
                         target_effect_hash=effect["request_tuple_hash"],
                         target_status_hash=status["status_hash"],
                         target_protocol_hash=current["protocol_hash"],
+                        target_staged_epoch_hash=(
+                            current["staged_epoch_hash"]
+                            if staged_recovery
+                            else None
+                        ),
                         _seal=_EXECUTION_SEAL,
                     )
-                    committed = True
                     self.verify_execution(execution)
+                    self._fault("before_grant_return")
+                    committed = True
                     return ExecutionResult(
                         operation=OperationResult(
                             "COMMITTED",
@@ -5196,8 +7232,52 @@ class RegistrationStore:
                     if self._connection.in_transaction:
                         self._connection.execute("ROLLBACK")
                     raise
+        except BaseException as primary:
+            if not grant_durable and not self._connection.in_transaction:
+                try:
+                    grant_durable = self._grant_is_durable(
+                        operation_id=operation_id,
+                        operation_kind="REACQUIRE_EFFECT",
+                        member_id=member_id,
+                        executor_token_hash=token_hash,
+                    )
+                except sqlite3.Error as check_error:
+                    primary.add_note(
+                        "grant durability classification failed secondarily: "
+                        f"{type(check_error).__name__}"
+                    )
+            if grant_durable:
+                if execution is None:
+                    execution = MemberExecution(
+                        store_identity=id(self),
+                        member_lock=held,
+                        secret=secret,
+                        member_id=member_id,
+                        effect_id=effect["effect_id"],
+                        executor_token_hash=token_hash,
+                        operation_id=operation_id,
+                        target_member_hash=member["member_tuple_hash"],
+                        target_effect_hash=effect["request_tuple_hash"],
+                        target_status_hash=status["status_hash"],
+                        target_protocol_hash=current["protocol_hash"],
+                        target_staged_epoch_hash=(
+                            current["staged_epoch_hash"]
+                            if staged_recovery
+                            else None
+                        ),
+                        _seal=_EXECUTION_SEAL,
+                    )
+                self._cleanup_failed_grant(
+                    data=data,
+                    candidate=candidate,
+                    execution=execution,
+                    primary=primary,
+                )
+            raise
         finally:
-            if not committed:
+            if protocol_lock.held:
+                protocol_lock.release()
+            if not committed and held is not None:
                 held.release()
 
     def close_success(
@@ -5210,6 +7290,11 @@ class RegistrationStore:
         operation_id: str | None = None,
         projected_db_growth_bytes: int = 0,
     ) -> OperationResult:
+        _require_int(
+            projected_db_growth_bytes,
+            "projected_db_growth_bytes",
+            minimum=0,
+        )
         _require_hash(final_basis_hash, "final_basis_hash")
         return self._close_effect(
             data,
@@ -5236,6 +7321,11 @@ class RegistrationStore:
         operation_id: str | None = None,
         projected_db_growth_bytes: int = 0,
     ) -> OperationResult:
+        _require_int(
+            projected_db_growth_bytes,
+            "projected_db_growth_bytes",
+            minimum=0,
+        )
         if conflict_code not in {
             "PROOF_POSTCONDITION_DIVERGENT",
             "LEGACY_LEASE_DIVERGENT",
@@ -5291,25 +7381,22 @@ class RegistrationStore:
                 try:
                     measured = self._begin()
                     sample_boot_id, sample_mono_ns = self._fresh_sample()
-                    member = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_member WHERE member_id=?",
-                            (execution.member_id,),
-                        ).fetchone()
+                    current = self._require_current_candidate(
+                        candidate, mode="WRITABLE"
                     )
-                    effect = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_effect WHERE effect_id=?",
-                            (execution.effect_id,),
-                        ).fetchone()
+                    authority = self._validate_semantic_closure_tx(
+                        execution.member_id, episode_id=None
                     )
-                    old_status = dict(
-                        self._connection.execute(
-                            "SELECT * FROM registration_runtime_status "
-                            "WHERE member_id=?",
-                            (execution.member_id,),
-                        ).fetchone()
-                    )
+                    if (
+                        authority is None
+                        or authority.protocol["protocol_hash"]
+                        != current["protocol_hash"]
+                        or authority.effect["effect_id"] != execution.effect_id
+                    ):
+                        raise StaleAuthority("effect close closure changed")
+                    member = dict(authority.member)
+                    effect = dict(authority.effect)
+                    old_status = dict(authority.status)
                     if (
                         member["phase"] != "EFFECT_IN_FLIGHT"
                         or effect["outcome_kind"] is not None
@@ -5319,11 +7406,7 @@ class RegistrationStore:
                         != execution.executor_token_hash
                     ):
                         raise StaleAuthority("effect close stale tuple")
-                    actions = self._connection.execute(
-                        "SELECT * FROM registration_effect_action "
-                        "WHERE effect_id=? ORDER BY event_seq",
-                        (execution.effect_id,),
-                    ).fetchall()
+                    actions = tuple(dict(item) for item in authority.actions)
                     if not actions:
                         raise StaleAuthority("effect has no action ledger")
                     ledger_head = actions[-1]["ledger_hash"]
@@ -5670,14 +7753,1579 @@ class RegistrationStore:
                 execution.close()
             raise
 
-    def current_protocol(self) -> dict[str, Any] | None:
+    def _semantic_failure(self, detail: str) -> None:
+        raise SemanticClosureError(f"registration semantic closure: {detail}")
+
+    def _validated_operation(
+        self,
+        operation_id: str,
+        operations: dict[str, ValidatedOperation] | None = None,
+    ) -> ValidatedOperation:
+        row = self._connection.execute(
+            "SELECT * FROM registration_operation_audit WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone()
+        if row is None:
+            self._semantic_failure("operation backlink is missing")
+        value = dict(row)
+        if (
+            registration_hashes.derive("operation_envelope_hash", value)
+            != value["operation_envelope_hash"]
+        ):
+            self._semantic_failure("operation envelope hash mismatch")
+        expected_class = (
+            "BOOTSTRAP"
+            if value["operation_kind"] == "BOOTSTRAP"
+            else (
+                "CONTROL"
+                if value["operation_kind"] in _CONTROL_OPERATION_KINDS
+                else "DATA"
+            )
+        )
+        if (
+            value["operation_class"] != expected_class
+            or value["operation_kind"] not in PROJECTED_DB_BYTES
+            or type(value["operation_seq"]) is not int
+            or type(value["expected_revision"]) is not int
+            or value["expected_revision"] != value["operation_seq"] - 1
+            or type(value["projected_db_growth_bytes"]) is not int
+            or value["projected_db_growth_bytes"]
+            < PROJECTED_DB_BYTES[value["operation_kind"]]
+        ):
+            self._semantic_failure("operation class/revision/projection mismatch")
+        validated = ValidatedOperation.from_row(value)
+        assert isinstance(validated, ValidatedOperation)
+        if operations is not None:
+            operations[operation_id] = validated
+        return validated
+
+    def _validate_write_backlink(
+        self,
+        row: Mapping[str, Any],
+        *,
+        operation_id_field: str,
+        operation_seq_field: str,
+        operation_hash_field: str,
+        target_hash_field: str,
+        target_hash: str,
+        operations: dict[str, ValidatedOperation],
+        target_member_id: str | None = None,
+        target_effect_id: str | None = None,
+        operation_kinds: frozenset[str] | None = None,
+    ) -> ValidatedOperation:
+        operation_id = row[operation_id_field]
+        if not isinstance(operation_id, str):
+            self._semantic_failure("write backlink id is missing")
+        operation = self._validated_operation(operation_id, operations)
+        if (
+            operation["operation_seq"] != row[operation_seq_field]
+            or operation["operation_envelope_hash"] != row[operation_hash_field]
+            or operation[target_hash_field] != target_hash
+            or (
+                operation_kinds is not None
+                and operation["operation_kind"] not in operation_kinds
+            )
+            or (
+                target_member_id is not None
+                and operation["target_member_id"] != target_member_id
+            )
+            or (
+                target_effect_id is not None
+                and target_effect_id
+                not in {
+                    operation["target_effect_id"],
+                    operation["target_successor_effect_id"],
+                }
+            )
+        ):
+            self._semantic_failure(
+                "write backlink companion mismatch "
+                f"({operation['operation_kind']}:{target_hash_field})"
+            )
+        return operation
+
+    def _validate_protocol_transition(
+        self,
+        *,
+        value: Mapping[str, Any],
+        predecessor: Mapping[str, Any],
+        operation: Mapping[str, Any],
+        staged_fields: tuple[str, ...],
+    ) -> None:
+        kind = value["transition_kind"]
+        expected_modes = {
+            "ACTIVATE": ("DORMANT", "WRITABLE"),
+            "FIRST_EFFECT": ("WRITABLE", "WRITABLE"),
+            "BEGIN_DRAIN": ("WRITABLE", "DRAINING"),
+            "STAGE_NEXT": ("DRAINING", "DRAINING"),
+            "CANCEL_DRAIN": ("DRAINING", "DORMANT"),
+            "ADVANCE_GENERATION": ("DRAINING", "WRITABLE"),
+            "PRE_EFFECT_DORMANT": ("DRAINING", "DORMANT"),
+            "ENTER_CONTAINMENT": (
+                predecessor["mode"],
+                "CONTAINMENT",
+            ),
+            "BEGIN_REPAIR": ("CONTAINMENT", "DRAINING"),
+        }
+        if kind not in expected_modes:
+            self._semantic_failure("unknown protocol transition")
+        expected_old_mode, expected_new_mode = expected_modes[kind]
+        if (
+            predecessor["mode"] != expected_old_mode
+            or value["mode"] != expected_new_mode
+            or (
+                kind == "ENTER_CONTAINMENT"
+                and predecessor["mode"]
+                not in {"DORMANT", "WRITABLE", "DRAINING"}
+            )
+        ):
+            self._semantic_failure("protocol mode transition mismatch")
+
+        if kind == "FIRST_EFFECT":
+            if (
+                predecessor["first_effect_id"] is not None
+                or value["first_effect_id"] is None
+                or value["first_effect_operation_id"] != value["operation_id"]
+            ):
+                self._semantic_failure("first-effect transition mismatch")
+        elif (
+            value["first_effect_id"] != predecessor["first_effect_id"]
+            or value["first_effect_operation_id"]
+            != predecessor["first_effect_operation_id"]
+        ):
+            self._semantic_failure("first-effect carry mismatch")
+
+        current_fields = (
+            "protocol_generation",
+            "schema_hash",
+            "profile_hash",
+            "runtime_capability_hash",
+            "writer_binary_hash",
+            "writer_capability_hash",
+            "tool_inventory_hash",
+            "hook_projection_hash",
+            "hook_matcher_mode",
+            "hook_matcher_hash",
+            "projection_receipt_hash",
+            "projection_file_generation",
+            "installer_identity_hash",
+            "installer_capability_hash",
+        )
+        staged_sources = (
+            ("protocol_generation", "staged_generation"),
+            *tuple(
+                (field, f"staged_{field}") for field in current_fields[1:]
+            ),
+        )
+        if kind == "ADVANCE_GENERATION":
+            if any(
+                value[current] != predecessor[staged]
+                for current, staged in staged_sources
+            ) or value["storage_dev"] != predecessor["storage_dev"]:
+                self._semantic_failure("advanced protocol tuple mismatch")
+        elif any(
+            value[field] != predecessor[field]
+            for field in (*current_fields, "storage_dev")
+        ):
+            self._semantic_failure("protocol authority carry mismatch")
+
+        clears_staged = {
+            "CANCEL_DRAIN",
+            "ADVANCE_GENERATION",
+            "PRE_EFFECT_DORMANT",
+        }
+        if kind == "STAGE_NEXT":
+            if (
+                value["staged_generation"]
+                != int(predecessor["protocol_generation"]) + 1
+                or value["staged_schema_hash"] != predecessor["schema_hash"]
+            ):
+                self._semantic_failure("staged protocol transition mismatch")
+        elif kind in clears_staged:
+            if any(value[field] is not None for field in staged_fields):
+                self._semantic_failure("staged protocol clear mismatch")
+        elif any(
+            value[field] != predecessor[field] for field in staged_fields
+        ):
+            self._semantic_failure("staged protocol carry mismatch")
+
+        if kind in {
+            "CANCEL_DRAIN",
+            "ADVANCE_GENERATION",
+            "PRE_EFFECT_DORMANT",
+            "ENTER_CONTAINMENT",
+        }:
+            if (
+                value["drain_boot_id"] is not None
+                or value["drain_deadline_mono_ns"] is not None
+            ):
+                self._semantic_failure("protocol drain clear mismatch")
+        elif kind in {"BEGIN_DRAIN", "BEGIN_REPAIR"}:
+            if (
+                value["drain_boot_id"] != operation["sample_boot_id"]
+                or operation["sample_mono_ns"] is None
+                or value["drain_deadline_mono_ns"]
+                != int(operation["sample_mono_ns"]) + 5_000_000_000
+            ):
+                self._semantic_failure("protocol drain creation mismatch")
+        elif (
+            value["drain_boot_id"] != predecessor["drain_boot_id"]
+            or value["drain_deadline_mono_ns"]
+            != predecessor["drain_deadline_mono_ns"]
+        ):
+            self._semantic_failure("protocol drain carry mismatch")
+
+        if kind == "ENTER_CONTAINMENT":
+            reason = value["transition_reason_code"]
+            sample_boot = operation["sample_boot_id"]
+            sample_mono = operation["sample_mono_ns"]
+            if (
+                reason == "DRAIN_BOOT_CHANGED"
+                and (
+                    predecessor["mode"] != "DRAINING"
+                    or sample_boot is None
+                    or sample_mono is None
+                    or sample_boot == predecessor["drain_boot_id"]
+                )
+            ) or (
+                reason == "DRAIN_TIMEOUT"
+                and (
+                    predecessor["mode"] != "DRAINING"
+                    or sample_boot != predecessor["drain_boot_id"]
+                    or sample_mono is None
+                    or int(sample_mono)
+                    <= int(predecessor["drain_deadline_mono_ns"])
+                )
+            ) or (
+                reason == "ADOPTION_FAILED"
+                and (
+                    predecessor["mode"] != "DRAINING"
+                    or sample_boot != predecessor["drain_boot_id"]
+                )
+            ):
+                self._semantic_failure("containment transition mismatch")
+
+    def _validate_immediate_protocol_predecessor(
+        self,
+        row: Mapping[str, Any],
+        operations: dict[str, ValidatedOperation] | None,
+    ) -> None:
+        value = dict(row)
+        if (
+            registration_hashes.derive("protocol_hash", value)
+            != value["protocol_hash"]
+        ):
+            self._semantic_failure("protocol predecessor hash mismatch")
+        staged_fields = registration_hashes.PREIMAGES[
+            "staged_epoch_hash"
+        ].columns
+        staged_with_hash = (*staged_fields, "staged_epoch_hash")
+        if value["staged_generation"] is None:
+            if any(value[field] is not None for field in staged_with_hash):
+                self._semantic_failure(
+                    "protocol predecessor has partial staged values"
+                )
+        elif (
+            any(value[field] is None for field in staged_with_hash)
+            or registration_hashes.derive("staged_epoch_hash", value)
+            != value["staged_epoch_hash"]
+        ):
+            self._semantic_failure(
+                "protocol predecessor staged tuple mismatch"
+            )
+        if (
+            value["mode"] == "DRAINING"
+            and (
+                value["drain_boot_id"] is None
+                or value["drain_deadline_mono_ns"] is None
+            )
+        ) or (
+            value["mode"] != "DRAINING"
+            and (
+                value["drain_boot_id"] is not None
+                or value["drain_deadline_mono_ns"] is not None
+            )
+        ):
+            self._semantic_failure(
+                "protocol predecessor mode/drain totality mismatch"
+            )
+        if (value["first_effect_id"] is None) != (
+            value["first_effect_operation_id"] is None
+        ):
+            self._semantic_failure(
+                "protocol predecessor first-effect pair is incomplete"
+            )
+        if (value["absence_proof_hash"] is not None) != (
+            value["transition_kind"] == "PRE_EFFECT_DORMANT"
+        ) or (value["quiescence_proof_hash"] is not None) != (
+            value["transition_kind"]
+            in {"STAGE_NEXT", "CANCEL_DRAIN", "ADVANCE_GENERATION"}
+        ):
+            self._semantic_failure(
+                "protocol predecessor proof totality mismatch"
+            )
+        if value["transition_kind"] == "ENTER_CONTAINMENT":
+            if value["transition_reason_code"] not in {
+                "DRAIN_BOOT_CHANGED",
+                "DRAIN_TIMEOUT",
+                "ADOPTION_FAILED",
+                "STORE_FAILURE",
+            }:
+                self._semantic_failure(
+                    "protocol predecessor containment reason mismatch"
+                )
+        elif value["transition_reason_code"] != value["transition_kind"]:
+            self._semantic_failure(
+                "protocol predecessor transition reason mismatch"
+            )
+        sequence = value["protocol_seq"]
+        if type(sequence) is not int or sequence < 1:
+            self._semantic_failure(
+                "protocol predecessor sequence is invalid"
+            )
+        if sequence == 1:
+            if (
+                value["previous_protocol_hash"] is not None
+                or value["protocol_generation"] != 1
+                or value["mode"] != "DORMANT"
+                or value["transition_kind"] != "BOOTSTRAP"
+                or value["first_effect_id"] is not None
+                or value["staged_generation"] is not None
+            ):
+                self._semantic_failure(
+                    "protocol predecessor genesis shape mismatch"
+                )
+        elif value["previous_protocol_hash"] is None:
+            self._semantic_failure(
+                "protocol predecessor link is missing"
+            )
+        operation = self._validated_operation(
+            value["operation_id"], operations
+        )
+        expected_kind = (
+            "OPEN_EFFECT"
+            if value["transition_kind"] == "FIRST_EFFECT"
+            else value["transition_kind"]
+        )
+        if (
+            operation["operation_kind"] != expected_kind
+            or operation["target_protocol_hash"] != value["protocol_hash"]
+            or operation["protocol_seq"] != sequence - 1
+        ):
+            self._semantic_failure(
+                "protocol predecessor operation companion mismatch"
+            )
+        first_id = value["first_effect_id"]
+        first_operation_id = value["first_effect_operation_id"]
+        if first_operation_id is not None:
+            first = self._validated_operation(
+                first_operation_id, operations
+            )
+            first_protocol = self._connection.execute(
+                "SELECT * FROM registration_protocol_epoch "
+                "WHERE protocol_hash=?",
+                (first["target_protocol_hash"],),
+            ).fetchone()
+            if (
+                first["operation_kind"] != "OPEN_EFFECT"
+                or first["target_effect_id"] != first_id
+                or first_protocol is None
+                or registration_hashes.derive(
+                    "protocol_hash", dict(first_protocol)
+                )
+                != first_protocol["protocol_hash"]
+                or first_protocol["transition_kind"] != "FIRST_EFFECT"
+                or first_protocol["operation_id"] != first_operation_id
+                or first_protocol["first_effect_id"] != first_id
+                or first_protocol["first_effect_operation_id"]
+                != first_operation_id
+                or int(first_protocol["protocol_seq"]) > int(sequence)
+            ):
+                self._semantic_failure(
+                    "protocol predecessor first-effect companion mismatch"
+                )
+
+    def _validate_protocol_row(
+        self,
+        row: Mapping[str, Any],
+        operations: dict[str, ValidatedOperation] | None = None,
+    ) -> ValidatedProtocol:
+        value = dict(row)
+        if registration_hashes.derive("protocol_hash", value) != value["protocol_hash"]:
+            self._semantic_failure("protocol hash mismatch")
+        staged_fields = registration_hashes.PREIMAGES["staged_epoch_hash"].columns
+        staged_with_hash = (*staged_fields, "staged_epoch_hash")
+        if value["staged_generation"] is None:
+            if any(value[field] is not None for field in staged_with_hash):
+                self._semantic_failure("unstaged protocol has staged values")
+        else:
+            if any(value[field] is None for field in staged_with_hash):
+                self._semantic_failure("staged protocol tuple is incomplete")
+            if (
+                registration_hashes.derive("staged_epoch_hash", value)
+                != value["staged_epoch_hash"]
+            ):
+                self._semantic_failure("staged epoch hash mismatch")
+        if (
+            value["mode"] == "DRAINING"
+            and (
+                value["drain_boot_id"] is None
+                or value["drain_deadline_mono_ns"] is None
+            )
+        ) or (
+            value["mode"] != "DRAINING"
+            and (
+                value["drain_boot_id"] is not None
+                or value["drain_deadline_mono_ns"] is not None
+            )
+        ):
+            self._semantic_failure("protocol mode/drain totality mismatch")
+        if (value["first_effect_id"] is None) != (
+            value["first_effect_operation_id"] is None
+        ):
+            self._semantic_failure("first-effect pair is incomplete")
+        if (value["absence_proof_hash"] is not None) != (
+            value["transition_kind"] == "PRE_EFFECT_DORMANT"
+        ):
+            self._semantic_failure("protocol absence proof mismatch")
+        if (value["quiescence_proof_hash"] is not None) != (
+            value["transition_kind"]
+            in {"STAGE_NEXT", "CANCEL_DRAIN", "ADVANCE_GENERATION"}
+        ):
+            self._semantic_failure("protocol quiescence proof mismatch")
+        expected_reason = (
+            value["transition_reason_code"]
+            if value["transition_kind"] == "ENTER_CONTAINMENT"
+            else value["transition_kind"]
+        )
+        if (
+            value["transition_kind"] != "ENTER_CONTAINMENT"
+            and value["transition_reason_code"] != expected_reason
+        ) or (
+            value["transition_kind"] == "ENTER_CONTAINMENT"
+            and value["transition_reason_code"]
+            not in {
+                "DRAIN_BOOT_CHANGED",
+                "DRAIN_TIMEOUT",
+                "ADOPTION_FAILED",
+                "STORE_FAILURE",
+            }
+        ):
+            self._semantic_failure("protocol transition reason mismatch")
+        sequence = int(value["protocol_seq"])
+        predecessor_value: Mapping[str, Any] | None = None
+        if sequence == 1:
+            if (
+                value["previous_protocol_hash"] is not None
+                or value["protocol_generation"] != 1
+                or value["mode"] != "DORMANT"
+                or value["transition_kind"] != "BOOTSTRAP"
+                or value["first_effect_id"] is not None
+                or value["staged_generation"] is not None
+            ):
+                self._semantic_failure("genesis protocol shape mismatch")
+        else:
+            predecessor = self._connection.execute(
+                "SELECT * FROM registration_protocol_epoch "
+                "WHERE protocol_seq=?",
+                (sequence - 1,),
+            ).fetchone()
+            if (
+                predecessor is None
+                or registration_hashes.derive(
+                    "protocol_hash", dict(predecessor)
+                )
+                != predecessor["protocol_hash"]
+                or predecessor["protocol_hash"]
+                != value["previous_protocol_hash"]
+            ):
+                self._semantic_failure("protocol predecessor mismatch")
+            predecessor_value = predecessor
+            self._validate_immediate_protocol_predecessor(
+                predecessor_value, operations
+            )
+        operation = self._validated_operation(value["operation_id"], operations)
+        expected_kind = (
+            "OPEN_EFFECT"
+            if value["transition_kind"] == "FIRST_EFFECT"
+            else value["transition_kind"]
+        )
+        staged_operation_hash = (
+            value["staged_epoch_hash"]
+            if value["transition_kind"] == "STAGE_NEXT"
+            else (
+                predecessor_value["staged_epoch_hash"]
+                if predecessor_value is not None
+                else None
+            )
+        )
+        if (
+            operation["operation_kind"] != expected_kind
+            or operation["target_protocol_hash"] != value["protocol_hash"]
+            or operation["protocol_seq"] != sequence - 1
+            or (
+                sequence == 1
+                and (
+                    operation["expected_protocol_hash"] is not None
+                    or operation["expected_mode"] != "NONE"
+                    or operation["expected_generation"] != 0
+                )
+            )
+            or (
+                predecessor_value is not None
+                and (
+                    operation["expected_protocol_hash"]
+                    != predecessor_value["protocol_hash"]
+                    or operation["expected_mode"] != predecessor_value["mode"]
+                    or operation["expected_generation"]
+                    != predecessor_value["protocol_generation"]
+                )
+            )
+            or operation["target_staged_epoch_hash"]
+            != staged_operation_hash
+        ):
+            self._semantic_failure("protocol operation companion mismatch")
+        if predecessor_value is not None:
+            self._validate_protocol_transition(
+                value=value,
+                predecessor=predecessor_value,
+                operation=operation,
+                staged_fields=staged_with_hash,
+            )
+        first_id = value["first_effect_id"]
+        first_operation_id = value["first_effect_operation_id"]
+        if first_operation_id is not None:
+            first = self._validated_operation(first_operation_id, operations)
+            if (
+                first["operation_kind"] != "OPEN_EFFECT"
+                or first["target_effect_id"] != first_id
+            ):
+                self._semantic_failure("first-effect operation mismatch")
+            first_protocol_row = self._connection.execute(
+                "SELECT * FROM registration_protocol_epoch "
+                "WHERE protocol_hash=?",
+                (first["target_protocol_hash"],),
+            ).fetchone()
+            if first_protocol_row is None:
+                self._semantic_failure("first-effect protocol is missing")
+            first_protocol = dict(first_protocol_row)
+            if (
+                registration_hashes.derive(
+                    "protocol_hash", first_protocol
+                )
+                != first_protocol["protocol_hash"]
+                or first_protocol["transition_kind"] != "FIRST_EFFECT"
+                or first_protocol["operation_id"] != first_operation_id
+                or first_protocol["first_effect_id"] != first_id
+                or first_protocol["first_effect_operation_id"]
+                != first_operation_id
+                or int(first_protocol["protocol_seq"]) > sequence
+            ):
+                self._semantic_failure("first-effect protocol mismatch")
+        validated = ValidatedProtocol.from_row(value)
+        assert isinstance(validated, ValidatedProtocol)
+        return validated
+
+    def _validate_domain_blob(
+        self,
+        *,
+        kind: str,
+        domain: str,
+        raw: bytes,
+        expected_hash: str,
+        expected_fields: Mapping[str, str],
+    ) -> dict[str, Any]:
+        parsed = self._parse_semantic_blob(kind, raw)
+        if not isinstance(parsed, dict) or "schema" not in parsed:
+            self._semantic_failure(f"{kind} blob shape mismatch")
+        relation = {key: value for key, value in parsed.items() if key != "schema"}
+        self._validate_semantic_blob(kind, raw, relation)
+        if _domain_hash(domain, raw) != expected_hash:
+            self._semantic_failure(f"{kind} blob hash mismatch")
+        if any(parsed.get(field) != expected for field, expected in expected_fields.items()):
+            self._semantic_failure(f"{kind} blob relation mismatch")
+        return parsed
+
+    def _parse_semantic_blob(
+        self, kind: str, raw: bytes
+    ) -> dict[str, Any]:
+        try:
+            parsed = registration_jcs.parse_canonical(raw)
+        except registration_jcs.JcsError as error:
+            raise SemanticClosureError(
+                f"registration semantic closure: {kind} blob is invalid"
+            ) from error
+        if not isinstance(parsed, dict):
+            self._semantic_failure(f"{kind} blob shape mismatch")
+        return parsed
+
+    def _validate_semantic_blob(
+        self,
+        kind: str,
+        raw: bytes,
+        relation: Mapping[str, Any],
+    ) -> None:
+        try:
+            registration_jcs.validate_blob(kind, raw, relation)
+        except registration_jcs.JcsError as error:
+            raise SemanticClosureError(
+                f"registration semantic closure: {kind} blob is invalid"
+            ) from error
+
+    def _validate_effect_row(
+        self,
+        row: Mapping[str, Any],
+        *,
+        member: Mapping[str, Any],
+        operations: dict[str, ValidatedOperation],
+        include_actions: bool,
+    ) -> tuple[ValidatedEffect, tuple[ValidatedAction, ...]]:
+        effect = dict(row)
+        if (
+            registration_hashes.derive("request_tuple_hash", effect)
+            != effect["request_tuple_hash"]
+        ):
+            self._semantic_failure("effect request hash mismatch")
+        if not self._effect_outcome_is_total(effect):
+            self._semantic_failure("effect outcome totality mismatch")
+        if (
+            type(effect["outcome_reservation_bytes"]) is not int
+            or effect["outcome_reservation_bytes"] < MIN_OUTCOME_RESERVATION
+            or type(effect["successor_reservation_bytes"]) is not int
+            or effect["successor_reservation_bytes"] < MIN_SUCCESSOR_RESERVATION
+        ):
+            self._semantic_failure("effect reservation floor mismatch")
+        if effect["request_kind"] == "CLEAN_ELIGIBLE":
+            actions_plan = [
+                {
+                    "ordinal": str(index),
+                    "kind": effect[f"action_{index}_kind"],
+                    "action_hash": effect[f"action_{index}_hash"],
+                    "postcondition_hash": effect[f"postcondition_{index}_hash"],
+                }
+                for index in range(1, 5)
+            ]
+            relation = {
+                "actions": actions_plan,
+                "external_growth_reservation_bytes": str(
+                    effect["external_growth_reservation_bytes"]
+                ),
+                "outcome_reservation_bytes": str(
+                    effect["outcome_reservation_bytes"]
+                ),
+                "successor_reservation_bytes": str(
+                    effect["successor_reservation_bytes"]
+                ),
+            }
+            self._validate_semantic_blob(
+                "action_plan", effect["action_plan_blob"], relation
+            )
+            if (
+                _domain_hash(
+                    "awa-registration-action-plan/v1",
+                    effect["action_plan_blob"],
+                )
+                != effect["action_plan_hash"]
+            ):
+                self._semantic_failure("action-plan hash mismatch")
+        elif (
+            effect["action_plan_blob"] is not None
+            or effect["action_plan_hash"] != ZERO_HASH
+        ):
+            self._semantic_failure("blocked effect has action plan")
+        created_operation = self._validate_write_backlink(
+            effect,
+            operation_id_field="created_operation_id",
+            operation_seq_field="created_operation_seq",
+            operation_hash_field="created_operation_hash",
+            target_hash_field="target_effect_tuple_hash",
+            target_hash=effect["request_tuple_hash"],
+            operations=operations,
+            target_member_id=effect["member_id"],
+            target_effect_id=effect["effect_id"],
+            operation_kinds=_EFFECT_CREATION_KINDS,
+        )
+        protocol_row = self._connection.execute(
+            "SELECT * FROM registration_protocol_epoch WHERE protocol_seq=?",
+            (created_operation["protocol_seq"],),
+        ).fetchone()
+        if protocol_row is None:
+            self._semantic_failure("effect creation protocol is missing")
+        creation_protocol = self._validate_protocol_row(
+            protocol_row, operations
+        )
+        staged_creation = (
+            created_operation["operation_kind"] == "ADOPT_EFFECT"
+            and creation_protocol["staged_generation"]
+            == effect["required_protocol_generation"]
+        )
+        expected_runtime = (
+            creation_protocol["staged_runtime_capability_hash"]
+            if staged_creation
+            else created_operation["runtime_capability_hash"]
+        )
+        expected_generation = (
+            creation_protocol["staged_generation"]
+            if staged_creation
+            else created_operation["expected_generation"]
+        )
+        creation_checks = {
+            "successor_effect": (
+                created_operation["target_successor_effect_id"]
+                == effect["effect_id"]
+            ),
+            "successor_epoch": (
+                created_operation["target_successor_member_epoch"]
+                == effect["member_epoch"]
+            ),
+            "successor_basis": (
+                created_operation["target_successor_basis_hash"]
+                == effect["request_basis_hash"]
+            ),
+            "action_plan": (
+                created_operation["operation_kind"] == "ADOPT_EFFECT"
+                or created_operation["target_action_plan_hash"]
+                == effect["action_plan_hash"]
+            ),
+            "external_reservation": (
+                created_operation["new_external_reservation_bytes"]
+                == effect["external_growth_reservation_bytes"]
+            ),
+            "outcome_reservation": (
+                created_operation["new_outcome_reservation_bytes"]
+                == effect["outcome_reservation_bytes"]
+            ),
+            "successor_reservation": (
+                created_operation["new_successor_reservation_bytes"]
+                == effect["successor_reservation_bytes"]
+            ),
+            "generation": (
+                effect["required_protocol_generation"]
+                == expected_generation
+            ),
+            "runtime": (
+                effect["required_runtime_capability_hash"]
+                == expected_runtime
+            ),
+            "staged_epoch": (
+                not staged_creation
+                or created_operation["target_staged_epoch_hash"]
+                == creation_protocol["staged_epoch_hash"]
+            ),
+        }
+        failed_creation_checks = [
+            name for name, passed in creation_checks.items() if not passed
+        ]
+        if failed_creation_checks:
+            self._semantic_failure(
+                "effect creation companion mismatch: "
+                + ",".join(failed_creation_checks)
+            )
+
+        action_values: list[ValidatedAction] = []
+        ledger_head = ZERO_HASH
+        if include_actions:
+            action_rows = self._connection.execute(
+                "SELECT * FROM registration_effect_action "
+                "WHERE effect_id=? ORDER BY event_seq",
+                (effect["effect_id"],),
+            ).fetchall()
+            if len(action_rows) > 4:
+                self._semantic_failure("effect action count exceeds plan")
+            terminal_conflict = False
+            for event_seq, action_row in enumerate(action_rows, 1):
+                action = dict(action_row)
+                if (
+                    action["event_seq"] != event_seq
+                    or action["ordinal"] != event_seq
+                    or action["action_kind"] != effect[f"action_{event_seq}_kind"]
+                    or action["action_hash"] != effect[f"action_{event_seq}_hash"]
+                    or action["postcondition_hash"]
+                    != effect[f"postcondition_{event_seq}_hash"]
+                    or action["prior_ledger_hash"] != ledger_head
+                    or terminal_conflict
+                ):
+                    self._semantic_failure("action ledger relation mismatch")
+                if (
+                    registration_hashes.derive("ledger_hash", action)
+                    != action["ledger_hash"]
+                ):
+                    self._semantic_failure("action ledger hash mismatch")
+                relation = {
+                    "effect_id": effect["effect_id"],
+                    "event_seq": str(event_seq),
+                    "ordinal": str(event_seq),
+                    "kind": action["observation_kind"],
+                    "measured_postcondition_hash": self._parse_semantic_blob(
+                        "observation", action["observation_blob"]
+                    ).get("measured_postcondition_hash"),
+                    "external_growth_bytes": str(action["external_growth_bytes"]),
+                    "detail_code": action["observation_kind"],
+                }
+                self._validate_semantic_blob(
+                    "observation", action["observation_blob"], relation
+                )
+                if (
+                    _domain_hash(
+                        "awa-registration-observation/v1",
+                        action["observation_blob"],
+                    )
+                    != action["observation_hash"]
+                ):
+                    self._semantic_failure("observation hash mismatch")
+                self._validate_write_backlink(
+                    action,
+                    operation_id_field="write_operation_id",
+                    operation_seq_field="write_operation_seq",
+                    operation_hash_field="write_operation_hash",
+                    target_hash_field="target_action_ledger_hash",
+                    target_hash=action["ledger_hash"],
+                    operations=operations,
+                    target_member_id=effect["member_id"],
+                    target_effect_id=effect["effect_id"],
+                    operation_kinds=frozenset({"APPEND_ACTION"}),
+                )
+                terminal_conflict = action["observation_kind"] == "LOGICAL_CONFLICT"
+                ledger_head = action["ledger_hash"]
+                validated_action = ValidatedAction.from_row(action)
+                assert isinstance(validated_action, ValidatedAction)
+                action_values.append(validated_action)
+
+        outcome = effect["outcome_kind"]
+        if outcome is None:
+            if effect["outcome_tuple_hash"] is not None:
+                self._semantic_failure("open effect has outcome hash")
+        else:
+            if (
+                registration_hashes.derive("outcome_tuple_hash", effect)
+                != effect["outcome_tuple_hash"]
+            ):
+                self._semantic_failure("effect outcome hash mismatch")
+            outcome_operation = self._validate_write_backlink(
+                effect,
+                operation_id_field="outcome_operation_id",
+                operation_seq_field="outcome_operation_seq",
+                operation_hash_field="outcome_operation_hash",
+                target_hash_field="target_effect_outcome_hash",
+                target_hash=effect["outcome_tuple_hash"],
+                operations=operations,
+                target_member_id=effect["member_id"],
+                target_effect_id=effect["effect_id"],
+                operation_kinds=(
+                    frozenset({"CLOSE_SUCCESS"})
+                    if outcome == "SUCCESS"
+                    else (
+                        frozenset({"CLOSE_CONFLICT"})
+                        if outcome == "LOGICAL_CONFLICT"
+                        else frozenset(
+                            {
+                                "INVALIDATE_REQUESTED",
+                                "REPLACE_PENDING",
+                                "ADOPT_EFFECT",
+                            }
+                        )
+                    )
+                ),
+            )
+            if (
+                outcome_operation["target_action_ledger_hash"]
+                != (
+                    effect["ledger_head_hash"]
+                    if outcome in {"SUCCESS", "LOGICAL_CONFLICT"}
+                    else None
+                )
+                or (
+                    outcome == "SUPERSEDED"
+                    and (
+                        outcome_operation["target_successor_effect_id"]
+                        != effect["superseded_by_effect_id"]
+                        or outcome_operation["target_transition_id"]
+                        != effect["successor_transition_id"]
+                    )
+                )
+            ):
+                self._semantic_failure("effect outcome companion mismatch")
+            if include_actions and outcome in {"SUCCESS", "LOGICAL_CONFLICT"}:
+                if effect["ledger_head_hash"] != ledger_head:
+                    self._semantic_failure("effect ledger head mismatch")
+            if outcome == "SUCCESS":
+                self._validate_domain_blob(
+                    kind="completion",
+                    domain="awa-registration-completion/v1",
+                    raw=effect["completion_blob"],
+                    expected_hash=effect["completion_hash"],
+                    expected_fields={
+                        "effect_id": effect["effect_id"],
+                        "ledger_head_hash": effect["ledger_head_hash"],
+                        "final_basis_hash": effect["final_basis_hash"],
+                    },
+                )
+                proof_fields = {
+                    "effect_id": effect["effect_id"],
+                    "member_id": effect["member_id"],
+                    "final_basis_hash": effect["final_basis_hash"],
+                }
+                if effect["member_epoch"] == member["member_epoch"]:
+                    proof_fields.update(
+                        {
+                            "physical_basis_hash": member[
+                                "physical_basis_hash"
+                            ],
+                            "git_basis_hash": member["git_basis_hash"],
+                            "policy_basis_hash": member[
+                                "policy_basis_hash"
+                            ],
+                            "lifecycle_basis_hash": member[
+                                "lifecycle_basis_hash"
+                            ],
+                        }
+                    )
+                self._validate_domain_blob(
+                    kind="proof",
+                    domain="awa-registration-proof/v1",
+                    raw=effect["proof_blob"],
+                    expected_hash=effect["proof_hash"],
+                    expected_fields=proof_fields,
+                )
+                self._validate_domain_blob(
+                    kind="certificate_inputs",
+                    domain="awa-registration-certificate-inputs/v1",
+                    raw=effect["certificate_inputs_blob"],
+                    expected_hash=effect["certificate_inputs_hash"],
+                    expected_fields={
+                        "effect_id": effect["effect_id"],
+                        "ledger_head_hash": effect["ledger_head_hash"],
+                        "completion_hash": effect["completion_hash"],
+                        "proof_hash": effect["proof_hash"],
+                        "final_basis_hash": effect["final_basis_hash"],
+                        "helper_generation": str(effect["outcome_helper_generation"]),
+                    },
+                )
+                certificate = registration_hashes.deterministic_id(
+                    "awa-reg-certificate-v1",
+                    effect["effect_id"],
+                    effect["ledger_head_hash"],
+                    effect["completion_hash"],
+                    effect["proof_hash"],
+                    effect["final_basis_hash"],
+                    str(effect["outcome_helper_generation"]),
+                )
+                if certificate != effect["certificate_hash"]:
+                    self._semantic_failure("certificate hash mismatch")
+            elif outcome == "LOGICAL_CONFLICT":
+                parsed = self._parse_semantic_blob(
+                    "conflict", effect["conflict_blob"]
+                )
+                self._validate_domain_blob(
+                    kind="conflict",
+                    domain="awa-registration-conflict/v1",
+                    raw=effect["conflict_blob"],
+                    expected_hash=effect["conflict_hash"],
+                    expected_fields={
+                        "effect_id": effect["effect_id"],
+                        "ordinal": str(effect["first_conflict_event_seq"]),
+                        "conflict_code": effect["conflict_code"],
+                        "expected_hash": parsed.get("expected_hash"),
+                        "observed_hash": parsed.get("observed_hash"),
+                    },
+                )
+        validated_effect = ValidatedEffect.from_row(effect)
+        assert isinstance(validated_effect, ValidatedEffect)
+        return validated_effect, tuple(action_values)
+
+    def _validate_effect_predecessor(
+        self,
+        effect: ValidatedEffect,
+        *,
+        member: Mapping[str, Any],
+        operations: dict[str, ValidatedOperation],
+    ) -> ValidatedEffect | None:
+        if effect["predecessor_effect_id"] is None:
+            return None
+        predecessor_row = self._connection.execute(
+            "SELECT * FROM registration_effect WHERE effect_id=?",
+            (effect["predecessor_effect_id"],),
+        ).fetchone()
+        if predecessor_row is None:
+            self._semantic_failure("effect predecessor is missing")
+        predecessor, _ignored = self._validate_effect_row(
+            predecessor_row,
+            member=member,
+            operations=operations,
+            include_actions=False,
+        )
+        created_operation = operations.get(effect["created_operation_id"])
+        superseded_predecessor = (
+            predecessor["superseded_by_effect_id"] == effect["effect_id"]
+            and predecessor["outcome_kind"] == "SUPERSEDED"
+        )
+        staged_or_handoff_predecessor = (
+            created_operation is not None
+            and created_operation["operation_kind"]
+            in {"SET_PENDING", "HANDOFF_RESOLVED"}
+            and created_operation["target_effect_id"]
+            == predecessor["effect_id"]
+            and created_operation["target_successor_effect_id"]
+            == effect["effect_id"]
+            and predecessor["outcome_kind"]
+            in {None, "SUCCESS", "LOGICAL_CONFLICT"}
+            and predecessor["superseded_by_effect_id"] is None
+        )
+        if not (
+            superseded_predecessor or staged_or_handoff_predecessor
+        ):
+            self._semantic_failure("effect predecessor relationship mismatch")
+        if superseded_predecessor:
+            transition_operation = operations.get(
+                predecessor["outcome_operation_id"]
+            )
+            if transition_operation is None:
+                self._semantic_failure(
+                    "superseded transition operation is missing"
+                )
+            self._validate_successor_transition(
+                predecessor=predecessor,
+                successor=effect,
+                operation=transition_operation,
+            )
+        elif (
+            created_operation is not None
+            and created_operation["operation_kind"] == "HANDOFF_RESOLVED"
+        ):
+            self._validate_successor_transition(
+                predecessor=predecessor,
+                successor=effect,
+                operation=created_operation,
+            )
+        return predecessor
+
+    def _validate_episode_row(
+        self,
+        row: Mapping[str, Any],
+        *,
+        member_id: str,
+        operations: dict[str, ValidatedOperation],
+    ) -> ValidatedEpisode:
+        episode = dict(row)
+        if (
+            registration_hashes.derive("episode_envelope_hash", episode)
+            != episode["envelope_hash"]
+            or episode["workspace_root_count"] != 1
+            or episode["member_id"] != member_id
+        ):
+            self._semantic_failure("episode envelope mismatch")
+        episode_operation = self._validate_write_backlink(
+            episode,
+            operation_id_field="write_operation_id",
+            operation_seq_field="write_operation_seq",
+            operation_hash_field="write_operation_hash",
+            target_hash_field="target_episode_hash",
+            target_hash=episode["envelope_hash"],
+            operations=operations,
+            target_member_id=member_id,
+            operation_kinds=frozenset({"BIND_EPISODE"}),
+        )
+        episode_protocol_row = self._connection.execute(
+            "SELECT * FROM registration_protocol_epoch WHERE protocol_seq=?",
+            (episode_operation["protocol_seq"],),
+        ).fetchone()
+        if episode_protocol_row is None:
+            self._semantic_failure("episode protocol is missing")
+        episode_protocol = self._validate_protocol_row(
+            episode_protocol_row, operations
+        )
+        expected_episode_id = registration_hashes.deterministic_id(
+            "awa-reg-episode-v1",
+            episode["conversation_id"],
+            episode["generation_id"],
+            episode["source_contract"],
+            episode["source_event"],
+            str(episode["protocol_generation"]),
+            member_id,
+            episode["workspace_roots_hash"],
+            episode["tool_inventory_hash"],
+            episode["hook_projection_hash"],
+        )
+        if (
+            episode["episode_id"] != expected_episode_id
+            or episode_operation["target_episode_id"]
+            != episode["episode_id"]
+            or episode["protocol_generation"]
+            != episode_protocol["protocol_generation"]
+            or episode["tool_inventory_hash"]
+            != episode_protocol["tool_inventory_hash"]
+            or episode["hook_projection_hash"]
+            != episode_protocol["hook_projection_hash"]
+        ):
+            self._semantic_failure("episode authority companion mismatch")
+        validated = ValidatedEpisode.from_row(episode)
+        assert isinstance(validated, ValidatedEpisode)
+        return validated
+
+    def _validate_phase_status_relationship(
+        self,
+        *,
+        protocol: Mapping[str, Any],
+        member: Mapping[str, Any],
+        status: Mapping[str, Any],
+        effect: Mapping[str, Any],
+        status_write: Mapping[str, Any],
+    ) -> None:
+        schedule_fields = (
+            "schedule_boot_id",
+            "observed_now_mono_ns",
+            "next_due_mono_ns",
+            "due_since_mono_ns",
+            "attempt_count",
+            "backoff_ns",
+        )
+        scheduled = all(status[field] is not None for field in schedule_fields)
+        unscheduled = all(status[field] is None for field in schedule_fields)
+        if not scheduled and not unscheduled:
+            self._semantic_failure("status schedule tuple is partial")
+        executor_present = status["executor_token_hash"] is not None
+        if executor_present:
+            allowed_generation = (
+                status["executor_generation"] == member["helper_generation"]
+                and (
+                    (
+                        protocol["mode"] == "WRITABLE"
+                        and member["helper_generation"]
+                        == protocol["protocol_generation"]
+                    )
+                    or (
+                        protocol["mode"] == "DRAINING"
+                        and member["helper_generation"]
+                        in {
+                            protocol["protocol_generation"],
+                            protocol["staged_generation"],
+                        }
+                    )
+                )
+            )
+            if (
+                status["executor_boot_id"] is None
+                or not allowed_generation
+                or status_write["operation_kind"]
+                not in {"OPEN_EFFECT", "REACQUIRE_EFFECT", "ADOPT_EFFECT"}
+                or status_write["target_executor_token_hash"]
+                != status["executor_token_hash"]
+                or status_write["sample_boot_id"]
+                != status["executor_boot_id"]
+            ):
+                self._semantic_failure("executor status authority mismatch")
+        elif (
+            status["executor_boot_id"] is not None
+            or status["executor_generation"] is not None
+        ):
+            self._semantic_failure("cleared executor status is partial")
+        if effect["request_basis_hash"] != member["current_basis_hash"]:
+            self._semantic_failure("member/effect basis relationship mismatch")
+        if member["phase"] == "REQUESTED":
+            expected_reason = {
+                "CLEAN_ELIGIBLE": "REGISTRATION_REQUIRED",
+                "BLOCKED_DIRTY": "DIRTY_UNSUPPORTED",
+                "BLOCKED_OPERATION": "GIT_OPERATION_UNSUPPORTED",
+            }[effect["request_kind"]]
+            if (
+                member["pending_effect_id"] is not None
+                or effect["outcome_kind"] is not None
+                or executor_present
+                or status["reason_code"] != expected_reason
+                or (
+                    effect["request_kind"] == "CLEAN_ELIGIBLE"
+                    and (
+                        not scheduled
+                        or status["help_due"] not in {0, 1}
+                        or status["blocked_basis_fingerprint"] is not None
+                    )
+                )
+                or (
+                    effect["request_kind"] != "CLEAN_ELIGIBLE"
+                    and (
+                        not unscheduled
+                        or status["help_due"] != 0
+                        or status["blocked_basis_fingerprint"] is None
+                    )
+                )
+            ):
+                self._semantic_failure("requested phase/status mismatch")
+            return
+        if member["phase"] == "EFFECT_IN_FLIGHT":
+            if (
+                effect["request_kind"] != "CLEAN_ELIGIBLE"
+                or effect["outcome_kind"] is not None
+                or status["blocked_basis_fingerprint"] is not None
+                or (
+                    executor_present
+                    and (
+                        not unscheduled
+                        or status["help_due"] != 0
+                        or status["reason_code"] != "EFFECT_IN_FLIGHT"
+                    )
+                )
+                or (
+                    not executor_present
+                    and (
+                        not scheduled
+                        or status["help_due"] != 1
+                        or status["reason_code"]
+                        not in {
+                            "EFFECT_IN_FLIGHT",
+                            "RESOLVER_UNAVAILABLE",
+                        }
+                    )
+                )
+            ):
+                self._semantic_failure("in-flight phase/status mismatch")
+            return
+        if member["phase"] != "RESOLVED":
+            self._semantic_failure("unknown member phase")
+        expected_reason = (
+            None
+            if effect["outcome_kind"] == "SUCCESS"
+            else "EFFECT_CONFLICT"
+        )
+        if (
+            executor_present
+            or status["blocked_basis_fingerprint"] is not None
+            or (
+                member["pending_effect_id"] is not None
+                and (
+                    not scheduled
+                    or status["help_due"] != 1
+                    or status["reason_code"] != "REGISTRATION_REQUIRED"
+                )
+            )
+            or (
+                member["pending_effect_id"] is None
+                and (
+                    not unscheduled
+                    or status["help_due"] != 0
+                    or status["reason_code"] != expected_reason
+                    or (
+                        effect["outcome_kind"] == "SUCCESS"
+                        and (
+                            status["unavailable_count"] != 0
+                            or status["yield_count"] != 0
+                        )
+                    )
+                )
+            )
+        ):
+            self._semantic_failure("resolved phase/status mismatch")
+
+    def _validate_semantic_closure_tx(
+        self, member_id: str, *, episode_id: str | None
+    ) -> SelectedAuthority | None:
+        operations: dict[str, ValidatedOperation] = {}
+        protocol_row = self._connection.execute(
+            "SELECT * FROM registration_protocol_epoch "
+            "ORDER BY protocol_seq DESC LIMIT 1"
+        ).fetchone()
+        if protocol_row is None:
+            return None
+        protocol = self._validate_protocol_row(protocol_row, operations)
+        member_row = self._connection.execute(
+            "SELECT * FROM registration_member WHERE member_id=?",
+            (member_id,),
+        ).fetchone()
+        status_row = self._connection.execute(
+            "SELECT * FROM registration_runtime_status WHERE member_id=?",
+            (member_id,),
+        ).fetchone()
+        if member_row is None and status_row is None:
+            return None
+        if member_row is None or status_row is None:
+            self._semantic_failure("member/status cardinality mismatch")
+        member = dict(member_row)
+        status = dict(status_row)
+        if (
+            registration_hashes.derive("member_tuple_hash", member)
+            != member["member_tuple_hash"]
+        ):
+            self._semantic_failure("member tuple hash mismatch")
+        if registration_hashes.derive("status_hash", status) != status["status_hash"]:
+            self._semantic_failure("status hash mismatch")
+        member_write = self._validate_write_backlink(
+            member,
+            operation_id_field="write_operation_id",
+            operation_seq_field="write_operation_seq",
+            operation_hash_field="write_operation_hash",
+            target_hash_field="target_member_tuple_hash",
+            target_hash=member["member_tuple_hash"],
+            operations=operations,
+            target_member_id=member_id,
+            operation_kinds=_MEMBER_WRITE_KINDS,
+        )
+        status_write = self._validate_write_backlink(
+            status,
+            operation_id_field="write_operation_id",
+            operation_seq_field="write_operation_seq",
+            operation_hash_field="write_operation_hash",
+            target_hash_field="target_status_hash",
+            target_hash=status["status_hash"],
+            operations=operations,
+            target_member_id=member_id,
+            operation_kinds=_STATUS_WRITE_KINDS,
+        )
+        if (
+            member["runtime_subject_key"] != status["subject_key"]
+            or status["member_id"] != member_id
+            or status["member_epoch"] != member["member_epoch"]
+            or status["current_effect_id"] != member["current_effect_id"]
+        ):
+            self._semantic_failure("member/status relationship mismatch")
+        member_epochs = {
+            value
+            for value in (
+                member_write["target_member_epoch"],
+                member_write["target_successor_member_epoch"],
+            )
+            if value is not None
+        }
+        member_bases = {
+            value
+            for value in (
+                member_write["target_basis_hash"],
+                member_write["target_successor_basis_hash"],
+            )
+            if value is not None
+        }
+        status_effects = {
+            value
+            for value in (
+                status_write["target_effect_id"],
+                status_write["target_successor_effect_id"],
+                status_write["lineage_effect_id"],
+            )
+            if value is not None
+        }
+        if (
+            member["member_epoch"] not in member_epochs
+            or member["current_basis_hash"] not in member_bases
+            or status["current_effect_id"] not in status_effects
+            or status_write["target_subject_key"] != status["subject_key"]
+        ):
+            self._semantic_failure("member/status operation companion mismatch")
+        effect_row = self._connection.execute(
+            "SELECT * FROM registration_effect WHERE effect_id=?",
+            (member["current_effect_id"],),
+        ).fetchone()
+        if effect_row is None:
+            self._semantic_failure("selected current effect is missing")
+        effect, actions = self._validate_effect_row(
+            effect_row,
+            member=member,
+            operations=operations,
+            include_actions=True,
+        )
+        if (
+            effect["member_id"] != member_id
+            or effect["member_epoch"] != member["member_epoch"]
+        ):
+            self._semantic_failure("member/effect relationship mismatch")
+        if member_write["operation_kind"] == "HANDOFF_RESOLVED":
+            handoff_predecessor_row = self._connection.execute(
+                "SELECT * FROM registration_effect WHERE effect_id=?",
+                (member_write["target_effect_id"],),
+            ).fetchone()
+            if handoff_predecessor_row is None:
+                self._semantic_failure(
+                    "handoff predecessor effect is missing"
+                )
+            handoff_predecessor, _ignored = self._validate_effect_row(
+                handoff_predecessor_row,
+                member=member,
+                operations=operations,
+                include_actions=False,
+            )
+            self._validate_successor_transition(
+                predecessor=handoff_predecessor,
+                successor=effect,
+                operation=member_write,
+            )
+        if member["phase"] == "RESOLVED":
+            if (
+                effect["outcome_kind"] not in {"SUCCESS", "LOGICAL_CONFLICT"}
+                or member["current_outcome_kind"] != effect["outcome_kind"]
+                or member["current_completion_hash"] != effect["completion_hash"]
+                or member["current_proof_hash"] != effect["proof_hash"]
+                or member["current_certificate_hash"] != effect["certificate_hash"]
+                or member["current_conflict_hash"] != effect["conflict_hash"]
+            ):
+                self._semantic_failure("resolved member closure mismatch")
+        elif effect["outcome_kind"] is not None:
+            self._semantic_failure("non-resolved member has closed current effect")
+        self._validate_phase_status_relationship(
+            protocol=protocol,
+            member=member,
+            status=status,
+            effect=effect,
+            status_write=status_write,
+        )
+
+        pending: ValidatedEffect | None = None
+        if member["pending_effect_id"] is not None:
+            pending_row = self._connection.execute(
+                "SELECT * FROM registration_effect WHERE effect_id=?",
+                (member["pending_effect_id"],),
+            ).fetchone()
+            if pending_row is None:
+                self._semantic_failure("pending effect is missing")
+            pending, _ignored = self._validate_effect_row(
+                pending_row,
+                member=member,
+                operations=operations,
+                include_actions=False,
+            )
+            if (
+                pending["member_id"] != member_id
+                or pending["member_epoch"] != member["pending_member_epoch"]
+                or pending["request_basis_hash"] != member["pending_basis_hash"]
+                or pending["request_tuple_hash"]
+                != member["pending_effect_tuple_hash"]
+                or pending["outcome_kind"] is not None
+            ):
+                self._semantic_failure("pending effect relationship mismatch")
+            self._validate_effect_predecessor(
+                pending,
+                member=member,
+                operations=operations,
+            )
+
+        predecessor = self._validate_effect_predecessor(
+            effect,
+            member=member,
+            operations=operations,
+        )
+
+        successor: ValidatedEffect | None = None
+        if effect["superseded_by_effect_id"] is not None:
+            successor_row = self._connection.execute(
+                "SELECT * FROM registration_effect WHERE effect_id=?",
+                (effect["superseded_by_effect_id"],),
+            ).fetchone()
+            if successor_row is None:
+                self._semantic_failure("effect successor is missing")
+            successor, _ignored = self._validate_effect_row(
+                successor_row,
+                member=member,
+                operations=operations,
+                include_actions=False,
+            )
+            if successor["predecessor_effect_id"] != effect["effect_id"]:
+                self._semantic_failure("effect successor relationship mismatch")
+
+        if member_write["operation_kind"] == "ADOPT_EFFECT":
+            staged = self._connection.execute(
+                "SELECT * FROM registration_protocol_epoch WHERE protocol_seq=?",
+                (member_write["protocol_seq"],),
+            ).fetchone()
+            if staged is None:
+                self._semantic_failure("adoption staged protocol missing")
+            staged_value = self._validate_protocol_row(staged, operations)
+            lineage = self._connection.execute(
+                "SELECT * FROM registration_effect WHERE effect_id=?",
+                (member_write["lineage_effect_id"],),
+            ).fetchone()
+            if (
+                lineage is None
+                or member_write["target_staged_epoch_hash"]
+                != staged_value["staged_epoch_hash"]
+                or member_write["lineage_effect_id"] != effect["effect_id"]
+                or member_write["target_action_plan_hash"]
+                != effect["action_plan_hash"]
+                or member_write["target_member_tuple_hash"]
+                != member["member_tuple_hash"]
+                or (
+                    status["write_operation_id"]
+                    == member_write["operation_id"]
+                    and member_write["target_status_hash"]
+                    != status["status_hash"]
+                )
+                or member["helper_generation"]
+                != staged_value["staged_generation"]
+                or (
+                    status["write_operation_id"]
+                    == member_write["operation_id"]
+                    and status["executor_token_hash"] is not None
+                    and (
+                        status["executor_generation"]
+                        != staged_value["staged_generation"]
+                        or member_write["target_executor_token_hash"]
+                        != status["executor_token_hash"]
+                    )
+                )
+                or effect["required_protocol_generation"]
+                != staged_value["protocol_generation"]
+                or effect["required_runtime_capability_hash"]
+                != staged_value["runtime_capability_hash"]
+            ):
+                self._semantic_failure("adoption lineage mismatch")
+
+        episodes: list[ValidatedEpisode] = []
+        if episode_id is not None:
+            episode_rows = self._connection.execute(
+                "SELECT * FROM registration_episode "
+                "WHERE member_id=? AND episode_id=?",
+                (member_id, episode_id),
+            ).fetchall()
+            if len(episode_rows) != 1:
+                self._semantic_failure("selected episode cardinality mismatch")
+            episodes.append(
+                self._validate_episode_row(
+                    episode_rows[0],
+                    member_id=member_id,
+                    operations=operations,
+                )
+            )
+
+        validated_member = ValidatedMember.from_row(member)
+        validated_status = ValidatedStatus.from_row(status)
+        assert isinstance(validated_member, ValidatedMember)
+        assert isinstance(validated_status, ValidatedStatus)
+        operation_values = tuple(
+            operations[key] for key in sorted(operations, key=lambda value: value.encode())
+        )
+        token = (
+            protocol["protocol_seq"],
+            protocol["protocol_hash"],
+            tuple((item["episode_id"], item["envelope_hash"]) for item in episodes),
+            member["write_operation_seq"],
+            member["member_tuple_hash"],
+            status["status_version"],
+            status["status_hash"],
+            effect["outcome_operation_seq"],
+            effect["outcome_tuple_hash"],
+            effect["ledger_head_hash"],
+            pending["request_tuple_hash"] if pending is not None else None,
+            predecessor["outcome_tuple_hash"] if predecessor is not None else None,
+            successor["request_tuple_hash"] if successor is not None else None,
+            tuple(item["operation_envelope_hash"] for item in operation_values),
+        )
+        return SelectedAuthority(
+            protocol=protocol,
+            member=validated_member,
+            status=validated_status,
+            effect=effect,
+            actions=actions,
+            episodes=tuple(episodes),
+            revision_token=token,
+            pending_effect=pending,
+            predecessor_effect=predecessor,
+            successor_effect=successor,
+            operations=operation_values,
+        )
+
+    def current_protocol(self) -> ValidatedProtocol | None:
         row = self._connection.execute(
             "SELECT * FROM registration_protocol_epoch "
             "ORDER BY protocol_seq DESC LIMIT 1"
         ).fetchone()
-        return dict(row) if row else None
+        return self._validate_protocol_row(row) if row else None
 
-    def read_selected_authority(
+    def validate_semantic_closure(
         self, member_id: str, *, episode_id: str | None = None
     ) -> SelectedAuthority | None:
         _require_hash(member_id, "member_id")
@@ -5686,86 +9334,20 @@ class RegistrationStore:
         with self._read_scope():
             self._connection.execute("BEGIN")
             try:
-                protocol_row = self._connection.execute(
-                    "SELECT * FROM registration_protocol_epoch "
-                    "ORDER BY protocol_seq DESC LIMIT 1"
-                ).fetchone()
-                member_row = self._connection.execute(
-                    "SELECT * FROM registration_member WHERE member_id=?",
-                    (member_id,),
-                ).fetchone()
-                status_row = self._connection.execute(
-                    "SELECT * FROM registration_runtime_status "
-                    "WHERE member_id=?",
-                    (member_id,),
-                ).fetchone()
-                if (
-                    protocol_row is None
-                    or member_row is None
-                    or status_row is None
-                ):
-                    self._connection.execute("COMMIT")
-                    return None
-                member = dict(member_row)
-                effect_row = self._connection.execute(
-                    "SELECT * FROM registration_effect WHERE effect_id=?",
-                    (member["current_effect_id"],),
-                ).fetchone()
-                if effect_row is None:
-                    raise StoreError("selected member effect closure missing")
-                effect = dict(effect_row)
-                actions = tuple(
-                    dict(row)
-                    for row in self._connection.execute(
-                        "SELECT * FROM registration_effect_action "
-                        "WHERE effect_id=? ORDER BY event_seq",
-                        (effect["effect_id"],),
-                    ).fetchall()
-                )
-                if episode_id is None:
-                    episode_rows = self._connection.execute(
-                        "SELECT * FROM registration_episode "
-                        "WHERE member_id=? ORDER BY created_wall_ns,episode_id",
-                        (member_id,),
-                    ).fetchall()
-                else:
-                    episode_rows = self._connection.execute(
-                        "SELECT * FROM registration_episode "
-                        "WHERE member_id=? AND episode_id=?",
-                        (member_id, episode_id),
-                    ).fetchall()
-                episodes = tuple(dict(row) for row in episode_rows)
-                status = dict(status_row)
-                protocol = dict(protocol_row)
-                token = (
-                    protocol["protocol_seq"],
-                    protocol["protocol_hash"],
-                    tuple(
-                        (episode["episode_id"], episode["envelope_hash"])
-                        for episode in episodes
-                    ),
-                    member["write_operation_seq"],
-                    member["member_tuple_hash"],
-                    status["status_version"],
-                    status["status_hash"],
-                    effect["outcome_operation_seq"],
-                    effect["outcome_tuple_hash"],
-                    effect["ledger_head_hash"],
+                result = self._validate_semantic_closure_tx(
+                    member_id, episode_id=episode_id
                 )
                 self._connection.execute("COMMIT")
-                return SelectedAuthority(
-                    protocol=protocol,
-                    member=member,
-                    status=status,
-                    effect=effect,
-                    actions=actions,
-                    episodes=episodes,
-                    revision_token=token,
-                )
+                return result
             except Exception:
                 if self._connection.in_transaction:
                     self._connection.execute("ROLLBACK")
                 raise
+
+    def read_selected_authority(
+        self, member_id: str, *, episode_id: str | None = None
+    ) -> SelectedAuthority | None:
+        return self.validate_semantic_closure(member_id, episode_id=episode_id)
 
     def read_selected_revision(
         self, member_id: str, *, episode_id: str | None = None
@@ -5836,9 +9418,9 @@ class RegistrationStore:
         if (
             not isinstance(boot_id, str)
             or not boot_id
-            or not isinstance(now_mono_ns, int)
-            or isinstance(now_mono_ns, bool)
+            or type(now_mono_ns) is not int
             or now_mono_ns < 0
+            or type(limit) is not int
             or not 1 <= limit <= 8
         ):
             raise ValueError("invalid due-candidate selector")
@@ -5924,9 +9506,93 @@ class RegistrationStore:
                     self._connection.execute("ROLLBACK")
                 raise
 
-    def resolve_operation(self, operation_id: str) -> str:
-        """Classify ambiguous SQLite completion from durable authority only."""
+    def _read_resolution(
+        self,
+        resolver: Callable[[], str],
+        *,
+        semantic_result: str = "UNAVAILABLE",
+    ) -> str:
+        with self._read_scope():
+            self._connection.execute("BEGIN")
+            try:
+                result = resolver()
+                self._connection.execute("COMMIT")
+                return result
+            except SemanticClosureError:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                return semantic_result
+            except sqlite3.Error:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                return "UNAVAILABLE"
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
+
+    def resolve_operation(
+        self,
+        operation_id: str,
+        *,
+        expected_revision: int | None = None,
+        expected_protocol_hash: str | None | object = _UNSPECIFIED,
+    ) -> str:
+        """Classify an ambiguous commit from one consistent durable snapshot."""
         _require_hash(operation_id, "operation_id")
+        if expected_revision is not None:
+            _require_int(expected_revision, "expected_revision", minimum=0)
+        if (
+            expected_protocol_hash is not _UNSPECIFIED
+            and expected_protocol_hash is not None
+        ):
+            _require_hash(expected_protocol_hash, "expected_protocol_hash")
+        with self._read_scope():
+            self._connection.execute("BEGIN")
+            try:
+                result = self._resolve_operation_tx(operation_id)
+                if result == "ABSENT":
+                    if (
+                        expected_revision is None
+                        or expected_protocol_hash is _UNSPECIFIED
+                    ):
+                        result = "UNAVAILABLE"
+                    else:
+                        revision = self.table_count(
+                            "registration_operation_audit"
+                        )
+                        protocol = self._connection.execute(
+                            "SELECT protocol_hash "
+                            "FROM registration_protocol_epoch "
+                            "ORDER BY protocol_seq DESC LIMIT 1"
+                        ).fetchone()
+                        observed_protocol = (
+                            protocol["protocol_hash"]
+                            if protocol is not None
+                            else None
+                        )
+                        result = (
+                            "ABSENT"
+                            if revision == expected_revision
+                            and observed_protocol == expected_protocol_hash
+                            else "UNAVAILABLE"
+                        )
+                self._connection.execute("COMMIT")
+                return result
+            except SemanticClosureError:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                return "PARTIAL"
+            except sqlite3.Error:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                return "UNAVAILABLE"
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
+
+    def _resolve_operation_tx(self, operation_id: str) -> str:
         try:
             operation_row = self._connection.execute(
                 "SELECT * FROM registration_operation_audit WHERE operation_id=?",
@@ -5934,78 +9600,125 @@ class RegistrationStore:
             ).fetchone()
             if operation_row is None:
                 return "ABSENT"
-            operation = dict(operation_row)
+            operations: dict[str, ValidatedOperation] = {}
+            operation = self._validated_operation(operation_id, operations)
+            authority: SelectedAuthority | None = None
+            if operation["target_member_id"] is not None:
+                authority = self._validate_semantic_closure_tx(
+                    operation["target_member_id"], episode_id=None
+                )
+                if authority is None:
+                    return "PARTIAL"
+            else:
+                protocol_row = self._connection.execute(
+                    "SELECT * FROM registration_protocol_epoch "
+                    "ORDER BY protocol_seq DESC LIMIT 1"
+                ).fetchone()
+                if protocol_row is not None:
+                    self._validate_protocol_row(protocol_row, operations)
             checks: list[bool] = []
             if operation["target_protocol_hash"] is not None:
-                checks.append(
-                    self._connection.execute(
-                        "SELECT 1 FROM registration_protocol_epoch "
-                        "WHERE protocol_hash=?",
-                        (operation["target_protocol_hash"],),
-                    ).fetchone()
-                    is not None
-                )
+                protocol_row = self._connection.execute(
+                    "SELECT * FROM registration_protocol_epoch "
+                    "WHERE protocol_hash=?",
+                    (operation["target_protocol_hash"],),
+                ).fetchone()
+                checks.append(protocol_row is not None)
+                if protocol_row is not None:
+                    self._validate_protocol_row(protocol_row, operations)
             if operation["target_member_tuple_hash"] is not None:
                 checks.append(
-                    self._connection.execute(
-                        "SELECT 1 FROM registration_member "
-                        "WHERE member_id=? AND member_tuple_hash=?",
-                        (
-                            operation["target_member_id"],
-                            operation["target_member_tuple_hash"],
-                        ),
-                    ).fetchone()
-                    is not None
+                    authority is not None
+                    and (
+                        authority.member["member_tuple_hash"]
+                        == operation["target_member_tuple_hash"]
+                        or (
+                            int(authority.member["write_operation_seq"])
+                            > int(operation["operation_seq"])
+                        )
+                    )
                 )
             if operation["target_status_hash"] is not None:
                 checks.append(
-                    self._connection.execute(
-                        "SELECT 1 FROM registration_runtime_status "
-                        "WHERE member_id=? AND status_hash=?",
-                        (
-                            operation["target_member_id"],
-                            operation["target_status_hash"],
-                        ),
-                    ).fetchone()
-                    is not None
+                    authority is not None
+                    and (
+                        authority.status["status_hash"]
+                        == operation["target_status_hash"]
+                        or (
+                            int(authority.status["write_operation_seq"])
+                            > int(operation["operation_seq"])
+                        )
+                    )
                 )
+
+            validated_effects: dict[str, ValidatedEffect] = {}
+            validated_actions: list[ValidatedAction] = []
+            for effect_id in {
+                operation["target_effect_id"],
+                operation["target_successor_effect_id"],
+                operation["lineage_effect_id"],
+            } - {None}:
+                effect_row = self._connection.execute(
+                    "SELECT * FROM registration_effect WHERE effect_id=?",
+                    (effect_id,),
+                ).fetchone()
+                if effect_row is None or authority is None:
+                    checks.append(False)
+                    continue
+                effect, actions = self._validate_effect_row(
+                    effect_row,
+                    member=authority.member,
+                    operations=operations,
+                    include_actions=True,
+                )
+                validated_effects[effect_id] = effect
+                validated_actions.extend(actions)
             if operation["target_effect_tuple_hash"] is not None:
                 checks.append(
-                    self._connection.execute(
-                        "SELECT 1 FROM registration_effect "
-                        "WHERE request_tuple_hash=?",
-                        (operation["target_effect_tuple_hash"],),
-                    ).fetchone()
-                    is not None
+                    operation["target_effect_tuple_hash"]
+                    in {
+                        effect["request_tuple_hash"]
+                        for effect in validated_effects.values()
+                    }
                 )
             if operation["target_effect_outcome_hash"] is not None:
                 checks.append(
-                    self._connection.execute(
-                        "SELECT 1 FROM registration_effect "
-                        "WHERE outcome_tuple_hash=?",
-                        (operation["target_effect_outcome_hash"],),
-                    ).fetchone()
-                    is not None
+                    operation["target_effect_outcome_hash"]
+                    in {
+                        effect["outcome_tuple_hash"]
+                        for effect in validated_effects.values()
+                    }
+                )
+            if operation["target_action_plan_hash"] is not None:
+                checks.append(
+                    operation["target_action_plan_hash"]
+                    in {
+                        effect["action_plan_hash"]
+                        for effect in validated_effects.values()
+                    }
                 )
             if operation["target_action_ledger_hash"] is not None:
                 checks.append(
                     operation["target_action_ledger_hash"] == ZERO_HASH
-                    or self._connection.execute(
-                        "SELECT 1 FROM registration_effect_action "
-                        "WHERE ledger_hash=?",
-                        (operation["target_action_ledger_hash"],),
-                    ).fetchone()
-                    is not None
+                    or operation["target_action_ledger_hash"]
+                    in {action["ledger_hash"] for action in validated_actions}
                 )
             if operation["target_episode_hash"] is not None:
-                checks.append(
-                    self._connection.execute(
-                        "SELECT 1 FROM registration_episode "
-                        "WHERE envelope_hash=?",
-                        (operation["target_episode_hash"],),
-                    ).fetchone()
-                    is not None
-                )
+                episode_row = self._connection.execute(
+                    "SELECT * FROM registration_episode WHERE episode_id=?",
+                    (operation["target_episode_id"],),
+                ).fetchone()
+                checks.append(episode_row is not None)
+                if episode_row is not None:
+                    episode = self._validate_episode_row(
+                        episode_row,
+                        member_id=operation["target_member_id"],
+                        operations=operations,
+                    )
+                    checks.append(
+                        episode["envelope_hash"]
+                        == operation["target_episode_hash"]
+                    )
             return "COMMITTED" if all(checks) else "PARTIAL"
         except sqlite3.Error:
             return "UNAVAILABLE"
@@ -6013,26 +9726,56 @@ class RegistrationStore:
     def resolve_close(
         self, *, operation_id: str, member_id: str, effect_id: str
     ) -> str:
+        for value, field in (
+            (operation_id, "operation_id"),
+            (member_id, "member_id"),
+            (effect_id, "effect_id"),
+        ):
+            _require_hash(value, field)
+        return self._read_resolution(
+            lambda: self._resolve_close_tx(
+                operation_id=operation_id,
+                member_id=member_id,
+                effect_id=effect_id,
+            )
+        )
+
+    def _resolve_close_tx(
+        self, *, operation_id: str, member_id: str, effect_id: str
+    ) -> str:
         try:
-            effect = self._connection.execute(
+            authority = self._validate_semantic_closure_tx(
+                member_id, episode_id=None
+            )
+            if authority is None:
+                return "UNAVAILABLE"
+            effect_row = self._connection.execute(
                 "SELECT * FROM registration_effect WHERE effect_id=?",
                 (effect_id,),
             ).fetchone()
-            member = self._connection.execute(
-                "SELECT * FROM registration_member WHERE member_id=?",
-                (member_id,),
-            ).fetchone()
-            operation = self._connection.execute(
-                "SELECT 1 FROM registration_operation_audit "
+            if effect_row is None:
+                return "UNAVAILABLE"
+            operations: dict[str, ValidatedOperation] = {}
+            effect, _actions = self._validate_effect_row(
+                effect_row,
+                member=authority.member,
+                operations=operations,
+                include_actions=True,
+            )
+            operation_row = self._connection.execute(
+                "SELECT * FROM registration_operation_audit "
                 "WHERE operation_id=?",
                 (operation_id,),
             ).fetchone()
-            if effect is None or member is None:
-                return "UNAVAILABLE"
+            operation = (
+                self._validated_operation(operation_id, operations)
+                if operation_row is not None
+                else None
+            )
             if (
                 operation is not None
-                and member["phase"] == "RESOLVED"
-                and member["current_effect_id"] == effect_id
+                and operation["target_member_id"] == member_id
+                and operation["target_effect_id"] == effect_id
                 and effect["outcome_operation_id"] == operation_id
             ):
                 if effect["outcome_kind"] == "SUCCESS":
@@ -6040,7 +9783,14 @@ class RegistrationStore:
                 if effect["outcome_kind"] == "LOGICAL_CONFLICT":
                     return "COMMITTED_LOGICAL_CONFLICT"
             if (
-                operation is None
+                operation_row is None
+                and (
+                    member := self._connection.execute(
+                        "SELECT * FROM registration_member WHERE member_id=?",
+                        (member_id,),
+                    ).fetchone()
+                )
+                is not None
                 and effect["outcome_kind"] is None
                 and member["phase"] == "EFFECT_IN_FLIGHT"
                 and member["current_effect_id"] == effect_id
@@ -6058,8 +9808,38 @@ class RegistrationStore:
         effect_id: str,
         old_status_hash: str,
     ) -> str:
+        for value, field in (
+            (operation_id, "operation_id"),
+            (member_id, "member_id"),
+            (effect_id, "effect_id"),
+            (old_status_hash, "old_status_hash"),
+        ):
+            _require_hash(value, field)
+        return self._read_resolution(
+            lambda: self._resolve_reacquire_tx(
+                operation_id=operation_id,
+                member_id=member_id,
+                effect_id=effect_id,
+                old_status_hash=old_status_hash,
+            ),
+            semantic_result="PARTIAL",
+        )
+
+    def _resolve_reacquire_tx(
+        self,
+        *,
+        operation_id: str,
+        member_id: str,
+        effect_id: str,
+        old_status_hash: str,
+    ) -> str:
         try:
-            operation = self._connection.execute(
+            authority = self._validate_semantic_closure_tx(
+                member_id, episode_id=None
+            )
+            if authority is None:
+                return "UNAVAILABLE"
+            operation_row = self._connection.execute(
                 "SELECT * FROM registration_operation_audit "
                 "WHERE operation_id=?",
                 (operation_id,),
@@ -6072,10 +9852,24 @@ class RegistrationStore:
                 "SELECT * FROM registration_runtime_status WHERE member_id=?",
                 (member_id,),
             ).fetchone()
-            effect = self._connection.execute(
+            effect_row = self._connection.execute(
                 "SELECT * FROM registration_effect WHERE effect_id=?",
                 (effect_id,),
             ).fetchone()
+            effect: ValidatedEffect | None = None
+            operation: ValidatedOperation | None = None
+            if effect_row is not None:
+                operations: dict[str, ValidatedOperation] = {}
+                effect, _actions = self._validate_effect_row(
+                    effect_row,
+                    member=authority.member,
+                    operations=operations,
+                    include_actions=False,
+                )
+                if operation_row is not None:
+                    operation = self._validated_operation(
+                        operation_id, operations
+                    )
             protocol = self.current_protocol()
             if (
                 operation is not None
@@ -6084,19 +9878,13 @@ class RegistrationStore:
                 and effect is not None
                 and protocol is not None
                 and operation["operation_kind"] == "REACQUIRE_EFFECT"
-                and operation["target_member_tuple_hash"]
-                == member["member_tuple_hash"]
-                and operation["target_status_hash"] == status["status_hash"]
                 and operation["target_effect_tuple_hash"]
                 == effect["request_tuple_hash"]
-                and operation["target_protocol_hash"]
-                == protocol["protocol_hash"]
-                and operation["target_executor_token_hash"]
-                == status["executor_token_hash"]
+                and self._resolve_operation_tx(operation_id) == "COMMITTED"
             ):
                 return "COMMITTED"
             if (
-                operation is None
+                operation_row is None
                 and member is not None
                 and status is not None
                 and effect is not None
@@ -6108,25 +9896,89 @@ class RegistrationStore:
                 and effect["outcome_kind"] is None
             ):
                 return "ABSENT"
-            if operation is not None:
+            if operation_row is not None:
                 return "PARTIAL"
             return "UNAVAILABLE"
         except sqlite3.Error:
             return "UNAVAILABLE"
 
-    def resolve_adoption(self, *, operation_id: str, member_id: str) -> str:
+    def resolve_adoption(
+        self,
+        *,
+        operation_id: str,
+        member_id: str,
+        expected_member_hash: str,
+        expected_effect_hash: str,
+        expected_status_hash: str,
+        expected_protocol_hash: str,
+        expected_staged_epoch_hash: str,
+    ) -> str:
+        for value, field in (
+            (operation_id, "operation_id"),
+            (member_id, "member_id"),
+            (expected_member_hash, "expected_member_hash"),
+            (expected_effect_hash, "expected_effect_hash"),
+            (expected_status_hash, "expected_status_hash"),
+            (expected_protocol_hash, "expected_protocol_hash"),
+            (expected_staged_epoch_hash, "expected_staged_epoch_hash"),
+        ):
+            _require_hash(value, field)
+        return self._read_resolution(
+            lambda: self._resolve_adoption_tx(
+                operation_id=operation_id,
+                member_id=member_id,
+                expected_member_hash=expected_member_hash,
+                expected_effect_hash=expected_effect_hash,
+                expected_status_hash=expected_status_hash,
+                expected_protocol_hash=expected_protocol_hash,
+                expected_staged_epoch_hash=expected_staged_epoch_hash,
+            ),
+            semantic_result="PARTIAL",
+        )
+
+    def _resolve_adoption_tx(
+        self,
+        *,
+        operation_id: str,
+        member_id: str,
+        expected_member_hash: str,
+        expected_effect_hash: str,
+        expected_status_hash: str,
+        expected_protocol_hash: str,
+        expected_staged_epoch_hash: str,
+    ) -> str:
         try:
+            authority = self._validate_semantic_closure_tx(
+                member_id, episode_id=None
+            )
+            if authority is None:
+                return "UNAVAILABLE"
             operation = self._connection.execute(
                 "SELECT * FROM registration_operation_audit "
                 "WHERE operation_id=?",
                 (operation_id,),
             ).fetchone()
             if operation is None:
-                return "ABSENT"
+                return (
+                    "ABSENT"
+                    if (
+                        authority.member["member_tuple_hash"]
+                        == expected_member_hash
+                        and authority.effect["request_tuple_hash"]
+                        == expected_effect_hash
+                        and authority.status["status_hash"]
+                        == expected_status_hash
+                        and authority.protocol["protocol_hash"]
+                        == expected_protocol_hash
+                        and authority.protocol["staged_epoch_hash"]
+                        == expected_staged_epoch_hash
+                    )
+                    else "UNAVAILABLE"
+                )
             if (
                 operation["operation_kind"] == "ADOPT_EFFECT"
                 and operation["target_member_id"] == member_id
-                and self.resolve_operation(operation_id) == "COMMITTED"
+                and self._resolve_operation_tx(operation_id) == "COMMITTED"
             ):
                 return "ALREADY_APPLIED"
             return "PARTIAL"
@@ -6141,23 +9993,47 @@ class RegistrationStore:
         expected_member_hash: str,
         target_member_hash: str,
     ) -> str:
+        for value, field in (
+            (operation_id, "operation_id"),
+            (member_id, "member_id"),
+            (expected_member_hash, "expected_member_hash"),
+            (target_member_hash, "target_member_hash"),
+        ):
+            _require_hash(value, field)
+        return self._read_resolution(
+            lambda: self._resolve_successor_tx(
+                operation_id=operation_id,
+                member_id=member_id,
+                expected_member_hash=expected_member_hash,
+                target_member_hash=target_member_hash,
+            )
+        )
+
+    def _resolve_successor_tx(
+        self,
+        *,
+        operation_id: str,
+        member_id: str,
+        expected_member_hash: str,
+        target_member_hash: str,
+    ) -> str:
         try:
+            authority = self._validate_semantic_closure_tx(
+                member_id, episode_id=None
+            )
+            if authority is None:
+                return "UNAVAILABLE"
             operation = self._connection.execute(
                 "SELECT * FROM registration_operation_audit "
                 "WHERE operation_id=?",
                 (operation_id,),
             ).fetchone()
-            member = self._connection.execute(
-                "SELECT * FROM registration_member WHERE member_id=?",
-                (member_id,),
-            ).fetchone()
-            if member is None:
-                return "UNAVAILABLE"
+            member = authority.member
             if (
                 operation is not None
                 and operation["target_member_tuple_hash"]
                 == target_member_hash
-                and member["member_tuple_hash"] == target_member_hash
+                and self._resolve_operation_tx(operation_id) == "COMMITTED"
             ):
                 return "APPLIED"
             if operation is None and member["member_tuple_hash"] == expected_member_hash:

@@ -10,10 +10,11 @@ import platform
 import re
 import sqlite3
 import stat
+import unicodedata
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import ClassVar, Iterator
 
 from . import registration_jcs
 
@@ -96,10 +97,237 @@ _PROFILE_KEYS = {
     "ancestry_hash",
     "descriptor_binding_hash",
 }
+REQUIRED_PYTHON_APIS = (
+    "fcntl.flock",
+    "os.O_NOFOLLOW",
+    "os.fstat",
+    "sqlite3.Connection.setconfig",
+    "sqlite3.SQLITE_DBCONFIG_DEFENSIVE",
+    "sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE",
+)
+_CAPABILITY_KEYS = {
+    "schema",
+    "platform",
+    "os_build",
+    "python_implementation",
+    "python_version",
+    "required_python_apis",
+    "sqlite_runtime_version",
+    "sqlite_source_id",
+    "sqlite_compile_options_hash",
+    "sqlite_vfs_name",
+    "journal_mode",
+    "synchronous",
+    "fullfsync",
+    "checkpoint_fullfsync",
+    "foreign_keys",
+    "connection_setconfig_available",
+    "sqlite_dbconfig_defensive_available",
+    "defensive",
+    "trusted_schema",
+    "locking_mode",
+    "nofollow_available",
+    "checkpoint_on_close",
+    "probe_program_hash",
+}
+_EXTERNAL_INTERPRETER_KEYS = {
+    "schema",
+    "selection_hash",
+    "path",
+    "path_hash",
+    "ancestry_hash",
+    "st_uid",
+    "st_gid",
+    "st_mode",
+    "st_dev",
+    "st_ino",
+    "st_nlink",
+    "st_size",
+    "content_sha256",
+    "capability_probe_hash",
+    "probe_program_hash",
+}
+_INTERPRETER_CAPABILITY_SEAL = object()
+_PROFILE_BINDING_SEAL = object()
+_TYPED_PROFILE_BINDING_SEAL = object()
 
 
 class ProfileError(RuntimeError):
     pass
+
+
+def _authority_hash(domain: str, value: dict) -> str:
+    return hashlib.sha256(
+        domain.encode("ascii")
+        + b"\0"
+        + registration_jcs.canonical_bytes(value)
+    ).hexdigest()
+
+
+def _version(value: object, field: str) -> tuple[int, ...]:
+    if not isinstance(value, str) or re.fullmatch(
+        r"(0|[1-9][0-9]*)(?:\.(0|[1-9][0-9]*)){1,3}", value
+    ) is None:
+        raise ProfileError(f"{field} must be a canonical dotted version")
+    return tuple(int(part) for part in value.split("."))
+
+
+def python_capability_hash(capability: dict) -> str:
+    if set(capability) != _CAPABILITY_KEYS:
+        raise ProfileError("python capability key mismatch")
+    if capability["schema"] != "awa-registration-python-capability/v1":
+        raise ProfileError("python capability schema mismatch")
+    if capability["required_python_apis"] != list(REQUIRED_PYTHON_APIS):
+        raise ProfileError("python capability API inventory mismatch")
+    for field in (
+        "fullfsync",
+        "checkpoint_fullfsync",
+        "foreign_keys",
+        "connection_setconfig_available",
+        "sqlite_dbconfig_defensive_available",
+        "defensive",
+        "trusted_schema",
+        "nofollow_available",
+        "checkpoint_on_close",
+    ):
+        if type(capability[field]) is not bool:
+            raise ProfileError(f"{field} must be boolean")
+    for field in ("sqlite_compile_options_hash", "probe_program_hash"):
+        if not isinstance(capability[field], str) or _HEX.fullmatch(
+            capability[field]
+        ) is None:
+            raise ProfileError(f"{field} must be lowercase 64-hex")
+    for field in (
+        "platform",
+        "os_build",
+        "python_implementation",
+        "sqlite_source_id",
+        "sqlite_vfs_name",
+        "journal_mode",
+        "synchronous",
+        "locking_mode",
+    ):
+        if not isinstance(capability[field], str) or not capability[field]:
+            raise ProfileError(f"{field} must be nonempty text")
+    _version(capability["python_version"], "python_version")
+    _version(capability["sqlite_runtime_version"], "sqlite_runtime_version")
+    return _authority_hash("awa-registration-python-capability/v1", capability)
+
+
+@dataclass(frozen=True)
+class InterpreterCapability:
+    digest: str
+    probe_program_hash: str
+    python_version: str
+    sqlite_runtime_version: str
+    _seal: object
+
+    def __post_init__(self) -> None:
+        if self._seal is not _INTERPRETER_CAPABILITY_SEAL:
+            raise ProfileError(
+                "interpreter capability requires a validated probe"
+            )
+
+
+def validate_python_capability(capability: dict) -> InterpreterCapability:
+    digest = python_capability_hash(capability)
+    supported = (
+        capability["platform"] == "darwin"
+        and capability["python_implementation"] == "CPython"
+        and _version(capability["python_version"], "python_version") >= (3, 12)
+        and _version(
+            capability["sqlite_runtime_version"], "sqlite_runtime_version"
+        )
+        >= (3, 51, 3)
+        and capability["sqlite_vfs_name"] == "unix"
+        and capability["journal_mode"] == "wal"
+        and capability["synchronous"] == "full"
+        and capability["fullfsync"] is True
+        and capability["checkpoint_fullfsync"] is True
+        and capability["foreign_keys"] is True
+        and capability["connection_setconfig_available"] is True
+        and capability["sqlite_dbconfig_defensive_available"] is True
+        and capability["defensive"] is True
+        and capability["trusted_schema"] is False
+        and capability["locking_mode"] == "normal"
+        and capability["nofollow_available"] is True
+        and capability["checkpoint_on_close"] is False
+    )
+    if not supported:
+        raise ProfileError("python capability is unsupported")
+    return InterpreterCapability(
+        digest=digest,
+        probe_program_hash=capability["probe_program_hash"],
+        python_version=capability["python_version"],
+        sqlite_runtime_version=capability["sqlite_runtime_version"],
+        _seal=_INTERPRETER_CAPABILITY_SEAL,
+    )
+
+
+def _validate_absolute_interpreter_path(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or value != unicodedata.normalize("NFC", value)
+        or not 1 <= len(value.encode("utf-8", "strict")) <= 4096
+        or not value.startswith("/")
+        or "\\" in value
+        or any(ord(character) < 0x20 for character in value)
+        or os.path.normpath(value) != value
+        or any(part in {"", ".", ".."} for part in value.split("/")[1:])
+    ):
+        raise ProfileError("invalid interpreter path")
+    return value
+
+
+def external_interpreter_hash(
+    record: dict,
+    *,
+    capability: InterpreterCapability | None = None,
+) -> str:
+    if set(record) != _EXTERNAL_INTERPRETER_KEYS:
+        raise ProfileError("external interpreter key mismatch")
+    if record["schema"] != "awa-registration-external-interpreter/v1":
+        raise ProfileError("external interpreter schema mismatch")
+    path = _validate_absolute_interpreter_path(record["path"])
+    expected_path_hash = hashlib.sha256(
+        b"awa-registration-interpreter-path/v1\0" + path.encode("utf-8")
+    ).hexdigest()
+    if record["path_hash"] != expected_path_hash:
+        raise ProfileError("external interpreter path hash mismatch")
+    for field in (
+        "selection_hash",
+        "path_hash",
+        "ancestry_hash",
+        "content_sha256",
+        "capability_probe_hash",
+        "probe_program_hash",
+    ):
+        if not isinstance(record[field], str) or _HEX.fullmatch(record[field]) is None:
+            raise ProfileError(f"{field} must be lowercase 64-hex")
+    for field in (
+        "st_uid",
+        "st_gid",
+        "st_mode",
+        "st_dev",
+        "st_ino",
+        "st_nlink",
+        "st_size",
+    ):
+        _require_decimal(record[field])
+    mode = int(record["st_mode"])
+    if (
+        not stat.S_ISREG(mode)
+        or int(record["st_nlink"]) != 1
+        or mode & stat.S_IXUSR == 0
+        or mode & 0o022
+    ):
+        raise ProfileError("external interpreter file authority mismatch")
+    if capability is not None and (
+        record["capability_probe_hash"] != capability.digest
+        or record["probe_program_hash"] != capability.probe_program_hash
+    ):
+        raise ProfileError("external interpreter capability binding mismatch")
+    return _authority_hash("awa-registration-external-interpreter/v1", record)
 
 
 def _sqlite_vfs_probe(path: Path) -> tuple[str, bool]:
@@ -516,6 +744,20 @@ class ProfileBinding:
     profile_object: dict
     digest: str
     storage_dev: int
+    _seal: object
+
+    def __post_init__(self) -> None:
+        if self._seal is not _PROFILE_BINDING_SEAL:
+            raise ProfileError("profile binding requires live measurement")
+        if (
+            tuple(role for role, *_rest in self.targets) != DESCRIPTOR_ROLES
+            or self.profile_object.get("descriptor_binding_hash")
+            != self.descriptor_digest
+            or profile_hash(self.profile_object) != self.digest
+            or type(self.storage_dev) is not int
+            or self.storage_dev < 0
+        ):
+            raise ProfileError("profile binding measurement is inconsistent")
 
     @classmethod
     def measure(
@@ -632,6 +874,7 @@ class ProfileBinding:
             profile_object=profile,
             digest=digest,
             storage_dev=measurement.st_dev,
+            _seal=_PROFILE_BINDING_SEAL,
         )
 
     def recheck(self, connection: sqlite3.Connection) -> int:
@@ -649,3 +892,137 @@ class ProfileBinding:
             state_parent, kind="directory", required_mode=0o700
         ) as bound:
             return free_bytes_for_fd(bound.fd)
+
+
+@dataclass(frozen=True)
+class TypedProfileBinding:
+    profile: ProfileBinding
+    interpreter_capability: InterpreterCapability
+    external_interpreter_digest: str
+    capability_bytes: bytes
+    external_interpreter_bytes: bytes
+    _seal: object
+    role: ClassVar[str] = "UNSPECIFIED"
+
+    def __post_init__(self) -> None:
+        if self._seal is not _TYPED_PROFILE_BINDING_SEAL:
+            raise ProfileError("typed profile requires validated bindings")
+        if self.role not in {"CURRENT", "STAGED", "R0"}:
+            raise ProfileError("unknown typed profile role")
+        if not isinstance(self.profile, ProfileBinding):
+            raise ProfileError("typed profile requires measured profile")
+        if not isinstance(self.interpreter_capability, InterpreterCapability):
+            raise ProfileError("typed profile requires interpreter capability")
+        if _HEX.fullmatch(self.external_interpreter_digest) is None:
+            raise ProfileError("typed profile interpreter hash mismatch")
+        try:
+            capability_object = registration_jcs.parse_canonical(
+                self.capability_bytes
+            )
+            external_interpreter = registration_jcs.parse_canonical(
+                self.external_interpreter_bytes
+            )
+        except registration_jcs.JcsError as error:
+            raise ProfileError("typed profile evidence is invalid") from error
+        if (
+            not isinstance(capability_object, dict)
+            or not isinstance(external_interpreter, dict)
+            or validate_python_capability(capability_object)
+            != self.interpreter_capability
+            or external_interpreter_hash(
+                external_interpreter,
+                capability=self.interpreter_capability,
+            )
+            != self.external_interpreter_digest
+        ):
+            raise ProfileError("typed profile evidence mismatch")
+
+    @classmethod
+    def bind(
+        cls,
+        profile: ProfileBinding,
+        capability_object: dict,
+        external_interpreter: dict,
+    ) -> "TypedProfileBinding":
+        capability = validate_python_capability(capability_object)
+        interpreter_digest = external_interpreter_hash(
+            external_interpreter, capability=capability
+        )
+        return cls(
+            profile,
+            capability,
+            interpreter_digest,
+            registration_jcs.canonical_bytes(capability_object),
+            registration_jcs.canonical_bytes(external_interpreter),
+            _TYPED_PROFILE_BINDING_SEAL,
+        )
+
+    @property
+    def digest(self) -> str:
+        return self.profile.digest
+
+    @property
+    def storage_dev(self) -> int:
+        return self.profile.storage_dev
+
+    def recheck(
+        self,
+        connection: sqlite3.Connection,
+        capability_object: dict | None = None,
+        external_interpreter: dict | None = None,
+    ) -> int:
+        if (capability_object is None) != (external_interpreter is None):
+            raise ProfileError(
+                "interpreter capability recheck evidence is incomplete"
+            )
+        if capability_object is None:
+            parsed_capability = registration_jcs.parse_canonical(
+                self.capability_bytes
+            )
+            parsed_external = registration_jcs.parse_canonical(
+                self.external_interpreter_bytes
+            )
+            if not isinstance(parsed_capability, dict) or not isinstance(
+                parsed_external, dict
+            ):
+                raise ProfileError("typed profile evidence is invalid")
+            capability_object = parsed_capability
+            external_interpreter = parsed_external
+        assert external_interpreter is not None
+        capability = validate_python_capability(capability_object)
+        interpreter_digest = external_interpreter_hash(
+            external_interpreter, capability=capability
+        )
+        if (
+            capability != self.interpreter_capability
+            or interpreter_digest != self.external_interpreter_digest
+        ):
+            raise ProfileError("interpreter capability changed")
+        return self.profile.recheck(connection)
+
+
+class CurrentProfileBinding(TypedProfileBinding):
+    role = "CURRENT"
+
+    @classmethod
+    def promote(
+        cls, binding: "StagedProfileBinding"
+    ) -> "CurrentProfileBinding":
+        if type(binding) is not StagedProfileBinding:
+            raise ProfileError("only a staged profile can become current")
+        return cls(
+            binding.profile,
+            binding.interpreter_capability,
+            binding.external_interpreter_digest,
+            binding.capability_bytes,
+            binding.external_interpreter_bytes,
+            _TYPED_PROFILE_BINDING_SEAL,
+        )
+
+
+class StagedProfileBinding(TypedProfileBinding):
+    role = "STAGED"
+
+
+class R0ProfileBinding(TypedProfileBinding):
+    role = "R0"

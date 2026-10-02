@@ -55,6 +55,36 @@ class RegistrationIndependenceTest(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, combined)
 
+    def test_runtime_and_actor_surfaces_cannot_construct_control(self) -> None:
+        forbidden = {
+            "ControlCapability",
+            "_CONTROL_SEAL",
+            "authenticate_control",
+            "bootstrap",
+            "activate",
+            "begin_drain",
+            "stage_next",
+            "cancel_drain",
+            "advance_generation",
+            "pre_effect_dormant",
+            "enter_containment",
+            "begin_repair",
+            "adopt_effect",
+        }
+        for path in BODY_B_MODULES:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            referenced = {
+                node.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Name)
+            } | {
+                node.attr
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Attribute)
+            }
+            with self.subTest(path=path.name):
+                self.assertEqual(referenced & forbidden, set())
+
 
 if __name__ == "__main__":
     unittest.main()
