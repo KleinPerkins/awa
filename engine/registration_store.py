@@ -9,6 +9,7 @@ Body A.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import secrets
@@ -599,6 +600,34 @@ class DueCandidate:
     due_since_mono_ns: int
     observed_now_mono_ns: int
 
+    def __post_init__(self) -> None:
+        for field in (
+            "member_id",
+            "effect_id",
+            "member_tuple_hash",
+            "effect_tuple_hash",
+            "status_hash",
+            "current_basis_hash",
+        ):
+            _require_hash(getattr(self, field), field)
+        if self.pending_basis_hash is not None:
+            _require_hash(self.pending_basis_hash, "pending_basis_hash")
+        _require_int(self.member_epoch, "member_epoch", minimum=1)
+        _require_int(
+            self.due_since_mono_ns, "due_since_mono_ns", minimum=0
+        )
+        _require_int(
+            self.observed_now_mono_ns,
+            "observed_now_mono_ns",
+            minimum=0,
+        )
+        if self.phase not in {
+            "REQUESTED",
+            "EFFECT_IN_FLIGHT",
+            "RESOLVED",
+        }:
+            raise ValueError("invalid member phase")
+
 
 @dataclass(frozen=True)
 class RebootCandidate:
@@ -607,6 +636,21 @@ class RebootCandidate:
     effect_id: str
     status_hash: str
     stored_boot_id: str
+
+    def __post_init__(self) -> None:
+        for field in ("member_id", "effect_id", "status_hash"):
+            _require_hash(getattr(self, field), field)
+        if self.phase not in {
+            "REQUESTED",
+            "EFFECT_IN_FLIGHT",
+            "RESOLVED",
+        }:
+            raise ValueError("invalid member phase")
+        if (
+            not isinstance(self.stored_boot_id, str)
+            or not self.stored_boot_id
+        ):
+            raise ValueError("stored_boot_id must be nonempty")
 
 
 @dataclass(frozen=True)
@@ -829,6 +873,450 @@ def _require_int(value: object, field: str, *, minimum: int | None = None) -> in
     return value
 
 
+@dataclass(frozen=True)
+class FreshMemberBasis:
+    identity: MemberIdentity
+    intent: EffectIntent
+    workspace_roots_hash: str
+
+    def __post_init__(self) -> None:
+        if type(self.identity) is not MemberIdentity:
+            raise ValueError("identity must be MemberIdentity")
+        if type(self.intent) is not EffectIntent:
+            raise ValueError("intent must be EffectIntent")
+        _require_hash(self.workspace_roots_hash, "workspace_roots_hash")
+        if self.identity.current_basis_hash != self.intent.request_basis_hash:
+            raise ValueError("fresh member/effect basis mismatch")
+
+
+@dataclass(frozen=True)
+class SameBootCandidate:
+    member_id: str
+    status_hash: str
+    executor_token_hash: str
+    executor_generation: int
+
+    def __post_init__(self) -> None:
+        for field in (
+            "member_id",
+            "status_hash",
+            "executor_token_hash",
+        ):
+            _require_hash(getattr(self, field), field)
+        _require_int(
+            self.executor_generation,
+            "executor_generation",
+            minimum=1,
+        )
+
+
+@dataclass(frozen=True)
+class SameBootSnapshot:
+    boot_id: str
+    protocol_seq: int
+    protocol_hash: str
+    candidates: tuple[SameBootCandidate, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.boot_id, str) or not self.boot_id:
+            raise ValueError("boot_id must be nonempty")
+        _require_int(self.protocol_seq, "protocol_seq", minimum=1)
+        _require_hash(self.protocol_hash, "protocol_hash")
+        if type(self.candidates) is not tuple or any(
+            type(candidate) is not SameBootCandidate
+            for candidate in self.candidates
+        ):
+            raise ValueError(
+                "candidates must be a tuple of SameBootCandidate"
+            )
+        member_ids = tuple(
+            candidate.member_id for candidate in self.candidates
+        )
+        if member_ids != tuple(sorted(member_ids)) or len(
+            member_ids
+        ) != len(set(member_ids)):
+            raise ValueError(
+                "same-boot candidates must be unique and bytewise ordered"
+            )
+
+
+@dataclass(frozen=True)
+class R1ScopeSelection:
+    authorized_same_boot: SameBootCandidate | None
+    authorized_due: DueCandidate | None
+    authorized_reboot: RebootCandidate | None
+    outside_scope_same_boot: bool
+    outside_scope_due: bool
+    outside_scope_reboot: bool
+
+    def __post_init__(self) -> None:
+        for field, expected in (
+            ("authorized_same_boot", SameBootCandidate),
+            ("authorized_due", DueCandidate),
+            ("authorized_reboot", RebootCandidate),
+        ):
+            value = getattr(self, field)
+            if value is not None and type(value) is not expected:
+                raise ValueError(f"{field} has the wrong typed value")
+        for field in (
+            "outside_scope_same_boot",
+            "outside_scope_due",
+            "outside_scope_reboot",
+        ):
+            if type(getattr(self, field)) is not bool:
+                raise ValueError(f"{field} must be a boolean")
+
+
+_MEMBER_SCOPE_SEAL = object()
+
+
+class MemberMutationScope:
+    __slots__ = (
+        "_store",
+        "_member_id",
+        "_timeout_seconds",
+        "_owner_pid",
+        "_owner_thread",
+        "_held_lock",
+        "_active",
+        "_entered",
+        "_basis",
+    )
+
+    def __init__(
+        self,
+        store: "RegistrationStore",
+        member_id: str,
+        timeout_seconds: float,
+        *,
+        _seal: object,
+    ) -> None:
+        if _seal is not _MEMBER_SCOPE_SEAL:
+            raise AuthorizationError(
+                "member mutation scope is store-authenticated"
+            )
+        _require_hash(member_id, "member_id")
+        if isinstance(timeout_seconds, bool) or not isinstance(
+            timeout_seconds, (int, float)
+        ):
+            raise ValueError("timeout_seconds must be nonnegative")
+        try:
+            normalized_timeout = float(timeout_seconds)
+        except OverflowError as error:
+            raise ValueError(
+                "timeout_seconds must be nonnegative"
+            ) from error
+        if (
+            not math.isfinite(normalized_timeout)
+            or normalized_timeout < 0
+            or normalized_timeout > threading.TIMEOUT_MAX
+        ):
+            raise ValueError("timeout_seconds must be nonnegative")
+        self._store = store
+        self._member_id = member_id
+        self._timeout_seconds = normalized_timeout
+        self._owner_pid = os.getpid()
+        self._owner_thread = threading.get_ident()
+        self._held_lock: registration_lock.HeldLock | None = None
+        self._active = False
+        self._entered = False
+        self._basis: FreshMemberBasis | None = None
+
+    def __reduce__(self) -> object:
+        raise TypeError("member mutation scope is not serializable")
+
+    def __reduce_ex__(self, _protocol: int) -> object:
+        raise TypeError("member mutation scope is not serializable")
+
+    def __getstate__(self) -> object:
+        raise TypeError("member mutation scope is not serializable")
+
+    def _require_owner(self) -> None:
+        if (
+            os.getpid() != self._owner_pid
+            or threading.get_ident() != self._owner_thread
+        ):
+            raise AuthorizationError(
+                "member mutation scope owner changed"
+            )
+
+    def _require_active(self) -> registration_lock.HeldLock:
+        self._require_owner()
+        if (
+            not self._active
+            or self._held_lock is None
+            or self._store._closed
+        ):
+            raise AuthorizationError(
+                "member mutation scope is not active"
+            )
+        self._store._validate_member_lock(
+            self._member_id, self._held_lock
+        )
+        return self._held_lock
+
+    def _require_basis(
+        self, basis: FreshMemberBasis
+    ) -> registration_lock.HeldLock:
+        held = self._require_active()
+        if type(basis) is not FreshMemberBasis or basis is not self._basis:
+            raise StaleAuthority(
+                "fresh basis is not current for this member scope"
+            )
+        return held
+
+    @staticmethod
+    def _basis_update(basis: FreshMemberBasis) -> BasisUpdate:
+        identity_value = basis.identity
+        return BasisUpdate(
+            policy_basis_hash=identity_value.policy_basis_hash,
+            operation_basis_hash=identity_value.operation_basis_hash,
+            lifecycle_basis_hash=identity_value.lifecycle_basis_hash,
+            current_basis_hash=identity_value.current_basis_hash,
+        )
+
+    def __enter__(self) -> "MemberMutationScope":
+        self._require_owner()
+        if self._entered or self._active:
+            raise AuthorizationError(
+                "member mutation scope is single-use"
+            )
+        if self._store._closed:
+            raise AuthorizationError("registration store is closed")
+        self._entered = True
+        held = self._store._locks.acquire_member(
+            self._member_id, timeout=self._timeout_seconds
+        )
+        try:
+            self._store._validate_member_lock(self._member_id, held)
+        except BaseException:
+            held.release()
+            raise
+        self._held_lock = held
+        self._active = True
+        return self
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        _exception: BaseException | None,
+        _traceback: object,
+    ) -> bool:
+        self._require_owner()
+        held = self._held_lock
+        self._active = False
+        self._basis = None
+        self._held_lock = None
+        if held is not None:
+            try:
+                held.release()
+            except BaseException:
+                if exception_type is None:
+                    raise
+        return False
+
+    def collect_fresh_basis(
+        self, provider: Callable[[], FreshMemberBasis]
+    ) -> FreshMemberBasis:
+        self._require_active()
+        if not callable(provider):
+            raise AuthorizationError(
+                "fresh-basis provider must be callable"
+            )
+        self._basis = None
+        value = provider()
+        self._require_active()
+        if type(value) is not FreshMemberBasis:
+            raise AuthorizationError(
+                "fresh-basis provider returned the wrong type"
+            )
+        expected_member_id = self._store._member_id(value.identity)
+        if expected_member_id != self._member_id:
+            raise StaleAuthority("fresh basis belongs to another member")
+        collected = FreshMemberBasis(
+            identity=value.identity,
+            intent=value.intent,
+            workspace_roots_hash=value.workspace_roots_hash,
+        )
+        self._basis = collected
+        return collected
+
+    def install_member(
+        self,
+        data: DataCapability,
+        candidate: ProtocolCandidate,
+        basis: FreshMemberBasis,
+        *,
+        sample_boot_id: str | None = None,
+        sample_mono_ns: int | None = None,
+        operation_id: str | None = None,
+        projected_db_growth_bytes: int = 0,
+    ) -> OperationResult:
+        held = self._require_basis(basis)
+        return self._store.install_member(
+            data,
+            candidate,
+            basis.identity,
+            basis.intent,
+            sample_boot_id=sample_boot_id,
+            sample_mono_ns=sample_mono_ns,
+            operation_id=operation_id,
+            projected_db_growth_bytes=projected_db_growth_bytes,
+            _member_lock=held,
+        )
+
+    def bind_episode(
+        self,
+        data: DataCapability,
+        candidate: ProtocolCandidate,
+        basis: FreshMemberBasis,
+        *,
+        source: EpisodeSource,
+        operation_id: str | None = None,
+        projected_db_growth_bytes: int = 0,
+    ) -> OperationResult:
+        held = self._require_basis(basis)
+        if source.workspace_roots_hash != basis.workspace_roots_hash:
+            raise StaleAuthority(
+                "episode roots do not match the fresh member basis"
+            )
+        return self._store.bind_episode(
+            data,
+            candidate,
+            member_id=self._member_id,
+            source=source,
+            operation_id=operation_id,
+            projected_db_growth_bytes=projected_db_growth_bytes,
+            _member_lock=held,
+        )
+
+    def invalidate_requested(
+        self,
+        data: DataCapability,
+        candidate: ProtocolCandidate,
+        basis: FreshMemberBasis,
+        *,
+        expected_member_hash: str,
+        expected_effect_hash: str,
+        expected_status_hash: str,
+        operation_id: str | None = None,
+        projected_db_growth_bytes: int = 0,
+    ) -> OperationResult:
+        held = self._require_basis(basis)
+        return self._store.invalidate_requested(
+            data,
+            candidate,
+            member_id=self._member_id,
+            expected_member_hash=expected_member_hash,
+            expected_effect_hash=expected_effect_hash,
+            expected_status_hash=expected_status_hash,
+            basis=self._basis_update(basis),
+            intent=basis.intent,
+            operation_id=operation_id,
+            projected_db_growth_bytes=projected_db_growth_bytes,
+            _member_lock=held,
+        )
+
+    def set_pending(
+        self,
+        data: DataCapability,
+        candidate: ProtocolCandidate,
+        basis: FreshMemberBasis,
+        *,
+        expected_member_hash: str,
+        expected_effect_hash: str,
+        expected_status_hash: str,
+        operation_id: str | None = None,
+    ) -> OperationResult:
+        held = self._require_basis(basis)
+        return self._store.set_pending(
+            data,
+            candidate,
+            member_id=self._member_id,
+            expected_member_hash=expected_member_hash,
+            expected_effect_hash=expected_effect_hash,
+            expected_status_hash=expected_status_hash,
+            basis_hash=basis.identity.current_basis_hash,
+            intent=basis.intent,
+            operation_id=operation_id,
+            _member_lock=held,
+        )
+
+    def replace_pending(
+        self,
+        data: DataCapability,
+        candidate: ProtocolCandidate,
+        basis: FreshMemberBasis,
+        *,
+        expected_member_hash: str,
+        expected_effect_hash: str,
+        expected_status_hash: str,
+        operation_id: str | None = None,
+    ) -> OperationResult:
+        held = self._require_basis(basis)
+        return self._store.replace_pending(
+            data,
+            candidate,
+            member_id=self._member_id,
+            expected_member_hash=expected_member_hash,
+            expected_effect_hash=expected_effect_hash,
+            expected_status_hash=expected_status_hash,
+            basis_hash=basis.identity.current_basis_hash,
+            intent=basis.intent,
+            operation_id=operation_id,
+            _member_lock=held,
+        )
+
+    def handoff_resolved(
+        self,
+        data: DataCapability,
+        candidate: ProtocolCandidate,
+        basis: FreshMemberBasis,
+        *,
+        expected_member_hash: str,
+        expected_effect_hash: str,
+        expected_status_hash: str,
+        cause: str | None = None,
+        operation_id: str | None = None,
+    ) -> OperationResult:
+        held = self._require_basis(basis)
+        return self._store.handoff_resolved(
+            data,
+            candidate,
+            member_id=self._member_id,
+            expected_member_hash=expected_member_hash,
+            expected_effect_hash=expected_effect_hash,
+            expected_status_hash=expected_status_hash,
+            cause=cause,
+            basis=self._basis_update(basis),
+            intent=basis.intent,
+            operation_id=operation_id,
+            _member_lock=held,
+        )
+
+    def mark_dead_executor_unavailable(
+        self,
+        data: DataCapability,
+        candidate: ProtocolCandidate,
+        *,
+        expected_status_hash: str,
+        profile_binding: (
+            registration_profile.TypedProfileBinding | None
+        ) = None,
+        operation_id: str | None = None,
+    ) -> OperationResult | RecoveryReserveExhausted:
+        held = self._require_active()
+        return self._store.mark_dead_executor_unavailable(
+            data,
+            candidate,
+            member_id=self._member_id,
+            expected_status_hash=expected_status_hash,
+            profile_binding=profile_binding,
+            operation_id=operation_id,
+            _member_lock=held,
+        )
+
+
 class RegistrationStore:
     """One connection with a deny-by-default SQLite authorizer."""
 
@@ -860,6 +1348,21 @@ class RegistrationStore:
                 _creation_control=control,
                 _creation_lock_seal=_CREATION_LOCK_SEAL,
             )
+
+    @staticmethod
+    def _member_id(identity_value: MemberIdentity) -> str:
+        return registration_hashes.deterministic_id(
+            "awa-reg-member-v1",
+            identity_value.canonical_root,
+            str(identity_value.root_dev),
+            str(identity_value.root_ino),
+            identity_value.git_dir,
+            str(identity_value.git_dir_dev),
+            str(identity_value.git_dir_ino),
+            identity_value.git_common_dir,
+            str(identity_value.git_common_dev),
+            str(identity_value.git_common_ino),
+        )
 
     def __init__(
         self,
@@ -1311,6 +1814,56 @@ class RegistrationStore:
             yield self._connection
         finally:
             self._authorizer_local.reading = False
+
+    def member_mutation_scope(
+        self, member_id: str, timeout_seconds: float = 5.0
+    ) -> MemberMutationScope:
+        if self._closed:
+            raise AuthorizationError("registration store is closed")
+        return MemberMutationScope(
+            self,
+            member_id,
+            timeout_seconds,
+            _seal=_MEMBER_SCOPE_SEAL,
+        )
+
+    def _validate_member_lock(
+        self,
+        member_id: str,
+        held: registration_lock.HeldLock,
+    ) -> None:
+        _require_hash(member_id, "member_id")
+        expected_key = f"member-{member_id}.lock"
+        expected_path = self._locks.directory / expected_key
+        if (
+            type(held) is not registration_lock.HeldLock
+            or held.kind != "member"
+            or held.key != expected_key
+            or held.path != expected_path
+            or held.process_lock
+            is not registration_lock._process_lock(str(expected_path))
+            or not held.process_lock.locked()
+            or registration_lock._held()["member"] != expected_key
+            or not held.held
+        ):
+            raise AuthorizationError(
+                "member lock does not belong to this store and member"
+            )
+        held.verify()
+
+    @contextmanager
+    def _member_lock_scope(
+        self,
+        member_id: str,
+        held: registration_lock.HeldLock | None,
+    ) -> Iterator[registration_lock.HeldLock]:
+        if held is None:
+            with self._locks.acquire_member(member_id) as acquired:
+                self._validate_member_lock(member_id, acquired)
+                yield acquired
+            return
+        self._validate_member_lock(member_id, held)
+        yield held
 
     def _begin(self) -> int:
         self._fault("before_begin")
@@ -3604,21 +4157,10 @@ class RegistrationStore:
         if (sample_boot_id is None) != (sample_mono_ns is None):
             raise ValueError("expected sample must be supplied as one pair")
         operation_id = operation_id or self._operation_ids()
-        member_id = registration_hashes.deterministic_id(
-            "awa-reg-member-v1",
-            identity.canonical_root,
-            str(identity.root_dev),
-            str(identity.root_ino),
-            identity.git_dir,
-            str(identity.git_dir_dev),
-            str(identity.git_dir_ino),
-            identity.git_common_dir,
-            str(identity.git_common_dev),
-            str(identity.git_common_ino),
-        )
+        member_id = self._member_id(identity)
         if _member_lock is None:
             with self._locks.acquire_member(member_id) as held:
-                held.verify()
+                self._validate_member_lock(member_id, held)
                 return self.install_member(
                     data,
                     candidate,
@@ -3630,7 +4172,7 @@ class RegistrationStore:
                     projected_db_growth_bytes=projected_db_growth_bytes,
                     _member_lock=held,
                 )
-        _member_lock.verify()
+        self._validate_member_lock(member_id, _member_lock)
         subject_key = registration_hashes.deterministic_id(
             "awa-reg-status-subject-v4", member_id
         )
@@ -3968,6 +4510,7 @@ class RegistrationStore:
         source: EpisodeSource,
         operation_id: str | None = None,
         projected_db_growth_bytes: int = 0,
+        _member_lock: registration_lock.HeldLock | None = None,
     ) -> OperationResult:
         _require_int(
             projected_db_growth_bytes,
@@ -3978,7 +4521,7 @@ class RegistrationStore:
         current = self._require_current_candidate(candidate, mode="WRITABLE")
         _require_hash(member_id, "member_id")
         operation_id = operation_id or self._operation_ids()
-        with self._locks.acquire_member(member_id) as held:
+        with self._member_lock_scope(member_id, _member_lock) as held:
             held.verify()
             with self._write_scope(
                 {
@@ -4146,6 +4689,7 @@ class RegistrationStore:
         intent: EffectIntent,
         operation_id: str | None = None,
         projected_db_growth_bytes: int = 0,
+        _member_lock: registration_lock.HeldLock | None = None,
     ) -> OperationResult:
         _require_int(
             projected_db_growth_bytes,
@@ -4157,7 +4701,7 @@ class RegistrationStore:
         if basis.current_basis_hash != intent.request_basis_hash:
             raise ValueError("successor basis/effect mismatch")
         operation_id = operation_id or self._operation_ids()
-        with self._locks.acquire_member(member_id) as held:
+        with self._member_lock_scope(member_id, _member_lock) as held:
             held.verify()
             with self._write_scope(
                 {
@@ -4430,6 +4974,7 @@ class RegistrationStore:
         basis_hash: str,
         intent: EffectIntent,
         operation_id: str | None = None,
+        _member_lock: registration_lock.HeldLock | None = None,
     ) -> OperationResult:
         return self._change_pending(
             data,
@@ -4442,6 +4987,7 @@ class RegistrationStore:
             intent=intent,
             replace=False,
             operation_id=operation_id,
+            _member_lock=_member_lock,
         )
 
     def replace_pending(
@@ -4456,6 +5002,7 @@ class RegistrationStore:
         basis_hash: str,
         intent: EffectIntent,
         operation_id: str | None = None,
+        _member_lock: registration_lock.HeldLock | None = None,
     ) -> OperationResult:
         return self._change_pending(
             data,
@@ -4468,6 +5015,7 @@ class RegistrationStore:
             intent=intent,
             replace=True,
             operation_id=operation_id,
+            _member_lock=_member_lock,
         )
 
     def _change_pending(
@@ -4483,6 +5031,7 @@ class RegistrationStore:
         intent: EffectIntent,
         replace: bool,
         operation_id: str | None,
+        _member_lock: registration_lock.HeldLock | None,
     ) -> OperationResult:
         self._require_data(data, candidate)
         self._require_current_candidate(candidate, mode="WRITABLE")
@@ -4491,7 +5040,7 @@ class RegistrationStore:
             raise ValueError("pending basis/effect mismatch")
         operation_kind = "REPLACE_PENDING" if replace else "SET_PENDING"
         operation_id = operation_id or self._operation_ids()
-        with self._locks.acquire_member(member_id) as held:
+        with self._member_lock_scope(member_id, _member_lock) as held:
             held.verify()
             with self._write_scope(
                 {
@@ -4769,6 +5318,7 @@ class RegistrationStore:
         basis: BasisUpdate | None = None,
         intent: EffectIntent | None = None,
         operation_id: str | None = None,
+        _member_lock: registration_lock.HeldLock | None = None,
     ) -> OperationResult:
         self._require_data(data, candidate)
         self._require_current_candidate(candidate, mode="WRITABLE")
@@ -4780,7 +5330,7 @@ class RegistrationStore:
         }:
             raise ValueError("invalid handoff cause")
         operation_id = operation_id or self._operation_ids()
-        with self._locks.acquire_member(member_id) as held:
+        with self._member_lock_scope(member_id, _member_lock) as held:
             held.verify()
             with self._write_scope(
                 {
@@ -6846,6 +7396,7 @@ class RegistrationStore:
             registration_profile.TypedProfileBinding | None
         ) = None,
         operation_id: str | None = None,
+        _member_lock: registration_lock.HeldLock | None = None,
     ) -> OperationResult | RecoveryReserveExhausted:
         """Member-lock takeover after same-boot executor process death."""
         _current, staged_recovery = self._require_recovery_candidate(
@@ -6855,7 +7406,7 @@ class RegistrationStore:
             candidate, staged_recovery, profile_binding
         )
         operation_id = operation_id or self._operation_ids()
-        with self._locks.acquire_member(member_id) as held:
+        with self._member_lock_scope(member_id, _member_lock) as held:
             held.verify()
             with self._write_scope(
                 {
@@ -9411,6 +9962,319 @@ class RegistrationStore:
             ).fetchone()
             is not None
         )
+
+    def _selector_universes_tx(
+        self,
+        *,
+        boot_id: str,
+        now_mono_ns: int | None,
+    ) -> tuple[
+        ValidatedProtocol,
+        tuple[str, ...],
+        tuple[str, ...],
+        tuple[str, ...],
+        dict[str, SelectedAuthority],
+    ]:
+        protocol_row = self._connection.execute(
+            "SELECT * FROM registration_protocol_epoch "
+            "ORDER BY protocol_seq DESC LIMIT 1"
+        ).fetchone()
+        if protocol_row is None:
+            raise StoreUnavailable(
+                "candidate selector has no current protocol"
+            )
+        protocol = self._validate_protocol_row(protocol_row)
+        same_boot_ids = tuple(
+            row["member_id"]
+            for row in self._connection.execute(
+                "SELECT s.member_id "
+                "FROM registration_runtime_status s "
+                "WHERE s.executor_token_hash IS NOT NULL "
+                "AND s.executor_generation IS NOT NULL "
+                "AND s.executor_boot_id=? "
+                "ORDER BY s.member_id",
+                (boot_id,),
+            ).fetchall()
+        )
+        due_ids: tuple[str, ...] = ()
+        reboot_ids: tuple[str, ...] = ()
+        if now_mono_ns is not None:
+            due_ids = tuple(
+                row["member_id"]
+                for row in self._connection.execute(
+                    "SELECT s.member_id "
+                    "FROM registration_runtime_status s "
+                    "WHERE s.schedule_boot_id=? "
+                    "AND s.next_due_mono_ns<=? "
+                    "AND s.executor_token_hash IS NULL "
+                    "ORDER BY s.member_id",
+                    (boot_id, now_mono_ns),
+                ).fetchall()
+            )
+            reboot_ids = tuple(
+                row["member_id"]
+                for row in self._connection.execute(
+                    "SELECT s.member_id "
+                    "FROM registration_runtime_status s "
+                    "WHERE (s.executor_token_hash IS NOT NULL "
+                    "AND s.executor_boot_id<>?) "
+                    "OR (s.executor_token_hash IS NULL "
+                    "AND s.schedule_boot_id IS NOT NULL "
+                    "AND s.schedule_boot_id<>?) "
+                    "ORDER BY s.member_id",
+                    (boot_id, boot_id),
+                ).fetchall()
+            )
+        authorities: dict[str, SelectedAuthority] = {}
+        for member_id in sorted(
+            set(same_boot_ids) | set(due_ids) | set(reboot_ids)
+        ):
+            authority = self._validate_semantic_closure_tx(
+                member_id, episode_id=None
+            )
+            if authority is None:
+                self._semantic_failure(
+                    "candidate semantic closure is absent"
+                )
+            assert authority is not None
+            if (
+                authority.protocol["protocol_seq"]
+                != protocol["protocol_seq"]
+                or authority.protocol["protocol_hash"]
+                != protocol["protocol_hash"]
+            ):
+                self._semantic_failure(
+                    "candidate protocol snapshot changed"
+                )
+            authorities[member_id] = authority
+        return (
+            protocol,
+            same_boot_ids,
+            due_ids,
+            reboot_ids,
+            authorities,
+        )
+
+    @staticmethod
+    def _same_boot_value(
+        authority: SelectedAuthority, *, boot_id: str
+    ) -> SameBootCandidate:
+        member = authority.member
+        effect = authority.effect
+        status = authority.status
+        if (
+            member["phase"] != "EFFECT_IN_FLIGHT"
+            or effect["outcome_kind"] is not None
+            or status["executor_token_hash"] is None
+            or status["executor_generation"] is None
+            or status["executor_boot_id"] != boot_id
+        ):
+            raise SemanticClosureError(
+                "same-boot candidate changed inside the snapshot"
+            )
+        return SameBootCandidate(
+            member_id=member["member_id"],
+            status_hash=status["status_hash"],
+            executor_token_hash=status["executor_token_hash"],
+            executor_generation=status["executor_generation"],
+        )
+
+    @staticmethod
+    def _due_value(
+        authority: SelectedAuthority,
+        *,
+        boot_id: str,
+        now_mono_ns: int,
+    ) -> DueCandidate:
+        member = authority.member
+        effect = authority.effect
+        status = authority.status
+        if (
+            status["schedule_boot_id"] != boot_id
+            or status["next_due_mono_ns"] is None
+            or status["next_due_mono_ns"] > now_mono_ns
+            or status["executor_token_hash"] is not None
+        ):
+            raise SemanticClosureError(
+                "due candidate changed inside the snapshot"
+            )
+        return DueCandidate(
+            member_id=member["member_id"],
+            member_epoch=member["member_epoch"],
+            phase=member["phase"],
+            effect_id=member["current_effect_id"],
+            member_tuple_hash=member["member_tuple_hash"],
+            effect_tuple_hash=effect["request_tuple_hash"],
+            status_hash=status["status_hash"],
+            current_basis_hash=member["current_basis_hash"],
+            pending_basis_hash=member["pending_basis_hash"],
+            due_since_mono_ns=status["due_since_mono_ns"],
+            observed_now_mono_ns=status["observed_now_mono_ns"],
+        )
+
+    @staticmethod
+    def _reboot_value(
+        authority: SelectedAuthority, *, boot_id: str
+    ) -> RebootCandidate:
+        member = authority.member
+        status = authority.status
+        stored_boot_id = (
+            status["executor_boot_id"]
+            if status["executor_token_hash"] is not None
+            else status["schedule_boot_id"]
+        )
+        if stored_boot_id is None or stored_boot_id == boot_id:
+            raise SemanticClosureError(
+                "reboot candidate changed inside the snapshot"
+            )
+        return RebootCandidate(
+            member_id=member["member_id"],
+            phase=member["phase"],
+            effect_id=member["current_effect_id"],
+            status_hash=status["status_hash"],
+            stored_boot_id=stored_boot_id,
+        )
+
+    def _rollback_selector_tx(self, selector: str) -> None:
+        if not self._connection.in_transaction:
+            return
+        try:
+            self._connection.execute("ROLLBACK")
+        except sqlite3.Error as error:
+            raise StoreUnavailable(
+                f"{selector} rollback is unavailable"
+            ) from error
+
+    def select_same_boot_snapshot(
+        self, *, boot_id: str
+    ) -> SameBootSnapshot:
+        if not isinstance(boot_id, str) or not boot_id:
+            raise ValueError("boot_id is required")
+        with self._read_scope():
+            try:
+                self._connection.execute("BEGIN")
+                (
+                    protocol,
+                    same_boot_ids,
+                    _due_ids,
+                    _reboot_ids,
+                    authorities,
+                ) = self._selector_universes_tx(
+                    boot_id=boot_id,
+                    now_mono_ns=None,
+                )
+                result = SameBootSnapshot(
+                    boot_id=boot_id,
+                    protocol_seq=protocol["protocol_seq"],
+                    protocol_hash=protocol["protocol_hash"],
+                    candidates=tuple(
+                        self._same_boot_value(
+                            authorities[member_id],
+                            boot_id=boot_id,
+                        )
+                        for member_id in same_boot_ids
+                    ),
+                )
+                self._connection.execute("COMMIT")
+                return result
+            except StoreUnavailable:
+                self._rollback_selector_tx("same-boot snapshot")
+                raise
+            except sqlite3.Error as error:
+                self._rollback_selector_tx("same-boot snapshot")
+                raise StoreUnavailable(
+                    "same-boot snapshot is unavailable"
+                ) from error
+            except Exception as error:
+                self._rollback_selector_tx("same-boot snapshot")
+                raise StoreUnavailable(
+                    "same-boot snapshot is malformed"
+                ) from error
+
+    def select_r1_scope(
+        self,
+        authorized_member_id: str,
+        boot_id: str,
+        now_mono_ns: int,
+    ) -> R1ScopeSelection:
+        _require_hash(authorized_member_id, "authorized_member_id")
+        if (
+            not isinstance(boot_id, str)
+            or not boot_id
+            or type(now_mono_ns) is not int
+            or now_mono_ns < 0
+        ):
+            raise ValueError("invalid R1 scope selector")
+        with self._read_scope():
+            try:
+                self._connection.execute("BEGIN")
+                (
+                    _protocol,
+                    same_boot_ids,
+                    due_ids,
+                    reboot_ids,
+                    authorities,
+                ) = self._selector_universes_tx(
+                    boot_id=boot_id,
+                    now_mono_ns=now_mono_ns,
+                )
+                authorized_same_boot = (
+                    self._same_boot_value(
+                        authorities[authorized_member_id],
+                        boot_id=boot_id,
+                    )
+                    if authorized_member_id in same_boot_ids
+                    else None
+                )
+                authorized_due = (
+                    self._due_value(
+                        authorities[authorized_member_id],
+                        boot_id=boot_id,
+                        now_mono_ns=now_mono_ns,
+                    )
+                    if authorized_member_id in due_ids
+                    else None
+                )
+                authorized_reboot = (
+                    self._reboot_value(
+                        authorities[authorized_member_id],
+                        boot_id=boot_id,
+                    )
+                    if authorized_member_id in reboot_ids
+                    else None
+                )
+                result = R1ScopeSelection(
+                    authorized_same_boot=authorized_same_boot,
+                    authorized_due=authorized_due,
+                    authorized_reboot=authorized_reboot,
+                    outside_scope_same_boot=any(
+                        member_id != authorized_member_id
+                        for member_id in same_boot_ids
+                    ),
+                    outside_scope_due=any(
+                        member_id != authorized_member_id
+                        for member_id in due_ids
+                    ),
+                    outside_scope_reboot=any(
+                        member_id != authorized_member_id
+                        for member_id in reboot_ids
+                    ),
+                )
+                self._connection.execute("COMMIT")
+                return result
+            except StoreUnavailable:
+                self._rollback_selector_tx("R1 scope selection")
+                raise
+            except sqlite3.Error as error:
+                self._rollback_selector_tx("R1 scope selection")
+                raise StoreUnavailable(
+                    "R1 scope selection is unavailable"
+                ) from error
+            except Exception as error:
+                self._rollback_selector_tx("R1 scope selection")
+                raise StoreUnavailable(
+                    "R1 scope selection is malformed"
+                ) from error
 
     def list_due_candidates(
         self, *, boot_id: str, now_mono_ns: int, limit: int = 8
