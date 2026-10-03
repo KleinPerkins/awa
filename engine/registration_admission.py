@@ -14,6 +14,9 @@ from .registration_schema import SCHEMA_SHA256
 
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+MAX_EVENT_JSON_BYTES = 65_536
+MAX_EVENT_JSON_DEPTH = 16
+MAX_EVENT_JSON_NODES = 512
 _TOP_LEVEL_KEYS = frozenset(
     {
         "hook_event_name",
@@ -267,7 +270,41 @@ def _one_string(
     return str(values[0])
 
 
+def _scan_object_shape(value: object) -> None:
+    """Apply the JSON shape budget to an already-decoded event."""
+    nodes = 0
+    stack = [(value, 1)]
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if nodes > MAX_EVENT_JSON_NODES:
+            raise EventRefused("PARSER_REJECT")
+        if isinstance(current, dict):
+            if depth > MAX_EVENT_JSON_DEPTH:
+                raise EventRefused("PARSER_REJECT")
+            if (
+                nodes + len(stack) + (2 * len(current))
+                > MAX_EVENT_JSON_NODES
+            ):
+                raise EventRefused("PARSER_REJECT")
+            for key, item in current.items():
+                stack.append((item, depth + 1))
+                stack.append((key, depth + 1))
+        elif isinstance(current, list):
+            if depth > MAX_EVENT_JSON_DEPTH:
+                raise EventRefused("PARSER_REJECT")
+            if (
+                nodes + len(stack) + len(current)
+                > MAX_EVENT_JSON_NODES
+            ):
+                raise EventRefused("PARSER_REJECT")
+            stack.extend(
+                (item, depth + 1) for item in reversed(current)
+            )
+
+
 def parse_registration_event(value: object) -> RegistrationEvent:
+    _scan_object_shape(value)
     sources = _sources(value)
     top = sources[0]
     if not all(
@@ -365,8 +402,66 @@ def parse_registration_event(value: object) -> RegistrationEvent:
     )
 
 
+def _scan_json_shape(raw: bytes) -> None:
+    """Reject excessive JSON shape without constructing a recursive tree."""
+    depth = 0
+    nodes = 0
+    index = 0
+    length = len(raw)
+    while index < length:
+        byte = raw[index]
+        if byte in b" \t\r\n,:":  # structural separators and whitespace
+            index += 1
+            continue
+        if byte in b"{[":
+            depth += 1
+            nodes += 1
+            if (
+                depth > MAX_EVENT_JSON_DEPTH
+                or nodes > MAX_EVENT_JSON_NODES
+            ):
+                raise EventRefused("PARSER_REJECT")
+            index += 1
+            continue
+        if byte in b"}]":
+            depth -= 1
+            if depth < 0:
+                raise EventRefused("PARSER_REJECT")
+            index += 1
+            continue
+        nodes += 1
+        if nodes > MAX_EVENT_JSON_NODES:
+            raise EventRefused("PARSER_REJECT")
+        if byte == 0x22:
+            index += 1
+            escaped = False
+            while index < length:
+                current = raw[index]
+                if escaped:
+                    escaped = False
+                elif current == 0x5C:
+                    escaped = True
+                elif current == 0x22:
+                    index += 1
+                    break
+                index += 1
+            else:
+                raise EventRefused("PARSER_REJECT")
+            continue
+        while (
+            index < length
+            and raw[index] not in b" \t\r\n,]}:"
+        ):
+            index += 1
+    if depth != 0:
+        raise EventRefused("PARSER_REJECT")
+
+
 def parse_registration_event_bytes(raw: bytes) -> RegistrationEvent:
-    if not isinstance(raw, bytes) or not 1 <= len(raw) <= 65_536:
+    if (
+        not isinstance(raw, bytes)
+        or not 1 <= len(raw) <= MAX_EVENT_JSON_BYTES
+    ):
         raise EventRefused("PARSER_REJECT")
 
     def pairs(items):
@@ -378,6 +473,7 @@ def parse_registration_event_bytes(raw: bytes) -> RegistrationEvent:
         return value
 
     try:
+        _scan_json_shape(raw)
         value = json.loads(
             raw.decode("utf-8", "strict"),
             object_pairs_hook=pairs,
@@ -387,7 +483,14 @@ def parse_registration_event_bytes(raw: bytes) -> RegistrationEvent:
         )
     except EventRefused:
         raise
-    except (UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (
+        UnicodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        RecursionError,
+        MemoryError,
+    ) as exc:
         raise EventRefused("PARSER_REJECT") from exc
     return parse_registration_event(value)
 

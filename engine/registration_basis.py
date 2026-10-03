@@ -67,6 +67,16 @@ class GitBasisCollector:
     ) -> registration_admission.BasisSample:
         return self.collect_observation(event).basis_sample
 
+    def collect_fresh_basis(
+        self, event: registration_admission.RegistrationEvent
+    ) -> registration_store.FreshMemberBasis:
+        observation = self.collect_observation(event)
+        return registration_store.FreshMemberBasis(
+            identity=observation.identity,
+            intent=registration_runtime._intent(observation),
+            workspace_roots_hash=observation.workspace_roots_hash,
+        )
+
     def collect_observation(
         self, event: registration_admission.RegistrationEvent
     ) -> registration_runtime.BasisObservation:
@@ -233,6 +243,7 @@ class GitBasisCollector:
             request_kind=request_kind,
             workspace_roots_hash=workspace_hash,
             blocked_basis_fingerprint=fingerprint,
+            fresh_provider=lambda: self.collect_observation(event),
         )
 
     def _require_policy(self, identity_value, deadline: float) -> None:

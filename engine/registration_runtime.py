@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import multiprocessing
 import os
 import secrets
 import sqlite3
 import stat
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 
 from . import (
     lifecycle,
@@ -18,6 +19,7 @@ from . import (
     registration_admission,
     registration_hashes,
     registration_jcs,
+    registration_lock,
     registration_store,
 )
 
@@ -33,6 +35,152 @@ TICK_LANES = 8
 OPEN_SLICE_SECONDS = 0.125
 HELPER_DEADLINE_SECONDS = 2.0
 SERVICE_BUDGET_SECONDS = 5.0
+SAME_BOOT_SNAPSHOT_SCHEMA = "awa-registration-same-boot-snapshot/v1"
+SAME_BOOT_CURSOR_SCHEMA = "awa-registration-same-boot-cursor/v1"
+SAME_BOOT_OUTCOMES = frozenset(
+    {
+        "BUSY_LIVE",
+        "CLEARED",
+        "RECOVERED",
+        "NO_LONGER_CANDIDATE",
+    }
+)
+
+
+def _hex64(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _domain_jcs_hash(domain: str, value: object) -> str:
+    return hashlib.sha256(
+        domain.encode("ascii")
+        + b"\0"
+        + registration_jcs.canonical_bytes(
+            value, enforce_privacy=False
+        )
+    ).hexdigest()
+
+
+class RecoveryContainmentUnavailable(RuntimeError):
+    reason = "CONTAINMENT_UNAVAILABLE"
+
+    def __init__(
+        self, evidence: registration_store.RecoveryReserveExhausted
+    ) -> None:
+        if not isinstance(
+            evidence, registration_store.RecoveryReserveExhausted
+        ):
+            raise TypeError("recovery evidence must be store-authenticated")
+        super().__init__(self.reason)
+        self.evidence = evidence
+
+
+class R1ScopeRefused(RuntimeError):
+    def __init__(
+        self, selection: registration_store.R1ScopeSelection
+    ) -> None:
+        super().__init__("R1 tick scope contains another member")
+        self.selection = selection
+
+
+_R1_TICK_SCOPE_SEAL = object()
+
+
+@dataclass(frozen=True)
+class R1TickScope:
+    """One atomic R1 observation shared across all Body B tick lanes."""
+
+    authorized_member_id: str
+    boot_id: str
+    now_mono_ns: int
+    selection: registration_store.R1ScopeSelection
+    _store_identity: int = field(repr=False)
+    _seal: object = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._seal is not _R1_TICK_SCOPE_SEAL:
+            raise TypeError("R1 tick scope must come from Body B preflight")
+        if not _hex64(self.authorized_member_id):
+            raise ValueError("authorized_member_id must be lowercase 64-hex")
+        if not isinstance(self.boot_id, str) or not self.boot_id:
+            raise ValueError("boot_id must be nonempty")
+        if type(self.now_mono_ns) is not int or self.now_mono_ns < 0:
+            raise ValueError("now_mono_ns must be a nonnegative integer")
+        if type(self.selection) is not registration_store.R1ScopeSelection:
+            raise TypeError("R1 selection has the wrong type")
+        for candidate in (
+            self.selection.authorized_same_boot,
+            self.selection.authorized_due,
+            self.selection.authorized_reboot,
+        ):
+            if (
+                candidate is not None
+                and candidate.member_id != self.authorized_member_id
+            ):
+                raise registration_store.StoreUnavailable(
+                    "R1 selector returned another authorized member"
+                )
+
+    def __reduce__(self) -> object:
+        raise TypeError("R1 tick scope is process-local")
+
+    def __reduce_ex__(self, _protocol: int) -> object:
+        raise TypeError("R1 tick scope is process-local")
+
+
+def _select_r1_tick_scope(
+    store: registration_store.RegistrationStore,
+    *,
+    authorized_member_id: str,
+    boot_id: str,
+    now_mono_ns: int,
+) -> R1TickScope:
+    selection = store.select_r1_scope(
+        authorized_member_id,
+        boot_id,
+        now_mono_ns,
+    )
+    if (
+        selection.outside_scope_same_boot
+        or selection.outside_scope_due
+        or selection.outside_scope_reboot
+    ):
+        raise R1ScopeRefused(selection)
+    return R1TickScope(
+        authorized_member_id=authorized_member_id,
+        boot_id=boot_id,
+        now_mono_ns=now_mono_ns,
+        selection=selection,
+        _store_identity=id(store),
+        _seal=_R1_TICK_SCOPE_SEAL,
+    )
+
+
+def _require_r1_tick_scope(
+    scope: R1TickScope,
+    store: registration_store.RegistrationStore,
+    *,
+    boot_id: str,
+    now_mono_ns: int | None = None,
+) -> registration_store.R1ScopeSelection:
+    if (
+        type(scope) is not R1TickScope
+        or scope._seal is not _R1_TICK_SCOPE_SEAL
+        or scope._store_identity != id(store)
+        or scope.boot_id != boot_id
+        or (
+            now_mono_ns is not None
+            and scope.now_mono_ns != now_mono_ns
+        )
+    ):
+        raise registration_store.StaleAuthority(
+            "R1 tick scope does not match this tick"
+        )
+    return scope.selection
 
 
 @dataclass(frozen=True)
@@ -41,6 +189,13 @@ class BasisObservation:
     request_kind: str
     workspace_roots_hash: str
     blocked_basis_fingerprint: str | None
+    fresh_provider: (
+        Callable[
+            [],
+            BasisObservation | registration_store.FreshMemberBasis,
+        ]
+        | None
+    ) = field(default=None, compare=False, repr=False)
 
     @classmethod
     def from_identity(
@@ -50,6 +205,13 @@ class BasisObservation:
         request_kind: str,
         workspace_roots_hash: str,
         blocked_basis_fingerprint: str | None = None,
+        fresh_provider: (
+            Callable[
+                [],
+                BasisObservation | registration_store.FreshMemberBasis,
+            ]
+            | None
+        ) = None,
     ) -> "BasisObservation":
         if request_kind not in {
             "CLEAN_ELIGIBLE",
@@ -70,6 +232,7 @@ class BasisObservation:
             request_kind=request_kind,
             workspace_roots_hash=workspace_roots_hash,
             blocked_basis_fingerprint=blocked_basis_fingerprint,
+            fresh_provider=fresh_provider,
         )
 
     @property
@@ -97,6 +260,14 @@ class BasisObservation:
             policy_basis_hash=self.identity.policy_basis_hash,
             operation_basis_hash=self.identity.operation_basis_hash,
             lifecycle_basis_hash=self.identity.lifecycle_basis_hash,
+            workspace_roots_hash=self.workspace_roots_hash,
+        )
+
+    @property
+    def fresh_member_basis(self) -> registration_store.FreshMemberBasis:
+        return registration_store.FreshMemberBasis(
+            identity=self.identity,
+            intent=_intent(self),
             workspace_roots_hash=self.workspace_roots_hash,
         )
 
@@ -146,6 +317,189 @@ class TickReceipt:
 class TickRecovery:
     recovered_member_ids: tuple[str, ...]
     unavailable_member_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SameBootCursor:
+    boot_id: str
+    protocol_seq: int
+    protocol_hash: str
+    selection_snapshot_hash: str
+    last_member_id: str | None
+    last_pre_status_hash: str | None
+    last_post_status_hash: str | None
+    outcome: str | None
+    batch_count: int
+    wrapped: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.boot_id, str) or not self.boot_id:
+            raise ValueError("cursor boot_id must be nonempty")
+        if type(self.protocol_seq) is not int or self.protocol_seq < 1:
+            raise ValueError("cursor protocol_seq must be positive")
+        for field in ("protocol_hash", "selection_snapshot_hash"):
+            if not _hex64(getattr(self, field)):
+                raise ValueError(f"{field} must be lowercase 64-hex")
+        if type(self.batch_count) is not int:
+            raise ValueError("cursor batch_count must be an integer")
+        if type(self.wrapped) is not bool:
+            raise ValueError("cursor wrapped must be a boolean")
+        nullable = (
+            self.last_member_id,
+            self.last_pre_status_hash,
+            self.last_post_status_hash,
+            self.outcome,
+        )
+        if all(value is None for value in nullable):
+            if self.batch_count != 0 or self.wrapped:
+                raise ValueError("empty cursor fields are inconsistent")
+            return
+        if any(value is None for value in nullable):
+            raise ValueError("nonempty cursor fields may not be null")
+        for field in (
+            "last_member_id",
+            "last_pre_status_hash",
+            "last_post_status_hash",
+        ):
+            if not _hex64(getattr(self, field)):
+                raise ValueError(f"{field} must be lowercase 64-hex")
+        if self.outcome not in SAME_BOOT_OUTCOMES:
+            raise ValueError("unknown same-boot cursor outcome")
+        if not 1 <= self.batch_count <= TICK_LANES:
+            raise ValueError("cursor batch_count must be between one and eight")
+
+    def as_value(self) -> dict[str, object]:
+        return {
+            "schema": SAME_BOOT_CURSOR_SCHEMA,
+            "boot_id": self.boot_id,
+            "protocol_seq": str(self.protocol_seq),
+            "protocol_hash": self.protocol_hash,
+            "selection_snapshot_hash": self.selection_snapshot_hash,
+            "last_member_id": self.last_member_id,
+            "last_pre_status_hash": self.last_pre_status_hash,
+            "last_post_status_hash": self.last_post_status_hash,
+            "outcome": self.outcome,
+            "batch_count": str(self.batch_count),
+            "wrapped": self.wrapped,
+        }
+
+
+@dataclass(frozen=True)
+class SameBootSelection:
+    candidates: tuple[registration_store.SameBootCandidate, ...]
+    wrapped: bool
+    restarted: bool
+
+
+@dataclass(frozen=True)
+class SameBootExamined:
+    member_id: str
+    pre_status_hash: str
+    post_status_hash: str
+    outcome: str
+
+
+@dataclass(frozen=True)
+class SameBootRecoveryBatch:
+    cursor: SameBootCursor
+    examined: tuple[SameBootExamined, ...]
+
+
+def same_boot_snapshot_value(
+    snapshot: registration_store.SameBootSnapshot,
+) -> dict[str, object]:
+    if not isinstance(snapshot, registration_store.SameBootSnapshot):
+        raise TypeError("same-boot snapshot has the wrong type")
+    return {
+        "schema": SAME_BOOT_SNAPSHOT_SCHEMA,
+        "boot_id": snapshot.boot_id,
+        "protocol_seq": str(snapshot.protocol_seq),
+        "protocol_hash": snapshot.protocol_hash,
+        "candidates": [
+            {
+                "member_id": candidate.member_id,
+                "status_hash": candidate.status_hash,
+                "executor_token_hash": candidate.executor_token_hash,
+                "executor_generation": str(
+                    candidate.executor_generation
+                ),
+            }
+            for candidate in snapshot.candidates
+        ],
+    }
+
+
+def same_boot_snapshot_hash(
+    snapshot: registration_store.SameBootSnapshot,
+) -> str:
+    return _domain_jcs_hash(
+        SAME_BOOT_SNAPSHOT_SCHEMA,
+        same_boot_snapshot_value(snapshot),
+    )
+
+
+def same_boot_cursor_hash(cursor: SameBootCursor) -> str:
+    if not isinstance(cursor, SameBootCursor):
+        raise TypeError("same-boot cursor has the wrong type")
+    return _domain_jcs_hash(SAME_BOOT_CURSOR_SCHEMA, cursor.as_value())
+
+
+def select_same_boot_batch(
+    snapshot: registration_store.SameBootSnapshot,
+    cursor: SameBootCursor | None,
+) -> SameBootSelection:
+    if not isinstance(snapshot, registration_store.SameBootSnapshot):
+        raise TypeError("same-boot snapshot has the wrong type")
+    if cursor is not None and not isinstance(cursor, SameBootCursor):
+        raise TypeError("same-boot cursor has the wrong type")
+    candidates = snapshot.candidates
+    restarted = cursor is None
+    if cursor is not None:
+        current = (
+            cursor.boot_id == snapshot.boot_id
+            and cursor.protocol_seq == snapshot.protocol_seq
+            and cursor.protocol_hash == snapshot.protocol_hash
+            and cursor.last_member_id is not None
+        )
+        by_member = {
+            candidate.member_id: candidate for candidate in candidates
+        }
+        boundary = by_member.get(cursor.last_member_id or "")
+        if boundary is not None:
+            current = (
+                current
+                and boundary.status_hash == cursor.last_post_status_hash
+            )
+        else:
+            current = (
+                current
+                and cursor.outcome == "NO_LONGER_CANDIDATE"
+            )
+        if current:
+            remaining = tuple(
+                candidate
+                for candidate in candidates
+                if candidate.member_id > (cursor.last_member_id or "")
+            )
+            if remaining:
+                return SameBootSelection(
+                    remaining[:TICK_LANES],
+                    cursor.wrapped,
+                    False,
+                )
+            if cursor.wrapped:
+                return SameBootSelection((), True, False)
+            return SameBootSelection(
+                candidates[:TICK_LANES],
+                True,
+                False,
+            )
+        restarted = True
+    return SameBootSelection(
+        candidates[:TICK_LANES],
+        False,
+        restarted,
+    )
 
 
 @dataclass(frozen=True)
@@ -463,6 +817,17 @@ def _intent(
     )
 
 
+def _fresh_basis_from_provider(provider) -> registration_store.FreshMemberBasis:
+    value = provider()
+    if type(value) is registration_store.FreshMemberBasis:
+        return value
+    if type(value) is not BasisObservation:
+        raise registration_store.StaleAuthority(
+            "fresh-basis provider returned the wrong type"
+        )
+    return value.fresh_member_basis
+
+
 class RegistrationCoordinator:
     def __init__(
         self,
@@ -479,147 +844,173 @@ class RegistrationCoordinator:
         self,
         event: registration_admission.RegistrationEvent,
         observation: BasisObservation,
+        *,
+        fresh_provider=None,
     ) -> RegistrationHandle:
         if observation.identity.canonical_root != event.root:
             raise registration_admission.EventRefused("ROOT_UNSUPPORTED")
-        intent = _intent(observation)
-        member_id = self.store.find_member_id(observation.identity)
-        if member_id is None:
-            self.store.install_member(
-                self.data,
-                self.candidate,
-                observation.identity,
-                intent,
-            )
-            member_id = derive_member_id(observation.identity)
-        protocol = self.store.current_protocol()
-        if protocol is None:
-            raise registration_store.StoreUnavailable(
-                "protocol authority missing"
-            )
-        episode_id = registration_hashes.deterministic_id(
-            "awa-reg-episode-v1",
-            event.conversation_id,
-            event.generation_id,
-            event.source_contract,
-            event.source_event,
-            str(protocol["protocol_generation"]),
-            member_id,
-            observation.workspace_roots_hash,
-            protocol["tool_inventory_hash"],
-            protocol["hook_projection_hash"],
+        member_id = derive_member_id(observation.identity)
+        provider = (
+            fresh_provider
+            if fresh_provider is not None
+            else observation.fresh_provider
         )
-        if not self.store.episode_exists(member_id, episode_id):
-            self.store.bind_episode(
-                self.data,
-                self.candidate,
-                member_id=member_id,
-                source=registration_store.EpisodeSource(
-                    event.conversation_id,
-                    event.generation_id,
-                    event.source_contract,
-                    event.source_event,
-                    observation.workspace_roots_hash,
-                ),
+        if not callable(provider):
+            raise registration_store.StaleAuthority(
+                "fresh-basis provider is required"
             )
-        authority = self.store.read_selected_authority(
-            member_id, episode_id=episode_id
-        )
-        if authority is None:
-            raise registration_store.StoreUnavailable(
-                "member authority missing after bind"
+        with self.store.member_mutation_scope(member_id) as scope:
+            basis = scope.collect_fresh_basis(
+                lambda: _fresh_basis_from_provider(provider)
             )
-        member = authority.member
-        if (
-            member["phase"] == "RESOLVED"
-            and member["pending_effect_id"] is not None
-        ):
-            self.store.handoff_resolved(
-                self.data,
-                self.candidate,
-                member_id=member_id,
-                expected_member_hash=member["member_tuple_hash"],
-                expected_effect_hash=authority.effect[
-                    "outcome_tuple_hash"
-                ],
-                expected_status_hash=authority.status["status_hash"],
+            if basis.identity.canonical_root != event.root:
+                raise registration_admission.EventRefused(
+                    "ROOT_UNSUPPORTED"
+                )
+            authority = self.store.read_selected_authority(member_id)
+            if authority is None:
+                scope.install_member(
+                    self.data,
+                    self.candidate,
+                    basis,
+                )
+            protocol = self.store.current_protocol()
+            if protocol is None:
+                raise registration_store.StoreUnavailable(
+                    "protocol authority missing"
+                )
+            episode_id = registration_hashes.deterministic_id(
+                "awa-reg-episode-v1",
+                event.conversation_id,
+                event.generation_id,
+                event.source_contract,
+                event.source_event,
+                str(protocol["protocol_generation"]),
+                member_id,
+                basis.workspace_roots_hash,
+                protocol["tool_inventory_hash"],
+                protocol["hook_projection_hash"],
             )
-            successor = self.store.read_selected_authority(member_id)
+            if not self.store.episode_exists(member_id, episode_id):
+                scope.bind_episode(
+                    self.data,
+                    self.candidate,
+                    basis,
+                    source=registration_store.EpisodeSource(
+                        event.conversation_id,
+                        event.generation_id,
+                        event.source_contract,
+                        event.source_event,
+                        basis.workspace_roots_hash,
+                    ),
+                )
+            authority = self.store.read_selected_authority(
+                member_id, episode_id=episode_id
+            )
+            if authority is None:
+                raise registration_store.StoreUnavailable(
+                    "member authority missing after bind"
+                )
+            member = authority.member
             if (
-                successor.member["current_basis_hash"]
-                != intent.request_basis_hash
+                member["phase"] == "RESOLVED"
+                and member["pending_effect_id"] is not None
             ):
-                self.store.invalidate_requested(
+                scope.handoff_resolved(
                     self.data,
                     self.candidate,
-                    member_id=member_id,
-                    expected_member_hash=successor.member[
-                        "member_tuple_hash"
-                    ],
-                    expected_effect_hash=successor.effect[
-                        "request_tuple_hash"
-                    ],
-                    expected_status_hash=successor.status["status_hash"],
-                    basis=observation.basis_update,
-                    intent=intent,
-                )
-            return RegistrationHandle(member_id, episode_id)
-        if member["current_basis_hash"] != intent.request_basis_hash:
-            if member["phase"] == "REQUESTED":
-                self.store.invalidate_requested(
-                    self.data,
-                    self.candidate,
-                    member_id=member_id,
-                    expected_member_hash=member["member_tuple_hash"],
-                    expected_effect_hash=authority.effect[
-                        "request_tuple_hash"
-                    ],
-                    expected_status_hash=authority.status["status_hash"],
-                    basis=observation.basis_update,
-                    intent=intent,
-                )
-            elif member["phase"] == "EFFECT_IN_FLIGHT":
-                if member["pending_effect_id"] is None:
-                    self.store.set_pending(
-                        self.data,
-                        self.candidate,
-                        member_id=member_id,
-                        expected_member_hash=member["member_tuple_hash"],
-                        expected_effect_hash=authority.effect[
-                            "request_tuple_hash"
-                        ],
-                        expected_status_hash=authority.status["status_hash"],
-                        basis_hash=intent.request_basis_hash,
-                        intent=intent,
-                    )
-                else:
-                    self.store.replace_pending(
-                        self.data,
-                        self.candidate,
-                        member_id=member_id,
-                        expected_member_hash=member["member_tuple_hash"],
-                        expected_effect_hash=member[
-                            "pending_effect_tuple_hash"
-                        ],
-                        expected_status_hash=authority.status["status_hash"],
-                        basis_hash=intent.request_basis_hash,
-                        intent=intent,
-                    )
-            elif member["phase"] == "RESOLVED":
-                self.store.handoff_resolved(
-                    self.data,
-                    self.candidate,
-                    member_id=member_id,
+                    basis,
                     expected_member_hash=member["member_tuple_hash"],
                     expected_effect_hash=authority.effect[
                         "outcome_tuple_hash"
                     ],
                     expected_status_hash=authority.status["status_hash"],
-                    cause="BASIS_CHANGED",
-                    basis=observation.basis_update,
-                    intent=intent,
                 )
-        return RegistrationHandle(member_id, episode_id)
+                successor = self.store.read_selected_authority(member_id)
+                if (
+                    successor.member["current_basis_hash"]
+                    != basis.intent.request_basis_hash
+                ):
+                    scope.invalidate_requested(
+                        self.data,
+                        self.candidate,
+                        basis,
+                        expected_member_hash=successor.member[
+                            "member_tuple_hash"
+                        ],
+                        expected_effect_hash=successor.effect[
+                            "request_tuple_hash"
+                        ],
+                        expected_status_hash=successor.status[
+                            "status_hash"
+                        ],
+                    )
+                return RegistrationHandle(member_id, episode_id)
+            if (
+                member["current_basis_hash"]
+                != basis.intent.request_basis_hash
+            ):
+                if member["phase"] == "REQUESTED":
+                    scope.invalidate_requested(
+                        self.data,
+                        self.candidate,
+                        basis,
+                        expected_member_hash=member["member_tuple_hash"],
+                        expected_effect_hash=authority.effect[
+                            "request_tuple_hash"
+                        ],
+                        expected_status_hash=authority.status[
+                            "status_hash"
+                        ],
+                    )
+                elif member["phase"] == "EFFECT_IN_FLIGHT":
+                    if member["pending_effect_id"] is None:
+                        scope.set_pending(
+                            self.data,
+                            self.candidate,
+                            basis,
+                            expected_member_hash=member[
+                                "member_tuple_hash"
+                            ],
+                            expected_effect_hash=authority.effect[
+                                "request_tuple_hash"
+                            ],
+                            expected_status_hash=authority.status[
+                                "status_hash"
+                            ],
+                        )
+                    else:
+                        scope.replace_pending(
+                            self.data,
+                            self.candidate,
+                            basis,
+                            expected_member_hash=member[
+                                "member_tuple_hash"
+                            ],
+                            expected_effect_hash=member[
+                                "pending_effect_tuple_hash"
+                            ],
+                            expected_status_hash=authority.status[
+                                "status_hash"
+                            ],
+                        )
+                elif member["phase"] == "RESOLVED":
+                    scope.handoff_resolved(
+                        self.data,
+                        self.candidate,
+                        basis,
+                        expected_member_hash=member[
+                            "member_tuple_hash"
+                        ],
+                        expected_effect_hash=authority.effect[
+                            "outcome_tuple_hash"
+                        ],
+                        expected_status_hash=authority.status[
+                            "status_hash"
+                        ],
+                        cause="BASIS_CHANGED",
+                    )
+            return RegistrationHandle(member_id, episode_id)
 
     def open_due(
         self, member_id: str
@@ -642,8 +1033,54 @@ class RegistrationCoordinator:
         self,
         due: registration_store.DueCandidate,
         *,
-        current_basis_hash: str,
+        current_basis_hash: str | None = None,
+        fresh_provider=None,
     ) -> registration_store.MemberExecution:
+        basis = None
+        if fresh_provider is not None:
+            with self.store.member_mutation_scope(due.member_id) as scope:
+                basis = scope.collect_fresh_basis(
+                    lambda: _fresh_basis_from_provider(fresh_provider)
+                )
+                current_basis_hash = basis.identity.current_basis_hash
+                expected_basis = (
+                    due.pending_basis_hash
+                    if due.phase == "RESOLVED"
+                    else due.current_basis_hash
+                )
+                if expected_basis != current_basis_hash:
+                    raise registration_store.StaleAuthority(
+                        "fresh due basis does not match selected authority"
+                    )
+                if due.phase == "RESOLVED":
+                    authority = self.store.read_selected_authority(
+                        due.member_id
+                    )
+                    if (
+                        authority is None
+                        or authority.member["pending_effect_id"] is None
+                    ):
+                        raise registration_store.StaleAuthority(
+                            "RESOLVED due member has no pending handoff"
+                        )
+                    scope.handoff_resolved(
+                        self.data,
+                        self.candidate,
+                        basis,
+                        expected_member_hash=authority.member[
+                            "member_tuple_hash"
+                        ],
+                        expected_effect_hash=authority.effect[
+                            "outcome_tuple_hash"
+                        ],
+                        expected_status_hash=authority.status[
+                            "status_hash"
+                        ],
+                    )
+        if current_basis_hash is None:
+            raise registration_store.StaleAuthority(
+                "fresh due basis is required"
+            )
         expected_basis = (
             due.pending_basis_hash
             if due.phase == "RESOLVED"
@@ -672,26 +1109,10 @@ class RegistrationCoordinator:
                 expected_status_hash=due.status_hash,
             ).execution
         if due.phase == "RESOLVED":
-            authority = self.store.read_selected_authority(due.member_id)
-            if (
-                authority is None
-                or authority.member["pending_effect_id"] is None
-            ):
+            if basis is None:
                 raise registration_store.StaleAuthority(
-                    "RESOLVED due member has no pending handoff"
+                    "RESOLVED due handoff requires a fresh-basis provider"
                 )
-            self.store.handoff_resolved(
-                self.data,
-                self.candidate,
-                member_id=due.member_id,
-                expected_member_hash=authority.member[
-                    "member_tuple_hash"
-                ],
-                expected_effect_hash=authority.effect[
-                    "outcome_tuple_hash"
-                ],
-                expected_status_hash=authority.status["status_hash"],
-            )
             successor = self.store.read_selected_authority(due.member_id)
             return self.store.open_effect(
                 self.data,
@@ -711,6 +1132,8 @@ class RegistrationCoordinator:
         self,
         member_id: str,
         helpers: Mapping[str, ActionHelper],
+        *,
+        fresh_provider=None,
     ) -> DriveResult:
         authority = self.store.read_selected_authority(member_id)
         if authority is None:
@@ -718,19 +1141,40 @@ class RegistrationCoordinator:
         phase = authority.member["phase"]
         if phase == "RESOLVED":
             if authority.member["pending_effect_id"] is not None:
-                self.store.handoff_resolved(
-                    self.data,
-                    self.candidate,
-                    member_id=member_id,
-                    expected_member_hash=authority.member[
-                        "member_tuple_hash"
-                    ],
-                    expected_effect_hash=authority.effect[
-                        "outcome_tuple_hash"
-                    ],
-                    expected_status_hash=authority.status["status_hash"],
+                if fresh_provider is None:
+                    raise registration_store.StaleAuthority(
+                        "pending handoff requires fresh basis"
+                    )
+                with self.store.member_mutation_scope(member_id) as scope:
+                    basis = scope.collect_fresh_basis(
+                        lambda: _fresh_basis_from_provider(fresh_provider)
+                    )
+                    current = self.store.read_selected_authority(member_id)
+                    if (
+                        current is None
+                        or current.member["phase"] != "RESOLVED"
+                        or current.member["pending_effect_id"] is None
+                    ):
+                        raise registration_store.StaleAuthority(
+                            "pending handoff changed"
+                        )
+                    scope.handoff_resolved(
+                        self.data,
+                        self.candidate,
+                        basis,
+                        expected_member_hash=current.member[
+                            "member_tuple_hash"
+                        ],
+                        expected_effect_hash=current.effect[
+                            "outcome_tuple_hash"
+                        ],
+                        expected_status_hash=current.status["status_hash"],
+                    )
+                return self.drive(
+                    member_id,
+                    helpers,
+                    fresh_provider=fresh_provider,
                 )
-                return self.drive(member_id, helpers)
             return DriveResult(
                 member_id,
                 authority.effect["effect_id"],
@@ -878,9 +1322,13 @@ class RegistrationCoordinator:
                     execution.effect_id,
                     "LOGICAL_CONFLICT",
                 )
-            self.store.mark_unavailable(
+            result = self.store.mark_unavailable(
                 self.data, self.candidate, execution
             )
+            if isinstance(
+                result, registration_store.RecoveryReserveExhausted
+            ):
+                raise RecoveryContainmentUnavailable(result)
             return DriveResult(
                 execution.member_id, execution.effect_id, "UNAVAILABLE"
             )
@@ -889,24 +1337,70 @@ class RegistrationCoordinator:
         self, execution: registration_store.MemberExecution
     ) -> None:
         try:
-            self.store.mark_unavailable(
+            result = self.store.mark_unavailable(
                 self.data, self.candidate, execution
             )
+            if isinstance(
+                result, registration_store.RecoveryReserveExhausted
+            ):
+                raise RecoveryContainmentUnavailable(result)
         except Exception:
+            if not execution.held:
+                raise
             execution.close()
             try:
-                self.store.mark_dead_executor_unavailable(
-                    self.data,
-                    self.candidate,
-                    member_id=execution.member_id,
-                    expected_status_hash=execution.target_status_hash,
-                )
+                with self.store.member_mutation_scope(
+                    execution.member_id
+                ) as scope:
+                    result = scope.mark_dead_executor_unavailable(
+                        self.data,
+                        self.candidate,
+                        expected_status_hash=execution.target_status_hash,
+                    )
+                if isinstance(
+                    result, registration_store.RecoveryReserveExhausted
+                ):
+                    raise RecoveryContainmentUnavailable(result)
+            except RecoveryContainmentUnavailable:
+                raise
             except Exception:
                 pass
 
-    def recover_reboot(self, current_boot_id: str) -> tuple[str, ...]:
+    def preflight_r1_tick(
+        self,
+        *,
+        authorized_member_id: str,
+        boot_id: str,
+        now_mono_ns: int,
+    ) -> R1TickScope:
+        return _select_r1_tick_scope(
+            self.store,
+            authorized_member_id=authorized_member_id,
+            boot_id=boot_id,
+            now_mono_ns=now_mono_ns,
+        )
+
+    def recover_reboot(
+        self,
+        current_boot_id: str,
+        *,
+        r1_scope: R1TickScope | None = None,
+    ) -> tuple[str, ...]:
+        if r1_scope is None:
+            candidates = self.store.list_reboot_candidates(current_boot_id)
+        else:
+            selection = _require_r1_tick_scope(
+                r1_scope,
+                self.store,
+                boot_id=current_boot_id,
+            )
+            candidates = (
+                ()
+                if selection.authorized_reboot is None
+                else (selection.authorized_reboot,)
+            )
         recovered = []
-        for candidate in self.store.list_reboot_candidates(current_boot_id):
+        for candidate in candidates:
             self.store.reboot_status(
                 self.data,
                 self.candidate,
@@ -918,7 +1412,10 @@ class RegistrationCoordinator:
 
     def recover_same_boot_executor(
         self, member_id: str
-    ) -> registration_store.OperationResult:
+    ) -> (
+        registration_store.OperationResult
+        | registration_store.RecoveryReserveExhausted
+    ):
         authority = self.store.read_selected_authority(member_id)
         if (
             authority is None
@@ -928,25 +1425,201 @@ class RegistrationCoordinator:
             raise registration_store.StaleAuthority(
                 "same-boot recovery requires stored executor"
             )
-        return self.store.mark_dead_executor_unavailable(
-            self.data,
-            self.candidate,
-            member_id=member_id,
-            expected_status_hash=authority.status["status_hash"],
+        with self.store.member_mutation_scope(
+            member_id, timeout_seconds=0
+        ) as scope:
+            return scope.mark_dead_executor_unavailable(
+                self.data,
+                self.candidate,
+                expected_status_hash=authority.status["status_hash"],
+            )
+
+    def recover_r1_same_boot(
+        self,
+        r1_scope: R1TickScope,
+        *,
+        recover=None,
+    ) -> SameBootExamined | None:
+        selection = _require_r1_tick_scope(
+            r1_scope,
+            self.store,
+            boot_id=r1_scope.boot_id,
+            now_mono_ns=r1_scope.now_mono_ns,
+        )
+        candidate = selection.authorized_same_boot
+        if candidate is None:
+            return None
+        return self._recover_same_boot_candidate(
+            candidate,
+            boot_id=r1_scope.boot_id,
+            recover=recover,
+        )
+
+    def recover_same_boot_tick(
+        self,
+        *,
+        boot_id: str,
+        cursor: SameBootCursor | None = None,
+        recover=None,
+        snapshot: registration_store.SameBootSnapshot | None = None,
+    ) -> SameBootRecoveryBatch:
+        snapshot = snapshot or self.store.select_same_boot_snapshot(
+            boot_id=boot_id
+        )
+        if snapshot.boot_id != boot_id:
+            raise registration_store.StaleAuthority(
+                "same-boot snapshot belongs to another boot"
+            )
+        selection = select_same_boot_batch(snapshot, cursor)
+        snapshot_hash = same_boot_snapshot_hash(snapshot)
+        examined = []
+        for candidate in selection.candidates:
+            examined.append(
+                self._recover_same_boot_candidate(
+                    candidate,
+                    boot_id=boot_id,
+                    recover=recover,
+                )
+            )
+        if examined:
+            last = examined[-1]
+            next_cursor = SameBootCursor(
+                boot_id=snapshot.boot_id,
+                protocol_seq=snapshot.protocol_seq,
+                protocol_hash=snapshot.protocol_hash,
+                selection_snapshot_hash=snapshot_hash,
+                last_member_id=last.member_id,
+                last_pre_status_hash=last.pre_status_hash,
+                last_post_status_hash=last.post_status_hash,
+                outcome=last.outcome,
+                batch_count=len(examined),
+                wrapped=selection.wrapped,
+            )
+        else:
+            next_cursor = SameBootCursor(
+                boot_id=snapshot.boot_id,
+                protocol_seq=snapshot.protocol_seq,
+                protocol_hash=snapshot.protocol_hash,
+                selection_snapshot_hash=snapshot_hash,
+                last_member_id=None,
+                last_pre_status_hash=None,
+                last_post_status_hash=None,
+                outcome=None,
+                batch_count=0,
+                wrapped=False,
+            )
+        return SameBootRecoveryBatch(next_cursor, tuple(examined))
+
+    def _recover_same_boot_candidate(
+        self,
+        candidate: registration_store.SameBootCandidate,
+        *,
+        boot_id: str,
+        recover,
+    ) -> SameBootExamined:
+        outcome = "NO_LONGER_CANDIDATE"
+        post_status_hash = candidate.status_hash
+        try:
+            with self.store.member_mutation_scope(
+                candidate.member_id,
+                timeout_seconds=0,
+            ) as scope:
+                current = self.store.read_selected_authority(
+                    candidate.member_id
+                )
+                if (
+                    current is None
+                    or current.member["phase"] != "EFFECT_IN_FLIGHT"
+                    or current.status["status_hash"] != candidate.status_hash
+                    or current.status["executor_token_hash"]
+                    != candidate.executor_token_hash
+                    or current.status["executor_generation"]
+                    != candidate.executor_generation
+                    or current.status["executor_boot_id"] != boot_id
+                ):
+                    if current is not None:
+                        post_status_hash = current.status["status_hash"]
+                else:
+                    result = scope.mark_dead_executor_unavailable(
+                        self.data,
+                        self.candidate,
+                        expected_status_hash=candidate.status_hash,
+                    )
+                    if isinstance(
+                        result,
+                        registration_store.RecoveryReserveExhausted,
+                    ):
+                        raise RecoveryContainmentUnavailable(result)
+                    current = self.store.read_selected_authority(
+                        candidate.member_id
+                    )
+                    post_status_hash = current.status["status_hash"]
+                    outcome = "CLEARED"
+        except registration_lock.LockBusy:
+            outcome = "BUSY_LIVE"
+            post_status_hash = candidate.status_hash
+        except registration_store.StaleAuthority:
+            current = self.store.read_selected_authority(
+                candidate.member_id
+            )
+            if current is not None:
+                post_status_hash = current.status["status_hash"]
+            outcome = "NO_LONGER_CANDIDATE"
+        if outcome == "CLEARED" and recover is not None:
+            try:
+                recovery = recover(candidate.member_id)
+                if isinstance(
+                    recovery,
+                    registration_store.RecoveryReserveExhausted,
+                ):
+                    raise RecoveryContainmentUnavailable(recovery)
+                if bool(recovery):
+                    outcome = "RECOVERED"
+                    current = self.store.read_selected_authority(
+                        candidate.member_id
+                    )
+                    if current is None:
+                        raise registration_store.StoreUnavailable(
+                            "recovered member authority is missing"
+                        )
+                    post_status_hash = current.status["status_hash"]
+            except RecoveryContainmentUnavailable:
+                raise
+            except Exception:
+                outcome = "CLEARED"
+        return SameBootExamined(
+            member_id=candidate.member_id,
+            pre_status_hash=candidate.status_hash,
+            post_status_hash=post_status_hash,
+            outcome=outcome,
         )
 
     def retry_conflict(
-        self, member_id: str, observation: BasisObservation
+        self,
+        member_id: str,
+        observation: BasisObservation,
+        *,
+        fresh_provider=None,
     ) -> registration_store.OperationResult:
         return self._handoff(
-            member_id, observation, "EXPLICIT_CONFLICT_RETRY"
+            member_id,
+            observation,
+            "EXPLICIT_CONFLICT_RETRY",
+            fresh_provider=fresh_provider,
         )
 
     def repair_closure(
-        self, member_id: str, observation: BasisObservation
+        self,
+        member_id: str,
+        observation: BasisObservation,
+        *,
+        fresh_provider=None,
     ) -> registration_store.OperationResult:
         return self._handoff(
-            member_id, observation, "CURRENT_CLOSURE_CHANGED"
+            member_id,
+            observation,
+            "CURRENT_CLOSURE_CHANGED",
+            fresh_provider=fresh_provider,
         )
 
     def _handoff(
@@ -954,23 +1627,43 @@ class RegistrationCoordinator:
         member_id: str,
         observation: BasisObservation,
         cause: str,
+        *,
+        fresh_provider=None,
     ) -> registration_store.OperationResult:
-        authority = self.store.read_selected_authority(member_id)
-        if authority is None or authority.member["phase"] != "RESOLVED":
-            raise registration_store.StaleAuthority(
-                "handoff requires RESOLVED member"
-            )
-        return self.store.handoff_resolved(
-            self.data,
-            self.candidate,
-            member_id=member_id,
-            expected_member_hash=authority.member["member_tuple_hash"],
-            expected_effect_hash=authority.effect["outcome_tuple_hash"],
-            expected_status_hash=authority.status["status_hash"],
-            cause=cause,
-            basis=observation.basis_update,
-            intent=_intent(observation),
+        provider = (
+            fresh_provider
+            if fresh_provider is not None
+            else observation.fresh_provider
         )
+        if not callable(provider):
+            raise registration_store.StaleAuthority(
+                "fresh-basis provider is required"
+            )
+        with self.store.member_mutation_scope(member_id) as scope:
+            basis = scope.collect_fresh_basis(
+                lambda: _fresh_basis_from_provider(provider)
+            )
+            authority = self.store.read_selected_authority(member_id)
+            if (
+                authority is None
+                or authority.member["phase"] != "RESOLVED"
+            ):
+                raise registration_store.StaleAuthority(
+                    "handoff requires RESOLVED member"
+                )
+            return scope.handoff_resolved(
+                self.data,
+                self.candidate,
+                basis,
+                expected_member_hash=authority.member[
+                    "member_tuple_hash"
+                ],
+                expected_effect_hash=authority.effect[
+                    "outcome_tuple_hash"
+                ],
+                expected_status_hash=authority.status["status_hash"],
+                cause=cause,
+            )
 
 
 class FairnessScheduler:
@@ -991,6 +1684,8 @@ class FairnessScheduler:
         boot_id: str,
         now_mono_ns: int,
         attempt,
+        authorized_member_id: str | None = None,
+        r1_scope: R1TickScope | None = None,
     ) -> TickReceipt:
         return self.tick_phased(
             boot_id=boot_id,
@@ -1001,6 +1696,8 @@ class FairnessScheduler:
             run_helper=attempt,
             commit_result=lambda _candidate, _token, result: bool(result),
             open_mutates_authority=False,
+            authorized_member_id=authorized_member_id,
+            r1_scope=r1_scope,
         )
 
     def tick_phased(
@@ -1013,16 +1710,47 @@ class FairnessScheduler:
         commit_result,
         yield_result=None,
         open_mutates_authority: bool = True,
+        authorized_member_id: str | None = None,
+        r1_scope: R1TickScope | None = None,
     ) -> TickReceipt:
         if open_mutates_authority and yield_result is None:
             raise ValueError(
                 "mutating lane opens require an exact yield resolver"
             )
-        selected = self.store.list_due_candidates(
-            boot_id=boot_id,
-            now_mono_ns=now_mono_ns,
-            limit=TICK_LANES,
-        )
+        if authorized_member_id is not None and r1_scope is not None:
+            raise ValueError(
+                "R1 tick accepts an authorized member or a preflight, not both"
+            )
+        if r1_scope is not None:
+            r1_selection = _require_r1_tick_scope(
+                r1_scope,
+                self.store,
+                boot_id=boot_id,
+                now_mono_ns=now_mono_ns,
+            )
+            selected = (
+                ()
+                if r1_selection.authorized_due is None
+                else (r1_selection.authorized_due,)
+            )
+        elif authorized_member_id is None:
+            selected = self.store.list_due_candidates(
+                boot_id=boot_id,
+                now_mono_ns=now_mono_ns,
+                limit=TICK_LANES,
+            )
+        else:
+            r1_selection = _select_r1_tick_scope(
+                self.store,
+                authorized_member_id=authorized_member_id,
+                boot_id=boot_id,
+                now_mono_ns=now_mono_ns,
+            )
+            selected = (
+                ()
+                if r1_selection.selection.authorized_due is None
+                else (r1_selection.selection.authorized_due,)
+            )
         opened = {}
         missed = []
         slow_open = set()
@@ -1216,13 +1944,24 @@ class FairnessScheduler:
                     unavailable.append(member_id)
                     continue
                 if authority.status["executor_token_hash"] is not None:
-                    self.store.mark_dead_executor_unavailable(
-                        self.data,
-                        self.candidate,
-                        member_id=member_id,
-                        expected_status_hash=authority.status["status_hash"],
-                    )
+                    with self.store.member_mutation_scope(
+                        member_id
+                    ) as scope:
+                        result = scope.mark_dead_executor_unavailable(
+                            self.data,
+                            self.candidate,
+                            expected_status_hash=authority.status[
+                                "status_hash"
+                            ],
+                        )
+                    if isinstance(
+                        result,
+                        registration_store.RecoveryReserveExhausted,
+                    ):
+                        raise RecoveryContainmentUnavailable(result)
                 recovered.append(member_id)
+            except RecoveryContainmentUnavailable:
+                raise
             except Exception:
                 unavailable.append(member_id)
         return TickRecovery(tuple(recovered), tuple(unavailable))
@@ -1252,13 +1991,21 @@ class FairnessScheduler:
             return False
         token.close()
         try:
-            self.store.mark_dead_executor_unavailable(
-                self.data,
-                self.candidate,
-                member_id=candidate.member_id,
-                expected_status_hash=token.target_status_hash,
-            )
+            with self.store.member_mutation_scope(
+                candidate.member_id
+            ) as scope:
+                result = scope.mark_dead_executor_unavailable(
+                    self.data,
+                    self.candidate,
+                    expected_status_hash=token.target_status_hash,
+                )
+            if isinstance(
+                result, registration_store.RecoveryReserveExhausted
+            ):
+                raise RecoveryContainmentUnavailable(result)
             return True
+        except RecoveryContainmentUnavailable:
+            raise
         except Exception:
             authority = self.store.read_selected_authority(
                 candidate.member_id
@@ -1272,37 +2019,78 @@ class FairnessScheduler:
 _FAILED = object()
 
 
+def _stop_process(process) -> None:
+    if process.is_alive():
+        process.terminate()
+        process.join(0.25)
+    if process.is_alive():
+        process.kill()
+        process.join()
+
+
 def _process_calls(jobs, *, timeout: float) -> dict[str, object]:
     context = multiprocessing.get_context("spawn")
     workers = {}
-    for member_id, function, argument in jobs:
-        receiving, sending = context.Pipe(duplex=False)
-        process = context.Process(
-            target=_call_process,
-            args=(function, argument, sending),
-        )
-        process.start()
-        sending.close()
-        workers[member_id] = (process, receiving)
+    receiving = None
+    sending = None
+    try:
+        for member_id, function, argument in jobs:
+            receiving, sending = context.Pipe(duplex=False)
+            process = context.Process(
+                target=_call_process,
+                args=(function, argument, sending),
+            )
+            process.start()
+            workers[member_id] = (process, receiving)
+            sending.close()
+    except BaseException:
+        for endpoint in (sending, receiving):
+            try:
+                if endpoint is not None:
+                    endpoint.close()
+            except BaseException:
+                pass
+        for started, endpoint in workers.values():
+            try:
+                _stop_process(started)
+            except BaseException:
+                pass
+            try:
+                endpoint.close()
+            except BaseException:
+                pass
+        raise
     # The deadline starts only after every lane process has started. Each
     # worker therefore receives the same full concurrent batch window;
     # sequential joins below only reap against that shared absolute bound.
     deadline = time.monotonic() + timeout
     results = {}
-    for member_id, (process, receiving) in workers.items():
-        process.join(max(0.0, deadline - time.monotonic()))
-        if process.is_alive():
-            process.terminate()
-            process.join(0.25)
-        if process.is_alive():
-            process.kill()
-            process.join()
-        if process.exitcode == 0 and receiving.poll():
-            status, value = receiving.recv()
-            results[member_id] = value if status == "ok" else _FAILED
-        else:
-            results[member_id] = _FAILED
-        receiving.close()
+    try:
+        for member_id, (process, receiving) in workers.items():
+            process.join(max(0.0, deadline - time.monotonic()))
+            _stop_process(process)
+            if process.exitcode == 0 and receiving.poll():
+                try:
+                    status, value = receiving.recv()
+                except Exception:
+                    results[member_id] = _FAILED
+                else:
+                    results[member_id] = (
+                        value if status == "ok" else _FAILED
+                    )
+            else:
+                results[member_id] = _FAILED
+            receiving.close()
+    finally:
+        for process, receiving in workers.values():
+            try:
+                _stop_process(process)
+            except BaseException:
+                pass
+            try:
+                receiving.close()
+            except BaseException:
+                pass
     return results
 
 
@@ -1443,8 +2231,26 @@ class RegistrationService:
                     ),
                     0,
                 )
-            handle = self.coordinator.ensure(event, observation)
-            self.coordinator.drive(handle.member_id, self.helpers)
+            fresh_provider = lambda: self.collector.collect_observation(event)
+            handle = self.coordinator.ensure(
+                event,
+                observation,
+                fresh_provider=fresh_provider,
+            )
+            self.coordinator.drive(
+                handle.member_id,
+                self.helpers,
+                fresh_provider=fresh_provider,
+            )
+        except RecoveryContainmentUnavailable:
+            return registration_admission.AdmissionDecision(
+                False,
+                "CONTAINMENT_UNAVAILABLE",
+                registration_admission.render_reason(
+                    "CONTAINMENT_UNAVAILABLE"
+                ),
+                0,
+            )
         except registration_admission.BasisUnavailable as exc:
             return registration_admission.AdmissionDecision(
                 False,

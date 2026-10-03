@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from unittest import mock
 
-from engine import registration_admission, registration_basis
+from engine import registration_admission, registration_basis, registration_store
 from engine.tests import helpers
 
 
@@ -56,6 +56,16 @@ class RegistrationBasisCollectorTest(helpers.EngineTestCase):
         sample = observation.basis_sample
         self.assertEqual(sample.canonical_root, self.root)
         self.assertNotIn(self.root, sample.current_basis_hash)
+
+    def test_fresh_provider_returns_only_closed_store_value(self) -> None:
+        value = self._collector().collect_fresh_basis(self._event())
+        self.assertIsInstance(value, registration_store.FreshMemberBasis)
+        self.assertEqual(value.identity.canonical_root, self.root)
+        self.assertEqual(
+            value.identity.current_basis_hash,
+            value.intent.request_basis_hash,
+        )
+        self.assertEqual(len(value.workspace_roots_hash), 64)
 
     def test_dirty_root_is_redacted_and_source_index_refs_unchanged(self) -> None:
         dirty = Path(self.root) / "dirty.txt"
