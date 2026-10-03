@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import multiprocessing
+import os
+import pickle
 import sqlite3
 import tempfile
 import threading
@@ -17,6 +20,114 @@ from engine import (
     registration_store,
 )
 from engine.tests.registration_harness import RegistrationHarness
+
+
+def _member_id(identity: registration_store.MemberIdentity) -> str:
+    return registration_hashes.deterministic_id(
+        "awa-reg-member-v1",
+        identity.canonical_root,
+        str(identity.root_dev),
+        str(identity.root_ino),
+        identity.git_dir,
+        str(identity.git_dir_dev),
+        str(identity.git_dir_ino),
+        identity.git_common_dir,
+        str(identity.git_common_dev),
+        str(identity.git_common_ino),
+    )
+
+
+def _fresh_basis(
+    harness: RegistrationHarness, ordinal: int
+) -> registration_store.FreshMemberBasis:
+    base = harness.identity(ordinal=1)
+    observed = harness.identity(ordinal=ordinal)
+    identity = replace(
+        base,
+        physical_basis_hash=observed.physical_basis_hash,
+        git_basis_hash=observed.git_basis_hash,
+        policy_basis_hash=observed.policy_basis_hash,
+        operation_basis_hash=observed.operation_basis_hash,
+        lifecycle_basis_hash=observed.lifecycle_basis_hash,
+        current_basis_hash=observed.current_basis_hash,
+    )
+    return registration_store.FreshMemberBasis(
+        identity=identity,
+        intent=harness.clean_intent(ordinal=ordinal),
+        workspace_roots_hash="ab" * 32,
+    )
+
+
+def _install_member(
+    harness: RegistrationHarness,
+    ordinal: int,
+    *,
+    sample_boot_id: str,
+) -> tuple[
+    registration_store.MemberIdentity,
+    registration_store.EffectIntent,
+    registration_store.OperationResult,
+]:
+    identity = harness.identity(ordinal=ordinal)
+    intent = harness.clean_intent(ordinal=ordinal)
+    previous_boot = harness.sample_boot_id
+    harness.sample_boot_id = sample_boot_id
+    try:
+        result = harness.store.install_member(
+            harness.data(),
+            harness.candidate(),
+            identity,
+            intent,
+            operation_id=f"{(1 << 255) + ordinal:064x}",
+        )
+    finally:
+        harness.sample_boot_id = previous_boot
+    return identity, intent, result
+
+
+def _scope_install_process(
+    db_path: str,
+    shared_ordinal,
+    attempting,
+    provider_entered,
+    release_provider,
+    initial_ordinal: int,
+    operation_id: str,
+    results,
+) -> None:
+    try:
+        with RegistrationHarness.open(
+            Path(db_path), measured_free_bytes=2 * 1024**3
+        ) as harness:
+            member_id = _member_id(harness.identity())
+            attempting.set()
+            with harness.store.member_mutation_scope(member_id) as scope:
+
+                def provider() -> registration_store.FreshMemberBasis:
+                    provider_entered.set()
+                    if release_provider is not None and not release_provider.wait(5):
+                        raise RuntimeError("provider release timed out")
+                    return _fresh_basis(harness, int(shared_ordinal.value))
+
+                basis = scope.collect_fresh_basis(provider)
+                result = scope.install_member(
+                    harness.data(),
+                    harness.candidate(),
+                    basis,
+                    operation_id=operation_id,
+                )
+                results.put(
+                    (
+                        "ok",
+                        result.disposition,
+                        result.operation_id,
+                        result.target_hash,
+                        initial_ordinal,
+                        basis.identity.current_basis_hash,
+                    )
+                )
+    except BaseException as error:
+        results.put(("error", type(error).__name__, str(error)))
 
 
 def _typed_profile_pair() -> tuple[
@@ -5571,6 +5682,1121 @@ class RegistrationStoreBootstrapTest(unittest.TestCase):
                         old_status_hash=due["status_hash"],
                     ),
                     "COMMITTED",
+                )
+
+    def test_ar_typed_provider_values_validate_exactly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state" / "registration-v1" / "registration.db"
+            with RegistrationHarness.open(
+                db, measured_free_bytes=2 * 1024**3
+            ) as harness:
+                basis = _fresh_basis(harness, 1)
+                with self.assertRaises(ValueError):
+                    registration_store.FreshMemberBasis(
+                        identity=basis.identity,
+                        intent=replace(
+                            basis.intent,
+                            request_basis_hash="cd" * 32,
+                        ),
+                        workspace_roots_hash=basis.workspace_roots_hash,
+                    )
+                with self.assertRaises(ValueError):
+                    registration_store.FreshMemberBasis(
+                        identity=basis.identity,
+                        intent=basis.intent,
+                        workspace_roots_hash="A" * 64,
+                    )
+
+                first = registration_store.SameBootCandidate(
+                    member_id="1" * 64,
+                    status_hash="2" * 64,
+                    executor_token_hash="3" * 64,
+                    executor_generation=1,
+                )
+                second = registration_store.SameBootCandidate(
+                    member_id="4" * 64,
+                    status_hash="5" * 64,
+                    executor_token_hash="6" * 64,
+                    executor_generation=2,
+                )
+                with self.assertRaises(ValueError):
+                    registration_store.SameBootCandidate(
+                        member_id=first.member_id,
+                        status_hash=first.status_hash,
+                        executor_token_hash=first.executor_token_hash,
+                        executor_generation=True,
+                    )
+                with self.assertRaises(ValueError):
+                    registration_store.SameBootSnapshot(
+                        boot_id="boot-a",
+                        protocol_seq=True,
+                        protocol_hash="7" * 64,
+                        candidates=(),
+                    )
+                with self.assertRaises(ValueError):
+                    registration_store.SameBootSnapshot(
+                        boot_id="boot-a",
+                        protocol_seq=1,
+                        protocol_hash="7" * 64,
+                        candidates=(second, first),
+                    )
+                with self.assertRaises(ValueError):
+                    registration_store.SameBootSnapshot(
+                        boot_id="boot-a",
+                        protocol_seq=1,
+                        protocol_hash="7" * 64,
+                        candidates=[first],
+                    )
+                with self.assertRaises(ValueError):
+                    registration_store.R1ScopeSelection(
+                        authorized_same_boot=None,
+                        authorized_due=None,
+                        authorized_reboot=None,
+                        outside_scope_same_boot=0,
+                        outside_scope_due=False,
+                        outside_scope_reboot=False,
+                    )
+
+    def test_ar_member_scope_lifecycle_and_fresh_basis_refuse_safely(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state" / "registration-v1" / "registration.db"
+            with RegistrationHarness.open(
+                db, measured_free_bytes=2 * 1024**3
+            ) as harness:
+                store = harness.store
+                candidate = harness.candidate()
+                store.bootstrap(harness.control(), candidate)
+                store.activate(harness.control(), candidate)
+                member_id = _member_id(harness.identity())
+                before = store.table_count("registration_operation_audit")
+
+                with self.assertRaises(
+                    registration_store.AuthorizationError
+                ):
+                    registration_store.MemberMutationScope(
+                        store,
+                        member_id,
+                        5.0,
+                        _seal=object(),
+                    )
+                for label, invalid_timeout in (
+                    ("boolean", True),
+                    ("negative", -1),
+                    ("nan", float("nan")),
+                    ("infinite", float("inf")),
+                    ("above-thread-limit", 1e300),
+                    ("integer-overflow", 10**10_000),
+                ):
+                    with self.subTest(timeout=label):
+                        with self.assertRaises(ValueError):
+                            store.member_mutation_scope(
+                                member_id,
+                                timeout_seconds=invalid_timeout,
+                            )
+
+                scope = store.member_mutation_scope(member_id)
+                with scope:
+                    with self.assertRaisesRegex(RuntimeError, "collector failed"):
+                        scope.collect_fresh_basis(
+                            lambda: (_ for _ in ()).throw(
+                                RuntimeError("collector failed")
+                            )
+                        )
+                    self.assertEqual(
+                        store.table_count("registration_operation_audit"),
+                        before,
+                    )
+                    with self.assertRaises(registration_store.AuthorizationError):
+                        scope.collect_fresh_basis(lambda: object())
+                    with self.assertRaises(registration_store.StaleAuthority):
+                        scope.collect_fresh_basis(
+                            lambda: registration_store.FreshMemberBasis(
+                                identity=harness.identity(ordinal=2),
+                                intent=harness.clean_intent(ordinal=2),
+                                workspace_roots_hash="ab" * 32,
+                            )
+                        )
+
+                    old_basis = scope.collect_fresh_basis(
+                        lambda: _fresh_basis(harness, 1)
+                    )
+                    fresh_basis = scope.collect_fresh_basis(
+                        lambda: _fresh_basis(harness, 2)
+                    )
+                    with self.assertRaises(registration_store.StaleAuthority):
+                        scope.install_member(
+                            harness.data(),
+                            candidate,
+                            old_basis,
+                        )
+
+                    thread_errors: list[BaseException] = []
+
+                    def wrong_thread() -> None:
+                        try:
+                            scope.collect_fresh_basis(
+                                lambda: _fresh_basis(harness, 2)
+                            )
+                        except BaseException as error:
+                            thread_errors.append(error)
+
+                    thread = threading.Thread(target=wrong_thread)
+                    thread.start()
+                    thread.join(1)
+                    self.assertFalse(thread.is_alive())
+                    self.assertEqual(len(thread_errors), 1)
+                    self.assertIsInstance(
+                        thread_errors[0],
+                        registration_store.AuthorizationError,
+                    )
+
+                    with mock.patch.object(
+                        registration_store.os,
+                        "getpid",
+                        return_value=os.getpid() + 1,
+                    ):
+                        with self.assertRaises(
+                            registration_store.AuthorizationError
+                        ):
+                            scope.collect_fresh_basis(
+                                lambda: _fresh_basis(harness, 2)
+                            )
+
+                    read_descriptor, write_descriptor = os.pipe()
+                    child_pid = os.fork()
+                    if child_pid == 0:
+                        os.close(read_descriptor)
+                        try:
+                            scope.collect_fresh_basis(
+                                lambda: _fresh_basis(harness, 2)
+                            )
+                            outcome = b"unexpected-success"
+                        except BaseException as error:
+                            outcome = type(error).__name__.encode("ascii")
+                        try:
+                            os.write(write_descriptor, outcome)
+                        finally:
+                            os.close(write_descriptor)
+                        os._exit(0)
+                    os.close(write_descriptor)
+                    try:
+                        fork_outcome = os.read(read_descriptor, 128)
+                    finally:
+                        os.close(read_descriptor)
+                    _waited_pid, child_status = os.waitpid(child_pid, 0)
+                    self.assertTrue(os.WIFEXITED(child_status))
+                    self.assertEqual(
+                        fork_outcome, b"AuthorizationError"
+                    )
+                    with self.assertRaises(TypeError):
+                        pickle.dumps(scope)
+
+                    busy: list[BaseException] = []
+
+                    def contend() -> None:
+                        try:
+                            with store.member_mutation_scope(
+                                member_id, timeout_seconds=0
+                            ):
+                                pass
+                        except BaseException as error:
+                            busy.append(error)
+
+                    contender = threading.Thread(target=contend)
+                    contender.start()
+                    contender.join(1)
+                    self.assertFalse(contender.is_alive())
+                    self.assertEqual(len(busy), 1)
+                    self.assertIsInstance(busy[0], registration_lock.LockBusy)
+                    self.assertEqual(
+                        store.table_count("registration_operation_audit"),
+                        before,
+                    )
+
+                    installed = scope.install_member(
+                        harness.data(),
+                        candidate,
+                        fresh_basis,
+                    )
+                    self.assertEqual(installed.disposition, "COMMITTED")
+
+                with self.assertRaises(registration_store.AuthorizationError):
+                    scope.collect_fresh_basis(
+                        lambda: _fresh_basis(harness, 2)
+                    )
+                with self.assertRaises(TypeError):
+                    pickle.dumps(scope)
+
+                before = store.table_count("registration_operation_audit")
+                loss_scope = store.member_mutation_scope(member_id)
+                with loss_scope:
+                    self.assertIsNotNone(loss_scope._held_lock)
+                    loss_scope._held_lock.release()
+                    with self.assertRaises(
+                        registration_store.AuthorizationError
+                    ):
+                        loss_scope.collect_fresh_basis(
+                            lambda: _fresh_basis(harness, 2)
+                        )
+                self.assertEqual(
+                    store.table_count("registration_operation_audit"),
+                    before,
+                )
+
+                other_db = (
+                    Path(tmp)
+                    / "other"
+                    / "registration-v1"
+                    / "registration.db"
+                )
+                with RegistrationHarness.open(
+                    other_db, measured_free_bytes=2 * 1024**3
+                ) as other:
+                    with other.store.member_mutation_scope(
+                        member_id
+                    ) as other_scope:
+                        self.assertIsNotNone(other_scope._held_lock)
+                        with self.assertRaises(
+                            registration_store.AuthorizationError
+                        ):
+                            store.install_member(
+                                harness.data(),
+                                candidate,
+                                fresh_basis.identity,
+                                fresh_basis.intent,
+                                _member_lock=other_scope._held_lock,
+                            )
+                self.assertEqual(
+                    store.table_count("registration_operation_audit"),
+                    before,
+                )
+
+    def test_ar_scoped_mutations_preserve_direct_transition_semantics(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state" / "registration-v1" / "registration.db"
+            with RegistrationHarness.open(
+                db, measured_free_bytes=2 * 1024**3
+            ) as harness:
+                store = harness.store
+                candidate = harness.candidate()
+                data = harness.data()
+                store.bootstrap(harness.control(), candidate)
+                store.activate(harness.control(), candidate)
+                member_id = _member_id(harness.identity())
+
+                with store.member_mutation_scope(member_id) as scope:
+                    basis = scope.collect_fresh_basis(
+                        lambda: _fresh_basis(harness, 1)
+                    )
+                    installed = scope.install_member(
+                        data,
+                        candidate,
+                        basis,
+                    )
+                    self.assertEqual(installed.disposition, "COMMITTED")
+                    before = store.table_count(
+                        "registration_operation_audit"
+                    )
+                    duplicate = scope.install_member(
+                        data,
+                        candidate,
+                        basis,
+                    )
+                    self.assertEqual(duplicate.disposition, "COMMITTED")
+                    self.assertEqual(
+                        duplicate.operation_id, installed.operation_id
+                    )
+                    self.assertEqual(
+                        store.table_count("registration_operation_audit"),
+                        before,
+                    )
+
+                    source = registration_store.EpisodeSource(
+                        conversation_id="conversation-ar",
+                        generation_id="generation-ar",
+                        source_contract="cursor-hook/v1",
+                        source_event="beforeSubmitPrompt",
+                        workspace_roots_hash=basis.workspace_roots_hash,
+                    )
+                    bound = scope.bind_episode(
+                        data,
+                        candidate,
+                        basis,
+                        source=source,
+                    )
+                    self.assertEqual(bound.disposition, "COMMITTED")
+                    before = store.table_count(
+                        "registration_operation_audit"
+                    )
+                    self.assertEqual(
+                        scope.bind_episode(
+                            data,
+                            candidate,
+                            basis,
+                            source=source,
+                        ).disposition,
+                        "COMMITTED",
+                    )
+                    self.assertEqual(
+                        store.table_count("registration_operation_audit"),
+                        before,
+                    )
+                    with self.assertRaises(
+                        registration_store.StaleAuthority
+                    ):
+                        scope.bind_episode(
+                            data,
+                            candidate,
+                            basis,
+                            source=replace(
+                                source,
+                                workspace_roots_hash="cd" * 32,
+                            ),
+                        )
+
+                authority = store.read_selected_authority(member_id)
+                with store.member_mutation_scope(member_id) as scope:
+                    changed = scope.collect_fresh_basis(
+                        lambda: _fresh_basis(harness, 2)
+                    )
+                    invalidated = scope.invalidate_requested(
+                        data,
+                        candidate,
+                        changed,
+                        expected_member_hash=authority.member[
+                            "member_tuple_hash"
+                        ],
+                        expected_effect_hash=authority.effect[
+                            "request_tuple_hash"
+                        ],
+                        expected_status_hash=authority.status["status_hash"],
+                    )
+                    self.assertEqual(invalidated.disposition, "COMMITTED")
+
+                authority = store.read_selected_authority(member_id)
+                opened = store.open_effect(
+                    data,
+                    candidate,
+                    member_id=member_id,
+                    expected_member_hash=authority.member[
+                        "member_tuple_hash"
+                    ],
+                    expected_effect_hash=authority.effect[
+                        "request_tuple_hash"
+                    ],
+                    expected_status_hash=authority.status["status_hash"],
+                    executor_secret=b"a" * 32,
+                )
+                store.mark_unavailable(
+                    data,
+                    candidate,
+                    opened.execution,
+                )
+                authority = store.read_selected_authority(member_id)
+                with store.member_mutation_scope(member_id) as scope:
+                    pending = scope.collect_fresh_basis(
+                        lambda: _fresh_basis(harness, 3)
+                    )
+                    set_result = scope.set_pending(
+                        data,
+                        candidate,
+                        pending,
+                        expected_member_hash=authority.member[
+                            "member_tuple_hash"
+                        ],
+                        expected_effect_hash=authority.effect[
+                            "request_tuple_hash"
+                        ],
+                        expected_status_hash=authority.status["status_hash"],
+                    )
+                    self.assertEqual(set_result.disposition, "COMMITTED")
+
+                authority = store.read_selected_authority(member_id)
+                self.assertIsNotNone(authority.pending_effect)
+                with store.member_mutation_scope(member_id) as scope:
+                    replacement = scope.collect_fresh_basis(
+                        lambda: _fresh_basis(harness, 4)
+                    )
+                    replace_result = scope.replace_pending(
+                        data,
+                        candidate,
+                        replacement,
+                        expected_member_hash=authority.member[
+                            "member_tuple_hash"
+                        ],
+                        expected_effect_hash=authority.pending_effect[
+                            "request_tuple_hash"
+                        ],
+                        expected_status_hash=authority.status["status_hash"],
+                    )
+                    self.assertEqual(
+                        replace_result.disposition, "COMMITTED"
+                    )
+                    replaced = store.read_selected_authority(member_id)
+                    self.assertIsNotNone(replaced.pending_effect)
+                    before = store.table_count(
+                        "registration_operation_audit"
+                    )
+                    no_replacement = scope.replace_pending(
+                        data,
+                        candidate,
+                        replacement,
+                        expected_member_hash=replaced.member[
+                            "member_tuple_hash"
+                        ],
+                        expected_effect_hash=replaced.pending_effect[
+                            "request_tuple_hash"
+                        ],
+                        expected_status_hash=replaced.status["status_hash"],
+                    )
+                    self.assertEqual(no_replacement.disposition, "NOOP")
+                    self.assertEqual(
+                        store.table_count("registration_operation_audit"),
+                        before,
+                    )
+
+                authority = store.read_selected_authority(member_id)
+                active = store.reacquire_effect(
+                    data,
+                    candidate,
+                    member_id=member_id,
+                    expected_member_hash=authority.member[
+                        "member_tuple_hash"
+                    ],
+                    expected_effect_hash=authority.effect[
+                        "request_tuple_hash"
+                    ],
+                    expected_status_hash=authority.status["status_hash"],
+                    executor_secret=b"c" * 32,
+                )
+                for _ in range(4):
+                    store.append_action(
+                        data,
+                        candidate,
+                        active.execution,
+                        observation_kind="OBSERVED_EXACT",
+                        measured_postcondition_hash=(
+                            harness.next_postcondition()
+                        ),
+                    )
+                store.close_success(
+                    data,
+                    candidate,
+                    active.execution,
+                    final_basis_hash=changed.identity.current_basis_hash,
+                )
+                authority = store.read_selected_authority(member_id)
+                with store.member_mutation_scope(member_id) as scope:
+                    current = scope.collect_fresh_basis(
+                        lambda: _fresh_basis(harness, 4)
+                    )
+                    handoff = scope.handoff_resolved(
+                        data,
+                        candidate,
+                        current,
+                        expected_member_hash=authority.member[
+                            "member_tuple_hash"
+                        ],
+                        expected_effect_hash=authority.effect[
+                            "outcome_tuple_hash"
+                        ],
+                        expected_status_hash=authority.status["status_hash"],
+                    )
+                    self.assertEqual(handoff.disposition, "COMMITTED")
+                    successor = store.read_selected_authority(member_id)
+                    newer = scope.collect_fresh_basis(
+                        lambda: _fresh_basis(harness, 5)
+                    )
+                    second_invalidation = scope.invalidate_requested(
+                        data,
+                        candidate,
+                        newer,
+                        expected_member_hash=successor.member[
+                            "member_tuple_hash"
+                        ],
+                        expected_effect_hash=successor.effect[
+                            "request_tuple_hash"
+                        ],
+                        expected_status_hash=successor.status[
+                            "status_hash"
+                        ],
+                    )
+                    self.assertEqual(
+                        second_invalidation.disposition, "COMMITTED"
+                    )
+
+                authority = store.read_selected_authority(member_id)
+                live = store.open_effect(
+                    data,
+                    candidate,
+                    member_id=member_id,
+                    expected_member_hash=authority.member[
+                        "member_tuple_hash"
+                    ],
+                    expected_effect_hash=authority.effect[
+                        "request_tuple_hash"
+                    ],
+                    expected_status_hash=authority.status["status_hash"],
+                    executor_secret=b"b" * 32,
+                )
+                live.execution.close()
+                authority = store.read_selected_authority(member_id)
+                with store.member_mutation_scope(member_id) as scope:
+                    marked = scope.mark_dead_executor_unavailable(
+                        data,
+                        candidate,
+                        expected_status_hash=authority.status[
+                            "status_hash"
+                        ],
+                    )
+                    self.assertIsInstance(
+                        marked, registration_store.OperationResult
+                    )
+                final = store.read_selected_authority(member_id)
+                self.assertIsNone(final.status["executor_token_hash"])
+                self.assertIsNotNone(
+                    store.validate_semantic_closure(member_id)
+                )
+
+    def test_ar_two_processes_converge_on_under_lock_fresh_basis(self) -> None:
+        context = multiprocessing.get_context("spawn")
+        for order in ((1, 2), (2, 1)):
+            with self.subTest(order=order), tempfile.TemporaryDirectory() as tmp:
+                db = Path(tmp) / "state" / "registration-v1" / "registration.db"
+                with RegistrationHarness.open(
+                    db, measured_free_bytes=2 * 1024**3
+                ) as harness:
+                    candidate = harness.candidate()
+                    harness.store.bootstrap(harness.control(), candidate)
+                    harness.store.activate(harness.control(), candidate)
+                    before = harness.store.table_count(
+                        "registration_operation_audit"
+                    )
+
+                shared_ordinal = context.Value(
+                    "i", 1 if order == (1, 2) else 2
+                )
+                first_attempting = context.Event()
+                first_entered = context.Event()
+                release_first = context.Event()
+                second_attempting = context.Event()
+                second_entered = context.Event()
+                results = context.Queue()
+                first = context.Process(
+                    target=_scope_install_process,
+                    args=(
+                        str(db),
+                        shared_ordinal,
+                        first_attempting,
+                        first_entered,
+                        release_first,
+                        order[0],
+                        "e1" * 32,
+                        results,
+                    ),
+                )
+                second = context.Process(
+                    target=_scope_install_process,
+                    args=(
+                        str(db),
+                        shared_ordinal,
+                        second_attempting,
+                        second_entered,
+                        None,
+                        order[1],
+                        "e2" * 32,
+                        results,
+                    ),
+                )
+                first.start()
+                self.assertTrue(first_entered.wait(5))
+                second.start()
+                self.assertTrue(second_attempting.wait(5))
+                self.assertFalse(second_entered.wait(0.1))
+                shared_ordinal.value = 2
+                release_first.set()
+                first.join(10)
+                second.join(10)
+                self.assertFalse(first.is_alive())
+                self.assertFalse(second.is_alive())
+                observed = [results.get(timeout=2), results.get(timeout=2)]
+                self.assertTrue(
+                    all(result[0] == "ok" for result in observed),
+                    observed,
+                )
+                self.assertEqual(
+                    {result[1] for result in observed},
+                    {"COMMITTED"},
+                )
+                self.assertEqual(len({result[2] for result in observed}), 1)
+                self.assertEqual(
+                    {result[-2] for result in observed}, set(order)
+                )
+                with RegistrationHarness.open(
+                    db, measured_free_bytes=2 * 1024**3
+                ) as harness:
+                    expected_hash = _fresh_basis(
+                        harness, 2
+                    ).identity.current_basis_hash
+                    self.assertEqual(
+                        {result[-1] for result in observed},
+                        {expected_hash},
+                    )
+                    member_id = _member_id(harness.identity())
+                    authority = harness.store.read_selected_authority(
+                        member_id
+                    )
+                    self.assertEqual(
+                        authority.member["current_basis_hash"],
+                        expected_hash,
+                    )
+                    self.assertEqual(
+                        harness.store.table_count(
+                            "registration_operation_audit"
+                        ),
+                        before + 1,
+                    )
+
+    def test_ar_same_boot_snapshot_is_complete_validated_and_read_only(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state" / "registration-v1" / "registration.db"
+            with RegistrationHarness.open(
+                db, measured_free_bytes=4 * 1024**3
+            ) as harness:
+                store = harness.store
+                candidate = harness.candidate()
+                data = harness.data()
+                store.bootstrap(harness.control(), candidate)
+                store.activate(harness.control(), candidate)
+                empty = store.select_same_boot_snapshot(boot_id="boot-a")
+                self.assertEqual(empty.candidates, ())
+
+                expected: dict[str, tuple[str, int]] = {}
+                for ordinal in range(1, 11):
+                    identity_value, _, _ = _install_member(
+                        harness,
+                        ordinal,
+                        sample_boot_id="boot-a",
+                    )
+                    member_id = _member_id(identity_value)
+                    authority = store.read_selected_authority(member_id)
+                    opened = store.open_effect(
+                        data,
+                        candidate,
+                        member_id=member_id,
+                        expected_member_hash=authority.member[
+                            "member_tuple_hash"
+                        ],
+                        expected_effect_hash=authority.effect[
+                            "request_tuple_hash"
+                        ],
+                        expected_status_hash=authority.status[
+                            "status_hash"
+                        ],
+                        executor_secret=ordinal.to_bytes(32, "big"),
+                    )
+                    opened.execution.close()
+                    authority = store.read_selected_authority(member_id)
+                    expected[member_id] = (
+                        authority.status["executor_token_hash"],
+                        authority.status["executor_generation"],
+                    )
+                    if ordinal in {1, 8, 9, 10}:
+                        before = store.table_count(
+                            "registration_operation_audit"
+                        )
+                        snapshot = store.select_same_boot_snapshot(
+                            boot_id="boot-a"
+                        )
+                        self.assertEqual(
+                            [item.member_id for item in snapshot.candidates],
+                            sorted(expected),
+                        )
+                        self.assertEqual(
+                            len(snapshot.candidates), ordinal
+                        )
+                        protocol = store.current_protocol()
+                        self.assertIsNotNone(protocol)
+                        self.assertEqual(
+                            snapshot.protocol_seq,
+                            protocol["protocol_seq"],
+                        )
+                        self.assertEqual(
+                            snapshot.protocol_hash,
+                            protocol["protocol_hash"],
+                        )
+                        for item in snapshot.candidates:
+                            self.assertEqual(
+                                (
+                                    item.executor_token_hash,
+                                    item.executor_generation,
+                                ),
+                                expected[item.member_id],
+                            )
+                        self.assertEqual(
+                            store.table_count(
+                                "registration_operation_audit"
+                            ),
+                            before,
+                        )
+
+                victim = sorted(expected)[0]
+                external = sqlite3.connect(str(db))
+                try:
+                    self._drop_all_registration_triggers(external)
+                    external.execute(
+                        "UPDATE registration_runtime_status "
+                        "SET status_hash=? WHERE member_id=?",
+                        ("f" * 64, victim),
+                    )
+                    external.commit()
+                finally:
+                    external.close()
+                before = store.table_count("registration_operation_audit")
+                with self.assertRaises(registration_store.StoreUnavailable):
+                    store.select_same_boot_snapshot(boot_id="boot-a")
+                with self.assertRaises(registration_store.StoreUnavailable):
+                    store.select_r1_scope(
+                        victim,
+                        "boot-a",
+                        1_000_000,
+                    )
+                self.assertEqual(
+                    store.table_count("registration_operation_audit"),
+                    before,
+                )
+
+    def test_ar_r1_scope_positions_and_independent_outside_flags(self) -> None:
+        for universe in ("same_boot", "due", "reboot"):
+            with self.subTest(universe=universe), tempfile.TemporaryDirectory() as tmp:
+                db = (
+                    Path(tmp)
+                    / "state"
+                    / "registration-v1"
+                    / "registration.db"
+                )
+                with RegistrationHarness.open(
+                    db, measured_free_bytes=4 * 1024**3
+                ) as harness:
+                    store = harness.store
+                    candidate = harness.candidate()
+                    data = harness.data()
+                    store.bootstrap(harness.control(), candidate)
+                    store.activate(harness.control(), candidate)
+                    member_ids: list[str] = []
+                    for ordinal in range(1, 10):
+                        boot = "boot-old" if universe == "reboot" else "boot-a"
+                        identity_value, _, _ = _install_member(
+                            harness,
+                            ordinal,
+                            sample_boot_id=boot,
+                        )
+                        member_id = _member_id(identity_value)
+                        member_ids.append(member_id)
+                        if universe == "same_boot":
+                            authority = store.read_selected_authority(
+                                member_id
+                            )
+                            opened = store.open_effect(
+                                data,
+                                candidate,
+                                member_id=member_id,
+                                expected_member_hash=authority.member[
+                                    "member_tuple_hash"
+                                ],
+                                expected_effect_hash=authority.effect[
+                                    "request_tuple_hash"
+                                ],
+                                expected_status_hash=authority.status[
+                                    "status_hash"
+                                ],
+                                executor_secret=ordinal.to_bytes(32, "big"),
+                            )
+                            opened.execution.close()
+                        if ordinal == 1:
+                            single = store.select_r1_scope(
+                                member_id,
+                                "boot-a",
+                                1_000_000,
+                            )
+                            single_values = {
+                                "same_boot": single.authorized_same_boot,
+                                "due": single.authorized_due,
+                                "reboot": single.authorized_reboot,
+                            }
+                            self.assertEqual(
+                                single_values[universe].member_id,
+                                member_id,
+                            )
+                            self.assertFalse(
+                                single.outside_scope_same_boot
+                            )
+                            self.assertFalse(single.outside_scope_due)
+                            self.assertFalse(single.outside_scope_reboot)
+
+                    member_ids.sort()
+                    before = store.table_count(
+                        "registration_operation_audit"
+                    )
+                    for position in (0, 7, 8):
+                        selected = store.select_r1_scope(
+                            member_ids[position],
+                            "boot-a",
+                            1_000_000,
+                        )
+                        values = {
+                            "same_boot": selected.authorized_same_boot,
+                            "due": selected.authorized_due,
+                            "reboot": selected.authorized_reboot,
+                        }
+                        flags = {
+                            "same_boot": (
+                                selected.outside_scope_same_boot
+                            ),
+                            "due": selected.outside_scope_due,
+                            "reboot": selected.outside_scope_reboot,
+                        }
+                        self.assertEqual(
+                            values[universe].member_id,
+                            member_ids[position],
+                        )
+                        self.assertTrue(flags[universe])
+                        for other in set(values) - {universe}:
+                            self.assertIsNone(values[other])
+                            self.assertFalse(flags[other])
+                    self.assertEqual(
+                        store.table_count("registration_operation_audit"),
+                        before,
+                    )
+                    with self.assertRaises(ValueError):
+                        store.select_r1_scope(
+                            member_ids[0], "boot-a", True
+                        )
+                    with self.assertRaises(ValueError):
+                        store.select_r1_scope(
+                            "bad", "boot-a", 1_000_000
+                        )
+                    with self.assertRaises(ValueError):
+                        store.list_due_candidates(
+                            boot_id="boot-a",
+                            now_mono_ns=1_000_000,
+                            limit=9,
+                        )
+
+    def test_ar_same_boot_snapshot_is_coherent_under_protocol_change(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state" / "registration-v1" / "registration.db"
+            with RegistrationHarness.open(
+                db, measured_free_bytes=4 * 1024**3
+            ) as harness:
+                store = harness.store
+                candidate = harness.candidate()
+                control = harness.control()
+                store.bootstrap(control, candidate)
+                store.activate(control, candidate)
+                initial = store.current_protocol()
+                self.assertIsNotNone(initial)
+                entered = threading.Event()
+                release = threading.Event()
+                writer_ready = threading.Event()
+                writer_done = threading.Event()
+                writer_errors: list[BaseException] = []
+                original_validate = store._validate_protocol_row
+                delayed = False
+
+                def delayed_validate(*args, **kwargs):
+                    nonlocal delayed
+                    result = original_validate(*args, **kwargs)
+                    if not delayed:
+                        delayed = True
+                        entered.set()
+                        if not release.wait(5):
+                            raise RuntimeError("selector release timed out")
+                    return result
+
+                def writer() -> None:
+                    try:
+                        with registration_store.RegistrationStore(
+                            db,
+                            free_bytes=lambda _fd: 4 * 1024**3,
+                            boot_id=lambda: "boot-a",
+                            mono_ns=lambda: 100,
+                            _test_profile_seal=(
+                                registration_store._TEST_PROFILE_SEAL
+                            ),
+                        ) as other:
+                            writer_ready.set()
+                            if not entered.wait(5):
+                                raise RuntimeError("selector never entered")
+                            other.begin_drain(control, candidate)
+                    except BaseException as error:
+                        writer_errors.append(error)
+                    finally:
+                        release.set()
+                        writer_done.set()
+
+                thread = threading.Thread(target=writer)
+                thread.start()
+                self.assertTrue(writer_ready.wait(5))
+                store._validate_protocol_row = delayed_validate
+                try:
+                    old = store.select_same_boot_snapshot(boot_id="boot-a")
+                finally:
+                    store._validate_protocol_row = original_validate
+                self.assertTrue(writer_done.wait(5))
+                thread.join(1)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(writer_errors, [])
+                self.assertEqual(old.candidates, ())
+                self.assertEqual(
+                    old.protocol_hash, initial["protocol_hash"]
+                )
+                new = store.select_same_boot_snapshot(boot_id="boot-a")
+                self.assertEqual(new.candidates, ())
+                self.assertGreater(new.protocol_seq, old.protocol_seq)
+                self.assertNotEqual(new.protocol_hash, old.protocol_hash)
+
+    def test_ar_selector_transaction_is_coherent_under_concurrent_status_write(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state" / "registration-v1" / "registration.db"
+            with RegistrationHarness.open(
+                db, measured_free_bytes=4 * 1024**3
+            ) as harness:
+                store = harness.store
+                candidate = harness.candidate()
+                data = harness.data()
+                store.bootstrap(harness.control(), candidate)
+                store.activate(harness.control(), candidate)
+                member_ids: list[str] = []
+                for ordinal in (1, 2):
+                    identity_value, _, _ = _install_member(
+                        harness,
+                        ordinal,
+                        sample_boot_id="boot-a",
+                    )
+                    member_id = _member_id(identity_value)
+                    authority = store.read_selected_authority(member_id)
+                    opened = store.open_effect(
+                        data,
+                        candidate,
+                        member_id=member_id,
+                        expected_member_hash=authority.member[
+                            "member_tuple_hash"
+                        ],
+                        expected_effect_hash=authority.effect[
+                            "request_tuple_hash"
+                        ],
+                        expected_status_hash=authority.status["status_hash"],
+                        executor_secret=ordinal.to_bytes(32, "big"),
+                    )
+                    opened.execution.close()
+                    member_ids.append(member_id)
+
+                victim = sorted(member_ids)[-1]
+                victim_status = store.read_selected_authority(victim).status[
+                    "status_hash"
+                ]
+                entered = threading.Event()
+                release = threading.Event()
+                writer_ready = threading.Event()
+                writer_done = threading.Event()
+                writer_errors: list[BaseException] = []
+                original_validate = store._validate_semantic_closure_tx
+                calls = 0
+
+                def delayed_validate(*args, **kwargs):
+                    nonlocal calls
+                    result = original_validate(*args, **kwargs)
+                    calls += 1
+                    if calls == 1:
+                        entered.set()
+                        if not release.wait(5):
+                            raise RuntimeError("selector release timed out")
+                    return result
+
+                def writer() -> None:
+                    try:
+                        with registration_store.RegistrationStore(
+                            db,
+                            free_bytes=lambda _fd: 4 * 1024**3,
+                            boot_id=lambda: "boot-a",
+                            mono_ns=lambda: 100,
+                            _test_profile_seal=(
+                                registration_store._TEST_PROFILE_SEAL
+                            ),
+                        ) as other:
+                            writer_ready.set()
+                            if not entered.wait(5):
+                                raise RuntimeError("selector never entered")
+                            other.mark_dead_executor_unavailable(
+                                data,
+                                candidate,
+                                member_id=victim,
+                                expected_status_hash=victim_status,
+                            )
+                    except BaseException as error:
+                        writer_errors.append(error)
+                    finally:
+                        release.set()
+                        writer_done.set()
+
+                thread = threading.Thread(target=writer)
+                thread.start()
+                self.assertTrue(writer_ready.wait(5))
+                store._validate_semantic_closure_tx = delayed_validate
+                try:
+                    old = store.select_same_boot_snapshot(boot_id="boot-a")
+                finally:
+                    store._validate_semantic_closure_tx = original_validate
+                self.assertTrue(writer_done.wait(5))
+                thread.join(1)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(writer_errors, [])
+                self.assertEqual(
+                    [item.member_id for item in old.candidates],
+                    sorted(member_ids),
+                )
+                new = store.select_same_boot_snapshot(boot_id="boot-a")
+                self.assertEqual(
+                    [item.member_id for item in new.candidates],
+                    [
+                        member_id
+                        for member_id in sorted(member_ids)
+                        if member_id != victim
+                    ],
+                )
+
+                original_validate = store._validate_semantic_closure_tx
+                before = store.table_count("registration_operation_audit")
+                store._validate_semantic_closure_tx = (
+                    lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                        sqlite3.OperationalError("injected selector fault")
+                    )
+                )
+                try:
+                    with self.assertRaises(
+                        registration_store.StoreUnavailable
+                    ):
+                        store.select_r1_scope(
+                            member_ids[0],
+                            "boot-a",
+                            1_000_000,
+                        )
+                finally:
+                    store._validate_semantic_closure_tx = original_validate
+                self.assertEqual(
+                    store.table_count("registration_operation_audit"),
+                    before,
                 )
 
     def test_store_failure_contains_only_after_containment_commit(self) -> None:
