@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from engine import registration_admission, registration_hashes
 
@@ -190,6 +191,68 @@ class RegistrationEventParserTest(unittest.TestCase):
             with self.subTest(raw=raw[:30]):
                 with self.assertRaises(registration_admission.EventRefused):
                     registration_admission.parse_registration_event_bytes(raw)
+
+    def test_byte_parser_bounds_depth_and_nodes_before_json_decode(self) -> None:
+        depth_16 = b"[" * 16 + b"null" + b"]" * 16
+        with mock.patch.object(
+            registration_admission.json,
+            "loads",
+            wraps=json.loads,
+        ) as loads:
+            with self.assertRaises(registration_admission.EventRefused):
+                registration_admission.parse_registration_event_bytes(depth_16)
+            self.assertEqual(loads.call_count, 1)
+
+        for raw in (
+            b"[" * 17 + b"null" + b"]" * 17,
+            b"[" * 1_000 + b"null" + b"]" * 1_000,
+            b"[" + b",".join([b"null"] * 513) + b"]",
+        ):
+            with self.subTest(length=len(raw)), mock.patch.object(
+                registration_admission.json,
+                "loads",
+                wraps=json.loads,
+            ) as loads:
+                with self.assertRaises(registration_admission.EventRefused):
+                    registration_admission.parse_registration_event_bytes(raw)
+                self.assertEqual(loads.call_count, 0)
+
+    def test_byte_parser_bounds_recursion_memory_and_truncation(self) -> None:
+        valid = json.dumps(_payload(), separators=(",", ":")).encode()
+        for failure in (RecursionError("deep"), MemoryError("wide")):
+            with self.subTest(failure=type(failure).__name__), mock.patch.object(
+                registration_admission.json,
+                "loads",
+                side_effect=failure,
+            ):
+                with self.assertRaises(
+                    registration_admission.EventRefused
+                ) as captured:
+                    registration_admission.parse_registration_event_bytes(
+                        valid
+                    )
+                self.assertEqual(captured.exception.reason, "PARSER_REJECT")
+        with self.assertRaises(registration_admission.EventRefused):
+            registration_admission.parse_registration_event_bytes(valid[:-1])
+
+    def test_object_parser_bounds_predecoded_depth_and_nodes(self) -> None:
+        deep = _payload()
+        deep["tool_input"] = {}
+        current = deep["tool_input"]
+        for _ in range(registration_admission.MAX_EVENT_JSON_DEPTH):
+            current["command"] = {}
+            current = current["command"]
+        wide = _payload()
+        wide["tool_input"] = {
+            "command": [None] * registration_admission.MAX_EVENT_JSON_NODES
+        }
+        for payload in (deep, wide):
+            with self.subTest(kind=("deep" if payload is deep else "wide")):
+                with self.assertRaises(
+                    registration_admission.EventRefused
+                ) as captured:
+                    registration_admission.parse_registration_event(payload)
+                self.assertEqual(captured.exception.reason, "PARSER_REJECT")
 
     def test_existing_symlink_alias_rejects_during_parse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

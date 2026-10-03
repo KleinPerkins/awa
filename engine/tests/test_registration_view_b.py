@@ -121,6 +121,26 @@ class RegistrationViewTest(unittest.TestCase):
         self.assertEqual(component["severity"], "degraded")
         self.assertEqual(component["reason_code"], "DIRTY_UNSUPPORTED")
 
+    def test_recovery_exhaustion_is_red_without_containment_claim(self) -> None:
+        snapshot = registration_view.RegistrationStatus(
+            ready=False,
+            reason="CONTAINMENT_UNAVAILABLE",
+            member_id=M,
+            member_epoch=3,
+            phase="EFFECT_IN_FLIGHT",
+            outcome=None,
+            effect_id=E,
+            status_version=4,
+            protocol_generation=1,
+            protocol_mode="WRITABLE",
+        )
+        component = registration_view.adr0020_component(snapshot)
+        self.assertEqual(component["severity"], "red")
+        self.assertEqual(
+            component["reason_code"], "CONTAINMENT_UNAVAILABLE"
+        )
+        self.assertNotIn("contained", json.dumps(component).lower())
+
     def test_unknown_internal_value_maps_store_unavailable(self) -> None:
         authority = registration_admission.SelectedAuthorityView(
             **{**_authority().__dict__, "member_phase": "UNKNOWN"}

@@ -85,6 +85,55 @@ class RegistrationIndependenceTest(unittest.TestCase):
             with self.subTest(path=path.name):
                 self.assertEqual(referenced & forbidden, set())
 
+    def test_body_b_uses_only_public_typed_store_boundaries(self) -> None:
+        basis_changing = {
+            "install_member",
+            "bind_episode",
+            "invalidate_requested",
+            "set_pending",
+            "replace_pending",
+            "handoff_resolved",
+            "mark_dead_executor_unavailable",
+        }
+        for path in BODY_B_MODULES:
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+            private_access = {
+                node.attr
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Attribute)
+                and node.attr in {"_locks", "_connection"}
+            }
+            private_keywords = {
+                keyword.arg
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                for keyword in node.keywords
+                if keyword.arg == "_member_lock"
+            }
+            direct_store_calls = set()
+            for node in ast.walk(tree):
+                if (
+                    not isinstance(node, ast.Call)
+                    or not isinstance(node.func, ast.Attribute)
+                    or node.func.attr not in basis_changing
+                ):
+                    continue
+                receiver = node.func.value
+                if (
+                    isinstance(receiver, ast.Attribute)
+                    and receiver.attr == "store"
+                ):
+                    direct_store_calls.add(node.func.attr)
+            with self.subTest(path=path.name):
+                self.assertEqual(private_access, set())
+                self.assertEqual(private_keywords, set())
+                self.assertEqual(direct_store_calls, set())
+                self.assertNotIn("SELECT ", source)
+                self.assertNotIn("INSERT ", source)
+                self.assertNotIn("UPDATE ", source)
+                self.assertNotIn("DELETE ", source)
+
 
 if __name__ == "__main__":
     unittest.main()
