@@ -16,6 +16,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
+from importlib import resources
 from pathlib import Path
 from typing import Callable
 
@@ -250,7 +251,7 @@ def _sha256(value: bytes) -> str:
 
 @lru_cache(maxsize=1)
 def _canonical_sql_v2_bytes() -> bytes:
-    source = Path(__file__).with_name("registration_schema.sql").read_bytes()
+    source = resources.files("engine").joinpath("registration_schema.sql").read_bytes()
     if b"\r" in source or not source.endswith(b";\n"):
         raise RuntimeError("canonical registration SQL v1 framing mismatch")
     try:

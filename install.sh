@@ -89,7 +89,7 @@ MCP_JSON="${AWA_MCP_JSON:-$HOME/.cursor/mcp.json}"
 OPERATOR_RULE="${AWA_OPERATOR_RULE:-$HOME/.cursor/rules/awa-operator.mdc}"
 
 # Top-level items copied into the runtime (a self-describing, re-runnable install).
-COPY_TREES=(kernel engine dashboard contracts bin consumer)
+COPY_TREES=(kernel engine dashboard contracts bin consumer build)
 COPY_FILES=(pyproject.toml Makefile install.sh bootstrap.sh ARCHITECTURE.md README.md SECURITY.md LICENSE)
 
 # Ensure the host-configured per-repo modes file exists (schema awa-modes/v1 + a default_mode),
@@ -173,7 +173,11 @@ validate_integrity_product_assets() {
   [ -f "$root/engine/registration_installer.py" ] || return 1
   [ -f "$root/engine/registration_host.py" ] || return 1
   [ -f "$root/engine/registration_receiver.py" ] || return 1
+  [ -f "$root/engine/registration_launcher.py" ] || return 1
+  [ -f "$root/engine/registration_privileged_installer.py" ] || return 1
+  [ -f "$root/build/private-runtime/sources.lock.json" ] || return 1
   python3 - "$root" "$access_mode" <<'PY'
+import hashlib
 import json
 import os
 import stat
@@ -194,6 +198,12 @@ scripts = (
     root / "kernel" / "bin" / "awa-registration-receiver.sh",
     root / "engine" / "integrity_detach.py",
     root / "engine" / "native_entry_prompt_adapter.py",
+)
+private_runtime_sources = (
+    root / "kernel" / "bin" / "awa-registration-entrypoint.sh",
+    root / "kernel" / "bin" / "awa-registration-bootstrap.py",
+    root / "kernel" / "bin" / "awa-registration-child.py",
+    root / "kernel" / "bin" / "awa-private-runtime-admin.py",
 )
 
 
@@ -229,11 +239,60 @@ owner_v4 = json.loads(
         encoding="utf-8"
     )
 )
+frozen_hashes = {
+    "build/private-runtime/sources.lock.json":
+        "a8b1415067e7b33c18ccc3c1d42e19ae27a9ad5784a7f294fffc562083762d72",
+    "contracts/awa-contract.v1.json":
+        "408e271e9f55269d276e6d34e2aa3bb2bbc072fea3b6c8a841ede1912978c4d9",
+    "contracts/awa-contract.v2.json":
+        "db0a007ec7b0b8829fa721ff2b1835c1a9d783d5e151d2dda5d1bcaae85b2b0a",
+    "contracts/awa-contract.v3.json":
+        "fdc093ae25f868a50b7e3025a6554626baf7beeff987c9e9f0b92044d0de36b9",
+    "contracts/awa-contract.v4.json":
+        "f3d2e32295b0ce46f1611dbd062174b1075b309a0d81e08007b2a0f391694ae3",
+    "contracts/awa-registration-admin-audit.v1.json":
+        "a5718883a1b49c2030bdbe32eb88482f684cae635173449000be13c935345e8a",
+    "contracts/awa-registration-admin-audit.v2.json":
+        "b5daa0798f5f5ed049806662b89fa22b98b37d2a163188de449ca9003b4882e2",
+    "contracts/awa-registration-admin-audit.v3.json":
+        "f9cd88d74b1d3e6171ae4859efde7ee7934f09118a7aa56cf1fa73ec62937efa",
+    "contracts/awa-registration-owner-signers.v1":
+        "9155be780c73e65a549ae97326dc56c53045aeaddb697745a95ce191aa472b7e",
+    "contracts/awa-registration-owner-signers.v2":
+        "690c6c7f7f4f12705763520a52eb61181bd5afe7914a5729cc7d4d4abdfa7ff3",
+    "contracts/awa-registration-platform-bootstrap.v1.json":
+        "4d9e89a327c4b50e287e5a61e96522a50d4f00346c3dbfa616c401c89fa79f0c",
+    "contracts/awa-registration-platform-bootstrap.v2.json":
+        "404267a5e0e444a82ae662dedaaad94661cc8fb3a349d4da4eb0523ae6fa28b9",
+    "contracts/awa-registration-platform-bootstrap.v3.json":
+        "ce82d498500b183e308791f12db85d2b3ddbc3f6b0b2d132ad0c6de1165628f0",
+    "contracts/awa-registration-private-runtime.v1.json":
+        "f313e4d04f15fa5bcf7147b870a240402393d9a74cb16c23d5bdfd0b547a3321",
+    "contracts/awa-registration-private-runtime.v2.json":
+        "91fc77c3aef7d8bf5b563993c3ae2c8766205a41cb6a23b735259805c485d4a8",
+    "contracts/awa-registration-private-runtime.v3.json":
+        "29fc38b6fac0ce9edda4a6ea01156b180c4b48f8d6b52b68e58addd269cb1a84",
+    "contracts/awa-registration-privileged-envelope.v1.json":
+        "7fc2cdf48e041b501eb7230dd1e0ec9548540fba17f129dbe86a7ad07a117034",
+}
+static_ok = all(
+    path.is_file()
+    and hashlib.sha256(path.read_bytes()).hexdigest() == expected
+    for relative, expected in frozen_hashes.items()
+    for path in (root / relative,)
+)
 minimum = contract.get("minimum_interval_seconds")
 interval = contract.get("interval_seconds")
 maximum = contract.get("maximum_interval_seconds")
 valid = (
     all(valid_script(path) for path in scripts)
+    and all(
+        path.is_file()
+        and stat.S_ISREG(path.lstat().st_mode)
+        and os.access(path, os.R_OK)
+        for path in private_runtime_sources
+    )
+    and static_ok
     and contract.get("schema") == "awa-integrity-schedule/v1"
     and contract.get("label") == "com.kleinperkins.awa-integrity"
     and type(minimum) is int

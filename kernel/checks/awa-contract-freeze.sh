@@ -13,6 +13,15 @@ KERNEL_DIR="$(cd "$SELF_DIR/.." && pwd)"                        # kernel
 AWA_HOME="${AWA_HOME:-$(cd "$KERNEL_DIR/.." && pwd)}"           # install root (role-resolved)
 
 CONTRACT="$AWA_HOME/contracts/awa-contract.v1.json"
+CONTRACT_V2="$AWA_HOME/contracts/awa-contract.v2.json"
+PRIVATE_RUNTIME_CONTRACT="$AWA_HOME/contracts/awa-registration-private-runtime.v1.json"
+PLATFORM_BOOTSTRAP_CONTRACT="$AWA_HOME/contracts/awa-registration-platform-bootstrap.v1.json"
+PLATFORM_BOOTSTRAP_CONTRACT_V2="$AWA_HOME/contracts/awa-registration-platform-bootstrap.v2.json"
+PRIVILEGED_ENVELOPE_CONTRACT="$AWA_HOME/contracts/awa-registration-privileged-envelope.v1.json"
+ADMIN_AUDIT_CONTRACT="$AWA_HOME/contracts/awa-registration-admin-audit.v1.json"
+OWNER_SIGNERS_V1="$AWA_HOME/contracts/awa-registration-owner-signers.v1"
+OWNER_SIGNERS_V2="$AWA_HOME/contracts/awa-registration-owner-signers.v2"
+PRIVATE_RUNTIME_SOURCE_LOCK="$AWA_HOME/build/private-runtime/sources.lock.json"
 HOOK_OWNER_V2="$AWA_HOME/contracts/awa-hook-owner.v2.json"
 HOOK_OWNER_V3="$AWA_HOME/contracts/awa-hook-owner.v3.json"
 HOOK_OWNER_V4="$AWA_HOME/contracts/awa-hook-owner.v4.json"
@@ -29,6 +38,10 @@ REGISTRATION_ADMISSION="$AWA_HOME/kernel/hooks/awa-registration-admission.sh"
 REGISTRATION_STARTUP="$AWA_HOME/kernel/hooks/awa-registration-startup.sh"
 REGISTRATION_TICK="$AWA_HOME/kernel/bin/awa-registration-tick.sh"
 REGISTRATION_RECEIVER="$AWA_HOME/kernel/bin/awa-registration-receiver.sh"
+REGISTRATION_ENTRYPOINT="$AWA_HOME/kernel/bin/awa-registration-entrypoint.sh"
+REGISTRATION_BOOTSTRAP="$AWA_HOME/kernel/bin/awa-registration-bootstrap.py"
+REGISTRATION_CHILD="$AWA_HOME/kernel/bin/awa-registration-child.py"
+PRIVATE_RUNTIME_ADMIN="$AWA_HOME/kernel/bin/awa-private-runtime-admin.py"
 INSTALL_HOOKS="$AWA_HOME/kernel/hooks/install-hooks.sh"
 EMITTER="$AWA_HOME/dashboard/emitter.py"
 
@@ -61,6 +74,86 @@ if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$CONTRACT" 2>/d
   bad "frozen contract is not valid JSON: $CONTRACT"; echo "awa-contract-freeze: FAILED"; exit 1
 fi
 pass "frozen contract present + valid JSON"
+if [ "$(basename "$0")" = "hook-owner-freeze.sh" ]; then
+  pass "bounded hook-owner fixture skips unrelated static-contract authority"
+elif AWA_HOME="$AWA_HOME" python3 - <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+
+root = Path(os.environ["AWA_HOME"])
+expected = {
+    "build/private-runtime/sources.lock.json":
+        "a8b1415067e7b33c18ccc3c1d42e19ae27a9ad5784a7f294fffc562083762d72",
+    "contracts/awa-contract.v1.json":
+        "408e271e9f55269d276e6d34e2aa3bb2bbc072fea3b6c8a841ede1912978c4d9",
+    "contracts/awa-contract.v2.json":
+        "db0a007ec7b0b8829fa721ff2b1835c1a9d783d5e151d2dda5d1bcaae85b2b0a",
+    "contracts/awa-contract.v3.json":
+        "fdc093ae25f868a50b7e3025a6554626baf7beeff987c9e9f0b92044d0de36b9",
+    "contracts/awa-contract.v4.json":
+        "f3d2e32295b0ce46f1611dbd062174b1075b309a0d81e08007b2a0f391694ae3",
+    "contracts/awa-registration-admin-audit.v1.json":
+        "a5718883a1b49c2030bdbe32eb88482f684cae635173449000be13c935345e8a",
+    "contracts/awa-registration-admin-audit.v2.json":
+        "b5daa0798f5f5ed049806662b89fa22b98b37d2a163188de449ca9003b4882e2",
+    "contracts/awa-registration-admin-audit.v3.json":
+        "f9cd88d74b1d3e6171ae4859efde7ee7934f09118a7aa56cf1fa73ec62937efa",
+    "contracts/awa-registration-owner-signers.v1":
+        "9155be780c73e65a549ae97326dc56c53045aeaddb697745a95ce191aa472b7e",
+    "contracts/awa-registration-owner-signers.v2":
+        "690c6c7f7f4f12705763520a52eb61181bd5afe7914a5729cc7d4d4abdfa7ff3",
+    "contracts/awa-registration-platform-bootstrap.v1.json":
+        "4d9e89a327c4b50e287e5a61e96522a50d4f00346c3dbfa616c401c89fa79f0c",
+    "contracts/awa-registration-platform-bootstrap.v2.json":
+        "404267a5e0e444a82ae662dedaaad94661cc8fb3a349d4da4eb0523ae6fa28b9",
+    "contracts/awa-registration-platform-bootstrap.v3.json":
+        "ce82d498500b183e308791f12db85d2b3ddbc3f6b0b2d132ad0c6de1165628f0",
+    "contracts/awa-registration-private-runtime.v1.json":
+        "f313e4d04f15fa5bcf7147b870a240402393d9a74cb16c23d5bdfd0b547a3321",
+    "contracts/awa-registration-private-runtime.v2.json":
+        "91fc77c3aef7d8bf5b563993c3ae2c8766205a41cb6a23b735259805c485d4a8",
+    "contracts/awa-registration-private-runtime.v3.json":
+        "29fc38b6fac0ce9edda4a6ea01156b180c4b48f8d6b52b68e58addd269cb1a84",
+    "contracts/awa-registration-privileged-envelope.v1.json":
+        "7fc2cdf48e041b501eb7230dd1e0ec9548540fba17f129dbe86a7ad07a117034",
+}
+canonical_paths = {
+    "contracts/awa-contract.v3.json",
+    "contracts/awa-contract.v4.json",
+    "contracts/awa-registration-admin-audit.v2.json",
+    "contracts/awa-registration-admin-audit.v3.json",
+    "contracts/awa-registration-platform-bootstrap.v2.json",
+    "contracts/awa-registration-platform-bootstrap.v3.json",
+    "contracts/awa-registration-private-runtime.v2.json",
+    "contracts/awa-registration-private-runtime.v3.json",
+}
+for relative, digest in expected.items():
+    path = root / relative
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != digest:
+        raise SystemExit(f"hash drift: {relative}")
+    if relative in canonical_paths:
+        value = json.loads(raw)
+        canonical = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8") + b"\n"
+        if raw != canonical:
+            raise SystemExit(f"JCS+LF drift: {relative}")
+v2 = json.loads((root / "contracts/awa-contract.v2.json").read_bytes())
+if v2.get("successor_of") != "awa-contract/v1":
+    raise SystemExit("v2 successor drift")
+PY
+then
+  pass "v1 preserved; exact private-runtime v2/source-lock contracts frozen"
+else
+  bad "private-runtime v2/source-lock contract bytes drifted"
+fi
 if [ ! -f "$HOOK_OWNER_V2" ] ||
    ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$HOOK_OWNER_V2" 2>/dev/null; then
   bad "hook-owner v2 contract missing or invalid: $HOOK_OWNER_V2"
@@ -77,7 +170,8 @@ for f in "$DEV_WORKTREE" "$GUARD" "$COMPOSITE_GUARD" \
     "$INTEGRITY_OBSERVER" "$SESSION_HANDOFF" "$PROMPT_COMPOSITE" \
     "$HANDOFF_AUTHORITY" "$INTEGRITY_DETACHER" "$PROMPT_ADAPTER" \
     "$REGISTRATION_ADMISSION" "$REGISTRATION_STARTUP" "$REGISTRATION_TICK" \
-    "$REGISTRATION_RECEIVER" \
+    "$REGISTRATION_RECEIVER" "$REGISTRATION_ENTRYPOINT" \
+    "$REGISTRATION_BOOTSTRAP" "$REGISTRATION_CHILD" "$PRIVATE_RUNTIME_ADMIN" \
     "$INSTALL_HOOKS" "$EMITTER"; do
   [ -f "$f" ] || bad "role-resolved shim missing: $f"
 done
@@ -400,12 +494,26 @@ if has_executable_mode "$COMPOSITE_GUARD" "$INTEGRITY_OBSERVER" \
    grep -Fq '|| true' "$SESSION_HANDOFF" && \
    grep -Fq 'native_entry_prompt_adapter.py' "$PROMPT_COMPOSITE" && \
    grep -Fq 'before-submit-prompt.sh' "$PROMPT_COMPOSITE" && \
-   grep -Fq 'engine.registration_receiver admission' "$REGISTRATION_ADMISSION" && \
-   grep -Fq 'engine.registration_receiver startup' "$REGISTRATION_STARTUP" && \
-   grep -Fq 'engine.registration_receiver tick' "$REGISTRATION_TICK" && \
-   grep -Fq 'engine.registration_hook_runtime' "$REGISTRATION_RECEIVER" && \
-   grep -Fq 'engine.registration_host startup' "$REGISTRATION_RECEIVER" && \
-   grep -Fq 'engine.registration_host tick' "$REGISTRATION_RECEIVER" && \
+   grep -Fq '/Library/Application Support/AWA/bin/awa-registration' \
+     "$REGISTRATION_ADMISSION" && \
+   grep -Fq 'exec "$ENTRYPOINT" admission' "$REGISTRATION_ADMISSION" && \
+   grep -Fq 'exec "$ENTRYPOINT" startup' "$REGISTRATION_STARTUP" && \
+   grep -Fq 'exec "$ENTRYPOINT" tick' "$REGISTRATION_TICK" && \
+   grep -Fq 'exec "$ENTRYPOINT" receiver' "$REGISTRATION_RECEIVER" && \
+   grep -Fq '#!/bin/sh' "$REGISTRATION_ENTRYPOINT" && \
+   grep -Fq 'unset ENV BASH_ENV' "$REGISTRATION_ENTRYPOINT" && \
+   grep -Fq 'PATH=/usr/bin:/bin' "$REGISTRATION_ENTRYPOINT" && \
+   grep -Fq '/usr/bin/python3 -I -S -B' "$REGISTRATION_ENTRYPOINT" && \
+   grep -Fq '/Library/Application Support/AWA/bootstrap/v1/bootstrap.py' \
+     "$REGISTRATION_ENTRYPOINT" && \
+   ! grep -Eq 'active-bundle|runtime-config|interpreter_path|AWA_REGISTRATION_INTERPRETER|plutil' \
+     "$REGISTRATION_ADMISSION" "$REGISTRATION_STARTUP" \
+     "$REGISTRATION_TICK" "$REGISTRATION_RECEIVER" && \
+   grep -Fq 'POSIX_SPAWN_CLOEXEC_DEFAULT' \
+     "$PLATFORM_BOOTSTRAP_CONTRACT_V2" && \
+   grep -Fq 'await_parent_go' "$REGISTRATION_CHILD" && \
+   grep -Fq 'importlib.import_module("engine.registration_receiver")' \
+     "$REGISTRATION_CHILD" && \
    grep -Fq 'HARD_BUDGET_SECONDS = 2.0' "$PROMPT_ADAPTER" && \
    grep -Fq 'start_new_session=True' "$PROMPT_ADAPTER" && \
    grep -Fq 'close_fds=True' "$PROMPT_ADAPTER" && \
