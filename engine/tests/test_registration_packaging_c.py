@@ -16,6 +16,7 @@ ADMISSION = ROOT / "kernel/hooks/awa-registration-admission.sh"
 STARTUP = ROOT / "kernel/hooks/awa-registration-startup.sh"
 TICK = ROOT / "kernel/bin/awa-registration-tick.sh"
 RECEIVER = ROOT / "kernel/bin/awa-registration-receiver.sh"
+ENTRYPOINT = ROOT / "kernel/bin/awa-registration-entrypoint.sh"
 R0 = ROOT / "live-verify/native-entry-durable-registration-r0.py"
 DESKTOP_UAT = (
     ROOT
@@ -53,6 +54,7 @@ class RegistrationPackagingTest(unittest.TestCase):
                 str(ROOT / "engine/registration_installer.py"),
                 str(ROOT / "engine/registration_host.py"),
                 str(ROOT / "engine/registration_receiver.py"),
+                str(ROOT / "engine/registration_launcher.py"),
                 str(R0),
             ],
             capture_output=True,
@@ -61,6 +63,21 @@ class RegistrationPackagingTest(unittest.TestCase):
         self.assertEqual(
             compile_result.returncode, 0, compile_result.stderr
         )
+
+    def test_all_five_product_routes_are_posix_and_clear_shell_startup(self) -> None:
+        for script in (ENTRYPOINT, ADMISSION, RECEIVER, STARTUP, TICK):
+            with self.subTest(script=script.name):
+                raw = script.read_bytes()
+                self.assertTrue(raw.startswith(b"#!/bin/sh\n"))
+                self.assertNotIn(b"/usr/bin/env", raw)
+                self.assertNotIn(b"#!/bin/bash", raw)
+                self.assertIn(b"unset ENV BASH_ENV", raw)
+                result = subprocess.run(
+                    ["/bin/sh", "-n", str(script)],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_missing_runtime_wrapper_is_quiet_fail_open(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -90,12 +107,39 @@ class RegistrationPackagingTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(
-            payload["schema"], "awa-registration-r0-harness/v1"
+            payload["schema"], "awa-registration-r0-harness/v2"
         )
         self.assertEqual(payload["predeployment_evidence"], "absent")
         self.assertEqual(payload["rollout_stage"], "NONE")
         self.assertFalse(payload["executed"])
-        self.assertEqual(payload["cuts"], [f"C{value}" for value in range(8)])
+        self.assertEqual(payload["cuts"], [])
+        self.assertFalse(payload["barrier_catalog_complete"])
+        self.assertFalse(payload["process_kill_complete"])
+        self.assertFalse(payload["receiver_continuity_complete"])
+        self.assertEqual(
+            payload["barrier_catalog"],
+            [
+                "C0.PREFLIGHT",
+                "C1.BUNDLE_PUBLISHED",
+                "C2.DRAIN_COMMITTED",
+                "C2.STAGE_COMMITTED",
+                "C2.DIRECT_PROOF",
+                "C2.SHADOW_PROOF",
+                "C3.POINTER_SWITCHED",
+                "C3.POST_SWITCH_PROOF",
+                "C3.OLD_ENTRY_DISABLED",
+                "C4.ADOPT_COMMITTED",
+                "C4.TRANSFER_RECEIVED",
+                "C4.TRANSFER_ACTIVATED",
+                "C4.MARK_COMMITTED",
+                "C4.REACQUIRE_COMMITTED",
+                "C5.RECONCILIATION_BATCH",
+                "C5.CUSTODY_EMPTY",
+                "C6.ADVANCE_COMMITTED",
+                "C7.OLD_BUNDLE_REMOVED",
+                "C7.RESIDUE_RECONCILED",
+            ],
+        )
 
     def test_desktop_uat_script_defaults_to_non_mutating_check(self) -> None:
         result = subprocess.run(

@@ -54,11 +54,19 @@ A25_SERIALIZERS = (
 )
 
 A27_CONTROL_SEQUENCE = (
-    ControlSequenceFixture("C0", "WRITABLE", False, True, "R0_PREFLIGHT"),
-    ControlSequenceFixture("C1", "WRITABLE", False, True, "PROJECT_NEW"),
-    ControlSequenceFixture("C2", "WRITABLE", False, True, "DISABLE_OLD"),
-    ControlSequenceFixture("C3", "WRITABLE", False, False, "BEGIN_DRAIN"),
-    ControlSequenceFixture("C4", "DRAINING", False, False, "STAGE_ADOPT"),
+    ControlSequenceFixture("C0", "WRITABLE", False, True, "INSTALL_BUNDLE"),
+    ControlSequenceFixture(
+        "C1", "WRITABLE", False, True, "DRAIN_STAGE_PROVE"
+    ),
+    ControlSequenceFixture(
+        "C2", "DRAINING", True, True, "SWITCH_POINTER"
+    ),
+    ControlSequenceFixture(
+        "C3", "DRAINING", True, True, "PROVE_DISABLE_OLD"
+    ),
+    ControlSequenceFixture(
+        "C4", "DRAINING", True, False, "RECONCILE_CUSTODY"
+    ),
     ControlSequenceFixture("C5", "DRAINING", True, False, "ADVANCE"),
     ControlSequenceFixture("C6", "WRITABLE", False, False, "CLEAN_OLD"),
     ControlSequenceFixture("C7", "WRITABLE", False, False, "VERIFY"),

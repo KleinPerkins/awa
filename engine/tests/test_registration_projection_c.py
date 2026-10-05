@@ -18,68 +18,39 @@ H_E = "ee" * 32
 
 
 def _candidate_fields() -> dict[str, str]:
+    receipt, _gate = registration_projection.fixed_authority_vector(
+        "R1_CANARY"
+    )
     return {
-        "schema_hash": H_A,
-        "profile_hash": H_A,
-        "runtime_capability_hash": H_A,
-        "writer_binary_hash": H_A,
-        "writer_capability_hash": H_A,
-        "tool_inventory_hash": H_A,
-        "hook_projection_hash": H_A,
-        "hook_matcher_mode": "ENUMERATED",
-        "hook_matcher_hash": H_A,
-        "projection_file_generation": "1",
-        "protocol_generation": "1",
+        field: receipt.to_mapping()[field]
+        for field in registration_projection.CANDIDATE_FIELDS
     }
 
 
 def _receipt(scope: str = "R1_CANARY", *, root: str | None = H_D):
-    member = H_E if scope == "R1_CANARY" else None
-    return registration_projection.DirectReceipt(
-        schema="awa-registration-direct-receipt/v2",
-        owner_mode="DIRECT",
-        deployment_scope=scope,
-        candidate_digest=registration_projection.candidate_digest(
-            _candidate_fields()
-        ),
-        schema_hash=H_A,
-        profile_hash=H_A,
-        runtime_capability_hash=H_A,
-        writer_binary_hash=H_A,
-        writer_capability_hash=H_A,
-        tool_inventory_hash=H_A,
-        hook_projection_hash=H_A,
-        hook_matcher_mode="ENUMERATED",
-        hook_matcher_hash=H_A,
-        installed_file_hash=H_B,
-        projection_file_generation="1",
-        protocol_generation="1",
-        wrapper_runtime_hash=H_B,
-        installer_identity_hash=H_A,
-        installer_capability_hash=H_A,
-        owner_gate_digest=H_C,
-        canonical_root_hash=root,
-        member_id=member,
-    )
+    receipt, _gate = registration_projection.fixed_authority_vector(scope)
+    if scope == "R1_CANARY":
+        return registration_projection.DirectReceipt.from_mapping(
+            {**receipt.to_mapping(), "canonical_root_hash": root}
+        )
+    return receipt
 
 
 class DirectReceiptVectorTest(unittest.TestCase):
     def test_accepted_a22_candidate_and_receipt_vectors(self) -> None:
         self.assertEqual(
             registration_projection.candidate_digest(_candidate_fields()),
-            "a1c2c85d94124228ee839295c92b27efd1811c583e9e2e0f2b7ff06c7791e9ae",
+            "44eaaa6cd88e4aee5c2e69890bad2e2db925cfae40fa2a79abdec8d29d282cfc",
         )
         self.assertEqual(
-            _receipt().digest,
-            "4bc1ec7a34c527402da5ea85a55e868a5409bc1cb4a7634c6032f6ed65793d75",
-        )
-        self.assertEqual(
-            _receipt(root="ff" * 32).digest,
-            "abc336e3e104857960bda2540744b81ba1a343bf900cd4b27c1ddb0c42d7d6fb",
+            registration_projection.fixed_authority_vector(
+                "R1_CANARY"
+            )[0].digest,
+            "19382cb1c7eba25aaabe4cfc75b55b10c4d0d87b6b17c65924fe21cc9845d518",
         )
         self.assertEqual(
             _receipt("R2_DIRECT", root=None).digest,
-            "b6f93242d5f21629898d41aa101639753b26cc133be4d8932d48e3cc5a4e7431",
+            "24f5363f6efdd6dc2620b4f3219b6db4f7a525b62c3ca1d404e6f663251fb8fa",
         )
 
     def test_receipt_schema_is_exact_and_round_trips_canonical_bytes(self) -> None:
@@ -120,44 +91,27 @@ class DirectReceiptVectorTest(unittest.TestCase):
         self.assertEqual(deployment.candidate_digest, receipt.candidate_digest)
 
     def test_owner_gate_requires_detached_signature_verification(self) -> None:
-        gate = registration_projection.OwnerGate(
-            schema="awa-registration-owner-gate/v1",
-            repository="KleinPerkins/awa",
-            authorized_by="KleinPerkins",
-            deployment_scope="R1_CANARY",
-            candidate_digest=_receipt().candidate_digest,
-            canonical_root_hash=H_D,
-            member_id=H_E,
-            authorized=True,
+        receipt, gate = registration_projection.fixed_authority_vector(
+            "R1_CANARY"
         )
-        raw = gate.to_bytes()
-        calls = []
-
-        def valid(payload: bytes, signature: bytes) -> bool:
-            calls.append((payload, signature))
-            return signature in {b"sig-a", b"sig-b"}
-
-        first = registration_projection.verified_owner_gate_digest(
-            raw, b"sig-a", verifier=valid
-        )
-        second = registration_projection.verified_owner_gate_digest(
-            raw, b"sig-b", verifier=valid
-        )
-        self.assertEqual(first, second)
-        self.assertEqual(calls[0][0], raw)
-        bound = registration_projection.DirectReceipt.from_mapping(
-            {**_receipt().to_mapping(), "owner_gate_digest": first}
-        )
-        registration_projection.verify_receipt_owner_gate(
-            bound, raw, b"sig-a", verifier=valid
+        registration_projection.validate_receipt_against_gate(
+            receipt, gate
         )
         with self.assertRaises(ValueError):
-            registration_projection.verify_receipt_owner_gate(
-                _receipt(), raw, b"sig-a", verifier=valid
+            registration_projection.validate_receipt_against_gate(
+                registration_projection.DirectReceipt.from_mapping(
+                    {
+                        **receipt.to_mapping(),
+                        "owner_gate_digest": H_A,
+                    }
+                ),
+                gate,
             )
         with self.assertRaises(ValueError):
             registration_projection.verified_owner_gate_digest(
-                raw, b"invalid", verifier=valid
+                gate.to_bytes(),
+                b"historical-callback-signature",
+                verifier=lambda *_: True,
             )
 
 
@@ -349,8 +303,12 @@ class InventoryProjectionTest(unittest.TestCase):
                 matcher_mode="CATCH_ALL",
                 matcher_hash=matcher_hash,
                 inventory_hash=inventory_hash,
-                file_generation="1",
-                protocol_generation="1",
+                file_generation=_candidate_fields()[
+                    "projection_file_generation"
+                ],
+                protocol_generation=_candidate_fields()[
+                    "protocol_generation"
+                ],
                 wrapper_runtime_hash=H_B,
             )
         )
@@ -412,6 +370,169 @@ class InventoryProjectionTest(unittest.TestCase):
                 ),
                 first_runtime,
             )
+
+
+class ProtectedRuntimeSuccessorTest(unittest.TestCase):
+    def _receipt_values(self) -> dict:
+        values = {
+            field: H_A
+            for field in registration_projection.DIRECT_RECEIPT_V4_FIELDS
+        }
+        values.update(
+            {
+                "schema": "awa-registration-direct-receipt/v4",
+                "owner_mode": "DIRECT",
+                "deployment_scope": "R2_DIRECT",
+                "hook_matcher_mode": "ENUMERATED",
+                "projection_file_generation": "2",
+                "protocol_generation": "3",
+                "bundle_generation": "4",
+                "canonical_root_hash": None,
+                "member_id": None,
+                "harness_root_hash": None,
+                "source_lock_sha256":
+                    registration_projection.V7_SOURCE_LOCK_SHA256,
+                "bootstrap_contract_hash":
+                    "4d9e89a327c4b50e287e5a61e96522a50d4f00346c3dbfa616c401c89fa79f0c",
+                "private_runtime_contract_hash":
+                    "f313e4d04f15fa5bcf7147b870a240402393d9a74cb16c23d5bdfd0b547a3321",
+                "privileged_envelope_contract_hash":
+                    "7fc2cdf48e041b501eb7230dd1e0ec9548540fba17f129dbe86a7ad07a117034",
+                "admin_audit_contract_hash":
+                    "a5718883a1b49c2030bdbe32eb88482f684cae635173449000be13c935345e8a",
+                "allowed_signers_contract_path_hash":
+                    registration_projection.V7_SIGNER_PATH_HASH,
+                "allowed_signers_contract_hash":
+                    registration_projection.V7_SIGNER_CONTRACT_HASH,
+                "signer_public_key_sha256":
+                    registration_projection.V7_SIGNER_PUBLIC_KEY_SHA256,
+                "signer_fingerprint":
+                    registration_projection.V7_SIGNER_FINGERPRINT,
+            }
+        )
+        return values
+
+    def test_v4_receipt_body_gate_and_final_digest_are_branched(self) -> None:
+        preliminary = registration_projection.DirectReceiptV4(
+            **self._receipt_values()
+        )
+        gate_values = {
+            field: getattr(preliminary, field)
+            for field in registration_projection.OWNER_GATE_V3_FIELDS
+            if field in registration_projection.DIRECT_RECEIPT_V4_FIELDS
+        }
+        gate_values.update(
+            {
+                "schema": "awa-registration-owner-gate/v3",
+                "repository": "KleinPerkins/awa",
+                "authorized_by": "KleinPerkins",
+                "direct_receipt_body_hash": preliminary.body_hash,
+                "accepted_v6_normalized_digest":
+                    registration_projection.V7_ACCEPTED_V6_DIGEST,
+                "implementation_exact_head":
+                    "03d0d3dd3e840925149d3ae1c5dd94e7791e8c3d",
+                "authorized": True,
+            }
+        )
+        gate = registration_projection.OwnerGateV3(**gate_values)
+        final_values = self._receipt_values()
+        final_values["owner_gate_digest"] = gate.digest
+        receipt = registration_projection.DirectReceiptV4(**final_values)
+        registration_projection.verify_direct_receipt_owner_gate_v3(
+            receipt, gate
+        )
+        self.assertEqual(receipt.body_hash, preliminary.body_hash)
+        self.assertNotEqual(receipt.digest, preliminary.digest)
+        self.assertIn(gate.digest.encode(), receipt.to_bytes())
+
+    def test_v2_signer_enrollment_chain_is_public_only(self) -> None:
+        enrollment = registration_projection.OwnerKeyEnrollmentV2(
+            schema="awa-registration-owner-key-enrollment/v2",
+            principal="KleinPerkins",
+            namespaces=list(registration_projection.V7_NAMESPACES),
+            key_algorithm="ssh-ed25519",
+            public_key_sha256=
+                registration_projection.V7_SIGNER_PUBLIC_KEY_SHA256,
+            openssh_fingerprint=
+                registration_projection.V7_SIGNER_FINGERPRINT,
+            allowed_signers_relative_path=
+                "contracts/awa-registration-owner-signers.v2",
+            allowed_signers_path_hash=
+                registration_projection.V7_SIGNER_PATH_HASH,
+            allowed_signers_contract_hash=
+                registration_projection.V7_SIGNER_CONTRACT_HASH,
+            authorized=True,
+        )
+        authorization = registration_projection.OwnerKeyAuthorizationV2(
+            schema="awa-registration-owner-key-authorization/v2",
+            repository="KleinPerkins/awa",
+            authorized_by="KleinPerkins",
+            action="ENROLL",
+            principal="KleinPerkins",
+            namespaces=list(registration_projection.V7_NAMESPACES),
+            key_algorithm="ssh-ed25519",
+            public_key_sha256=
+                registration_projection.V7_SIGNER_PUBLIC_KEY_SHA256,
+            openssh_fingerprint=
+                registration_projection.V7_SIGNER_FINGERPRINT,
+            allowed_signers_relative_path=
+                "contracts/awa-registration-owner-signers.v2",
+            allowed_signers_path_hash=
+                registration_projection.V7_SIGNER_PATH_HASH,
+            allowed_signers_contract_hash=
+                registration_projection.V7_SIGNER_CONTRACT_HASH,
+            key_enrollment_digest=enrollment.digest,
+            acceptance_normalized_digest=H_B,
+            authorization_nonce=H_C,
+            authorized=True,
+        )
+        current_body = {
+            "schema": "awa-registration-owner-key-current/v2",
+            "sequence": "2",
+            "status": "ACTIVE",
+            "principal": "KleinPerkins",
+            "namespaces": list(registration_projection.V7_NAMESPACES),
+            "key_algorithm": "ssh-ed25519",
+            "public_key_sha256":
+                registration_projection.V7_SIGNER_PUBLIC_KEY_SHA256,
+            "openssh_fingerprint":
+                registration_projection.V7_SIGNER_FINGERPRINT,
+            "allowed_signers_relative_path":
+                "contracts/awa-registration-owner-signers.v2",
+            "allowed_signers_path_hash":
+                registration_projection.V7_SIGNER_PATH_HASH,
+            "allowed_signers_contract_hash":
+                registration_projection.V7_SIGNER_CONTRACT_HASH,
+            "key_enrollment_digest": enrollment.digest,
+            "owner_authorization_digest": authorization.digest,
+            "previous_enrollment_hash":
+                registration_projection.V7_PREVIOUS_ENROLLMENT_HASH,
+            "created_wall_ns": "1",
+        }
+        enrollment_hash = registration_projection._domain_hash_lf(
+            "awa-registration-owner-key-current/v2", current_body
+        )
+        current = registration_projection.OwnerKeyCurrentV2(
+            **current_body,
+            enrollment_hash=enrollment_hash,
+        )
+        self.assertEqual(current.digest, enrollment_hash)
+        self.assertNotIn(b"PRIVATE KEY", current.to_bytes().upper())
+
+    def test_observed_vector_cannot_feed_signed_expected_dag(self) -> None:
+        dag = registration_projection.V7AuthorityDAG(
+            bundle_entry_plain_hash=H_A,
+            import_manifest_hash=H_B,
+            installed_file_hash=H_C,
+            bundle_digest=H_D,
+            bootstrap_authority_hash="e" * 64,
+            runtime_release_envelope_digest="f" * 64,
+            expected_denial_vector_hash="1" * 64,
+        )
+        signed = dag.signed_expected_authority_hash
+        self.assertFalse(dag.compare_observed("2" * 64))
+        self.assertEqual(dag.signed_expected_authority_hash, signed)
+        self.assertTrue(dag.compare_observed("1" * 64))
 
 
 if __name__ == "__main__":

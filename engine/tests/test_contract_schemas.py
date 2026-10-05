@@ -1,15 +1,13 @@
-"""K0: clean_receipt/v1 + active_root/v1 are frozen ADDITIVE-WITHIN AWA contract v1 (no v2),
-and `clean --bundle` stays contract-compatible within v1.
+"""Frozen v1 behavior plus the exact v7 private-runtime successor overlay.
 
-Proves the contract DECLARES both new schema blocks with the exact vocabularies the kernel
-emits, that the declared receipt required_keys are a subset of what awa_roots actually writes
-(contract <-> code lock), that --bundle remains a frozen `clean` flag, and that
-the pre-PR install check remains the single executable source-freeze owner.
+V1 remains byte-identical. V2 replaces only registration runtime entry while
+the clean-receipt/active-root v1 behaviors remain contract-compatible.
 """
 
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -36,10 +34,51 @@ class ContractSchemasTest(EngineTestCase):
         super().setUp()
         self.contract = json.loads(_CONTRACT.read_text(encoding="utf-8"))
 
-    def test_still_v1_no_v2(self) -> None:
+    def test_v1_preserved_and_v2_successor_contracts_are_exact(self) -> None:
         self.assertEqual(self.contract["version"], 1)
-        self.assertFalse((_REPO_ROOT / "contracts" / "awa-contract.v2.json").exists(),
-                         "K0/K1 is additive-within-v1; there must be NO v2 contract")
+        expected = {
+            "awa-contract.v1.json":
+                "408e271e9f55269d276e6d34e2aa3bb2bbc072fea3b6c8a841ede1912978c4d9",
+            "awa-contract.v2.json":
+                "db0a007ec7b0b8829fa721ff2b1835c1a9d783d5e151d2dda5d1bcaae85b2b0a",
+            "awa-registration-admin-audit.v1.json":
+                "a5718883a1b49c2030bdbe32eb88482f684cae635173449000be13c935345e8a",
+            "awa-registration-owner-signers.v1":
+                "9155be780c73e65a549ae97326dc56c53045aeaddb697745a95ce191aa472b7e",
+            "awa-registration-owner-signers.v2":
+                "690c6c7f7f4f12705763520a52eb61181bd5afe7914a5729cc7d4d4abdfa7ff3",
+            "awa-registration-platform-bootstrap.v1.json":
+                "4d9e89a327c4b50e287e5a61e96522a50d4f00346c3dbfa616c401c89fa79f0c",
+            "awa-registration-private-runtime.v1.json":
+                "f313e4d04f15fa5bcf7147b870a240402393d9a74cb16c23d5bdfd0b547a3321",
+            "awa-registration-privileged-envelope.v1.json":
+                "7fc2cdf48e041b501eb7230dd1e0ec9548540fba17f129dbe86a7ad07a117034",
+        }
+        for name, digest in expected.items():
+            with self.subTest(name=name):
+                raw = (_REPO_ROOT / "contracts" / name).read_bytes()
+                self.assertEqual(hashlib.sha256(raw).hexdigest(), digest)
+                if name.endswith(".json") and name != "awa-contract.v1.json":
+                    value = json.loads(raw)
+                    self.assertEqual(
+                        raw,
+                        json.dumps(
+                            value,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                            allow_nan=False,
+                        ).encode("utf-8") + b"\n",
+                    )
+        v2 = json.loads(
+            (_REPO_ROOT / "contracts/awa-contract.v2.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(v2["schema"], "awa-contract/v2")
+        self.assertEqual(v2["successor_of"], "awa-contract/v1")
+        self.assertEqual(v2["registration_runtime"], "PROTECTED_PRIVATE")
+        self.assertTrue(v2["private_runtime_required"])
 
     def test_clean_receipt_block(self) -> None:
         cr = self.contract["clean_receipt"]

@@ -16,6 +16,7 @@ from engine import (
     registration_projection,
     registration_runtime,
 )
+from engine.tests.test_registration_installer_c import _immutable_authority
 
 
 def _receipt(*, suspended: bool = False) -> registration_runtime.TickReceipt:
@@ -27,6 +28,21 @@ def _receipt(*, suspended: bool = False) -> registration_runtime.TickReceipt:
         member_reasons=(),
         recovery_member_ids=(),
         fairness_suspended=suspended,
+    )
+
+
+def _cursor(boot_id: str = "boot-a") -> registration_runtime.SameBootCursor:
+    return registration_runtime.SameBootCursor(
+        boot_id=boot_id,
+        protocol_seq=1,
+        protocol_hash="11" * 32,
+        selection_snapshot_hash="22" * 32,
+        last_member_id=None,
+        last_pre_status_hash=None,
+        last_post_status_hash=None,
+        outcome=None,
+        batch_count=0,
+        wrapped=False,
     )
 
 
@@ -42,42 +58,28 @@ class RegistrationHostTickTest(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw).resolve()
-            installed = root / "receiver"
-            wrapper = root / "wrapper"
-            runtime = root / "runtime.py"
-            installed.write_bytes(b"receiver-v1")
-            wrapper.write_bytes(b"wrapper-v1")
-            runtime.write_bytes(b"runtime-v1")
-            for path in (installed, wrapper, runtime):
-                path.chmod(0o700)
-            base = registration_projection.DirectReceipt.vector_r1()
-            receipt = registration_projection.DirectReceipt.from_mapping(
-                {
-                    **base.to_mapping(),
-                    "installed_file_hash": (
-                        registration_projection.installed_file_hash(
-                            installed
-                        )
-                    ),
-                    "wrapper_runtime_hash": (
-                        registration_projection.wrapper_runtime_hash(
-                            wrapper, (runtime,)
-                        )
-                    ),
-                }
+            authority, receipt, _old = _immutable_authority(
+                Path(raw).resolve()
             )
-            config = {
-                "installed_file_path": str(installed),
-                "wrapper_path": str(wrapper),
-                "runtime_files": [str(runtime)],
+            authority.install_candidate()
+            environment = {
+                "AWA_REGISTRATION_BUNDLE_ROOT": str(
+                    authority.bundle_dir
+                )
             }
-            registration_host._verify_runtime_bytes(config, receipt)
-            runtime.write_bytes(b"runtime-v2")
-            with self.assertRaises(
-                registration_host.registration_hook_runtime.HookUnavailable
+            with mock.patch.dict(
+                "os.environ", environment, clear=False
             ):
-                registration_host._verify_runtime_bytes(config, receipt)
+                registration_host._verify_runtime_bytes({}, receipt)
+                runtime = (
+                    authority.bundle_dir
+                    / "engine/registration_host.py"
+                )
+                runtime.write_bytes(b"drift")
+                with self.assertRaises(
+                    registration_host.registration_hook_runtime.HookUnavailable
+                ):
+                    registration_host._verify_runtime_bytes({}, receipt)
 
     def test_host_envelope_uses_fresh_storage_and_serializer_checks(
         self,
@@ -140,14 +142,8 @@ class RegistrationHostTickTest(unittest.TestCase):
         self.assertEqual(reason, "ROOT_UNSUPPORTED")
 
     def test_r0_scope_never_runs_startup_or_tick_runtime(self) -> None:
-        r1 = registration_projection.DirectReceipt.vector_r1()
-        r0 = registration_projection.DirectReceipt.from_mapping(
-            {
-                **r1.to_mapping(),
-                "deployment_scope": "R0_THROWAWAY",
-                "canonical_root_hash": None,
-                "member_id": None,
-            }
+        r0, _gate = registration_projection.fixed_authority_vector(
+            "R0_THROWAWAY"
         )
         service = object.__new__(registration_host.HostService)
         service.receipt = r0
@@ -166,6 +162,7 @@ class RegistrationHostTickTest(unittest.TestCase):
                 _receipt(),
                 boot_id="boot-a",
                 written_mono_ns=100,
+                same_boot_cursor=_cursor(),
             )
             value = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(
@@ -175,12 +172,11 @@ class RegistrationHostTickTest(unittest.TestCase):
                     "boot_id",
                     "written_mono_ns",
                     "interval_ns",
-                    "snapshot_token",
-                    "selected_member_ids",
-                    "selected_status_hashes",
-                    "missed_member_ids",
-                    "member_reasons",
-                    "recovery_member_ids",
+                    "protocol_seq",
+                    "protocol_hash",
+                    "same_boot_cursor",
+                    "same_boot_cursor_hash",
+                    "due_snapshot_hash",
                     "fairness_suspended",
                 },
             )
@@ -201,6 +197,7 @@ class RegistrationHostTickTest(unittest.TestCase):
                 _receipt(suspended=True),
                 boot_id="boot-a",
                 written_mono_ns=100,
+                same_boot_cursor=_cursor(),
             )
             with mock.patch(
                 "engine.registration_host.registration_clock.mach_continuous_time_ns",
@@ -221,6 +218,7 @@ class RegistrationHostTickTest(unittest.TestCase):
                 _receipt(),
                 boot_id="boot-a",
                 written_mono_ns=100,
+                same_boot_cursor=_cursor(),
             )
             for boot, now in (
                 ("boot-b", 101),

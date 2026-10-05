@@ -12,7 +12,7 @@ import sqlite3
 import stat
 import unicodedata
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import ClassVar, Iterator
 
@@ -1026,3 +1026,131 @@ class StagedProfileBinding(TypedProfileBinding):
 
 class R0ProfileBinding(TypedProfileBinding):
     role = "R0"
+
+
+PRIVATE_RUNTIME_SOURCE_LOCK_SHA256 = (
+    "a8b1415067e7b33c18ccc3c1d42e19ae27a9ad5784a7f294fffc562083762d72"
+)
+_PRIVATE_RUNTIME_BINDING_FIELDS = {
+    "schema",
+    "current_digest",
+    "epoch",
+    "runtime_manifest_sha256",
+    "runtime_release_envelope_digest",
+    "source_lock_sha256",
+    "private_executable_path",
+    "private_executable_sha256",
+    "version_lock_identity",
+    "capability_digest",
+    "sqlite_compile_options_hash",
+}
+
+
+def validate_private_python_capability(
+    capability: dict,
+) -> InterpreterCapability:
+    """Validate the exact v7 runtime profile, never a caller-selected Python."""
+
+    result = validate_python_capability(capability)
+    exact = (
+        capability["platform"] == "darwin"
+        and capability["python_implementation"] == "CPython"
+        and capability["python_version"] == "3.14.8"
+        and capability["sqlite_runtime_version"] == "3.53.1"
+        and capability["required_python_apis"]
+        == list(REQUIRED_PYTHON_APIS)
+    )
+    if not exact:
+        raise ProfileError("private runtime capability differs from v7 source lock")
+    if len(capability["os_build"].encode("utf-8")) > 128:
+        raise ProfileError("private runtime OS build is too long")
+    if len(capability["sqlite_source_id"].encode("utf-8")) > 512:
+        raise ProfileError("private runtime SQLite source ID is too long")
+    return result
+
+
+@dataclass(frozen=True)
+class PrivateRuntimeProfileBinding:
+    schema: str
+    current_digest: str
+    epoch: str
+    runtime_manifest_sha256: str
+    runtime_release_envelope_digest: str
+    source_lock_sha256: str
+    private_executable_path: str
+    private_executable_sha256: str
+    version_lock_identity: str
+    capability_digest: str
+    sqlite_compile_options_hash: str
+
+    def __post_init__(self) -> None:
+        if self.schema != "awa-registration-private-runtime-profile/v1":
+            raise ProfileError("private runtime profile schema mismatch")
+        if (
+            not isinstance(self.epoch, str)
+            or _UNSIGNED.fullmatch(self.epoch) is None
+            or int(self.epoch) < 1
+        ):
+            raise ProfileError("private runtime epoch must be positive")
+        for name in _PRIVATE_RUNTIME_BINDING_FIELDS - {
+            "schema",
+            "epoch",
+            "private_executable_path",
+        }:
+            value = getattr(self, name)
+            if not isinstance(value, str) or _HEX.fullmatch(value) is None:
+                raise ProfileError(f"{name} must be lowercase 64-hex")
+        if self.source_lock_sha256 != PRIVATE_RUNTIME_SOURCE_LOCK_SHA256:
+            raise ProfileError("private runtime source lock mismatch")
+        expected_prefix = "/Library/Application Support/AWA/runtime/versions/"
+        if not self.private_executable_path.startswith(expected_prefix):
+            raise ProfileError("private executable is outside protected runtime")
+        suffix = self.private_executable_path[len(expected_prefix) :]
+        parts = suffix.split("/")
+        if (
+            len(parts) != 5
+            or _HEX.fullmatch(parts[0]) is None
+            or parts[1:] != ["Python.app", "Contents", "MacOS", "Python"]
+            or parts[0] != self.runtime_manifest_sha256
+        ):
+            raise ProfileError("private executable path/manifest mismatch")
+
+    @classmethod
+    def from_mapping(
+        cls, value: dict
+    ) -> "PrivateRuntimeProfileBinding":
+        if set(value) != _PRIVATE_RUNTIME_BINDING_FIELDS:
+            raise ProfileError("private runtime profile field mismatch")
+        return cls(**value)
+
+    def to_mapping(self) -> dict[str, str]:
+        return {
+            field.name: getattr(self, field.name) for field in fields(self)
+        }
+
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(
+            b"awa-registration-private-runtime-profile/v1\0"
+            + registration_jcs.canonical_bytes(self.to_mapping())
+            + b"\n"
+        ).hexdigest()
+
+
+def bind_measured_private_runtime(
+    *,
+    measurement: dict,
+    capability: dict,
+) -> PrivateRuntimeProfileBinding:
+    """Bind only a bootstrap-produced measurement and exact capability."""
+
+    binding = PrivateRuntimeProfileBinding.from_mapping(measurement)
+    measured_capability = validate_private_python_capability(capability)
+    if measured_capability.digest != binding.capability_digest:
+        raise ProfileError("private runtime measurement/capability mismatch")
+    if (
+        capability["sqlite_compile_options_hash"]
+        != binding.sqlite_compile_options_hash
+    ):
+        raise ProfileError("private runtime compile-options mismatch")
+    return binding

@@ -66,6 +66,19 @@ def _plan_leaf_groups() -> dict[str, tuple[str, ...]]:
 
 
 class RegistrationSchemaTest(unittest.TestCase):
+    def test_sql_resource_is_loaded_through_retained_resource_authority(self) -> None:
+        source = (ROOT / "engine" / "registration_schema.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("from importlib import resources", source)
+        self.assertIn(
+            'resources.files("engine").joinpath("registration_schema.sql")',
+            source,
+        )
+        self.assertNotIn(
+            'Path(__file__).with_name("registration_schema.sql")', source
+        )
+
     def test_production_sql_is_exact_frozen_extraction(self) -> None:
         source = _plan_sql()
         self.assertEqual(
