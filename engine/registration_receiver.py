@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import json
 import stat
 import sys
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import (
@@ -43,6 +45,76 @@ _PROTOCOL_RECEIPT_FIELDS = (
     "installer_identity_hash",
     "installer_capability_hash",
 )
+
+
+@dataclass(frozen=True)
+class RetainedReceiverAuthority:
+    """Parsed, cross-bound authority retained by the platform child."""
+
+    import_manifest_hash: str
+    bundle_digest: str
+    bundle_projection_hash: str
+    direct_receipt_hash: str
+    host_authority_digest: str
+    writer_capability_hash: str
+    validated: bool
+    deny_only: bool = False
+    retained_resources: tuple[tuple[str, bytes], ...] = ()
+
+    @classmethod
+    def synthetic(
+        cls, *, deny_only: bool = False
+    ) -> "RetainedReceiverAuthority":
+        return cls(
+            import_manifest_hash="1" * 64,
+            bundle_digest="2" * 64,
+            bundle_projection_hash="3" * 64,
+            direct_receipt_hash="4" * 64,
+            host_authority_digest="5" * 64,
+            writer_capability_hash="6" * 64,
+            validated=True,
+            deny_only=deny_only,
+        )
+
+    def replace(self, **changes: object) -> "RetainedReceiverAuthority":
+        return replace(self, **changes)
+
+    def validate(self) -> None:
+        if not self.validated:
+            raise ValueError("retained receiver authority is not validated")
+        for field in (
+            "import_manifest_hash",
+            "bundle_digest",
+            "bundle_projection_hash",
+            "direct_receipt_hash",
+            "host_authority_digest",
+            "writer_capability_hash",
+        ):
+            value = getattr(self, field)
+            if (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError("retained receiver authority hash is invalid")
+        names = [name for name, content in self.retained_resources]
+        if (
+            len(names) != len(set(names))
+            or any(
+                not isinstance(name, str)
+                or not isinstance(content, bytes)
+                for name, content in self.retained_resources
+            )
+        ):
+            raise ValueError("retained receiver resources are invalid")
+
+
+def retained_host_main(
+    *, route: str, authority: RetainedReceiverAuthority
+) -> int:
+    from . import registration_host
+
+    return registration_host.retained_main(route=route, authority=authority)
 
 
 def _receipt_protocol_value(
@@ -394,7 +466,7 @@ def _bundle_launcher(
         payload = _private_authority(path, mode=int(entry.mode))
         if (
             len(payload) != int(entry.size)
-            or __import__("hashlib").sha256(payload).hexdigest()
+            or hashlib.sha256(payload).hexdigest()
             != entry.sha256
         ):
             raise ValueError("bundle execution entry drifted")
@@ -481,6 +553,7 @@ def _deny_only(route: str) -> int:
 def private_runtime_main(
     argv: list[str] | None = None,
     *,
+    retained_authority: RetainedReceiverAuthority | None = None,
     authority_bytes: tuple[bytes, ...] | None = None,
 ) -> int:
     """Dispatch only after the platform child has completed v7 GO.
@@ -498,17 +571,20 @@ def private_runtime_main(
         "tick",
     }:
         return 2
-    if (
-        authority_bytes is None
-        or len(authority_bytes) != 5
-        or any(not isinstance(value, bytes) for value in authority_bytes)
-    ):
-        return 1
     try:
-        from . import registration_host
-
         route = "admission" if arguments[0] == "receiver" else arguments[0]
-        return int(registration_host.main([route]))
+        if retained_authority is None:
+            # Raw descriptor bytes are transport, never runtime authority.
+            # The child must parse and cross-bind them before this boundary.
+            if authority_bytes is not None:
+                return 1
+            return 1
+        retained_authority.validate()
+        if retained_authority.deny_only:
+            return _deny_only(route) if route == "admission" else 2
+        return int(
+            retained_host_main(route=route, authority=retained_authority)
+        )
     except BaseException:
         return 1
 

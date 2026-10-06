@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import tempfile
@@ -462,33 +463,42 @@ class BundleAndImportAuthorityTest(unittest.TestCase):
             root = Path(raw)
             (root / "engine").mkdir()
             (root / "engine/__init__.py").write_text("", encoding="utf-8")
-            (root / "engine/helper.py").write_text("VALUE = 1\n", encoding="utf-8")
-            (root / "engine/entry.py").write_text(
-                "from . import helper\n", encoding="utf-8"
+            (root / "engine/registration_receiver.py").write_text(
+                "from . import registration_host\n", encoding="utf-8"
             )
-            manifest = registration_installer.generate_import_manifest(
-                root, ("engine.entry",)
+            (root / "engine/registration_host.py").write_text(
+                "from . import registration_hook_runtime\n"
+                "from . import registration_schema\n",
+                encoding="utf-8",
             )
-            self.assertEqual(
-                [record.path for record in manifest.records],
-                [
-                    "engine/__init__.py",
-                    "engine/entry.py",
-                    "engine/helper.py",
-                ],
+            (root / "engine/registration_hook_runtime.py").write_bytes(b"")
+            (root / "engine/registration_schema.py").write_bytes(b"")
+            (root / "engine/registration_schema.sql").write_bytes(
+                b"SELECT 1;\n"
+            )
+            manifest = registration_installer.generate_import_manifest(root)
+            logical_names = [
+                record.logical_name for record in manifest.records
+            ]
+            self.assertIn("engine", logical_names)
+            self.assertIn("engine.registration_receiver", logical_names)
+            self.assertIn("engine.registration_host", logical_names)
+            self.assertIn("engine.registration_hook_runtime", logical_names)
+            self.assertIn(
+                "engine.registration_schema:registration_schema.sql",
+                logical_names,
             )
             payload = manifest.to_bytes()
             self.assertEqual(
-                registration_projection.ImportManifest.from_bytes(payload),
+                registration_projection.ImportManifestV2.from_bytes(payload),
                 manifest,
             )
-            (root / "engine/entry.py").write_text(
-                "__import__('engine.helper')\n", encoding="utf-8"
+            (root / "engine/registration_receiver.py").write_text(
+                "__import__('engine.registration_host')\n",
+                encoding="utf-8",
             )
             with self.assertRaises(registration_installer.CutoverRefused):
-                registration_installer.generate_import_manifest(
-                    root, ("engine.entry",)
-                )
+                registration_installer.generate_import_manifest(root)
 
     def test_active_pointer_binds_immutable_generation_bundle(self) -> None:
         receipt, _gate = registration_projection.fixed_authority_vector(
@@ -630,6 +640,8 @@ class V8ProductClosureAuthorityTest(unittest.TestCase):
         payloads = {
             "engine/__init__.py": b"",
             "engine/registration_receiver.py": b"VALUE = 1\n",
+            "engine/registration_host.py": b"VALUE = 2\n",
+            "engine/registration_hook_runtime.py": b"VALUE = 3\n",
             "engine/registration_schema.py": b"VALUE = 2\n",
             "engine/registration_schema.sql": b"SELECT 1;\n",
         }
@@ -646,10 +658,34 @@ class V8ProductClosureAuthorityTest(unittest.TestCase):
             ),
             registration_projection.ImportRecordV2(
                 "MODULE",
+                "engine.registration_hook_runtime",
+                "engine/registration_hook_runtime.py",
+                None,
+                "17",
+                "444",
+                str(len(payloads["engine/registration_hook_runtime.py"])),
+                hashlib.sha256(
+                    payloads["engine/registration_hook_runtime.py"]
+                ).hexdigest(),
+            ),
+            registration_projection.ImportRecordV2(
+                "MODULE",
+                "engine.registration_host",
+                "engine/registration_host.py",
+                None,
+                "18",
+                "444",
+                str(len(payloads["engine/registration_host.py"])),
+                hashlib.sha256(
+                    payloads["engine/registration_host.py"]
+                ).hexdigest(),
+            ),
+            registration_projection.ImportRecordV2(
+                "MODULE",
                 "engine.registration_receiver",
                 "engine/registration_receiver.py",
                 None,
-                "17",
+                "19",
                 "444",
                 str(len(payloads["engine/registration_receiver.py"])),
                 hashlib.sha256(
@@ -661,7 +697,7 @@ class V8ProductClosureAuthorityTest(unittest.TestCase):
                 "engine.registration_schema",
                 "engine/registration_schema.py",
                 None,
-                "18",
+                "20",
                 "444",
                 str(len(payloads["engine/registration_schema.py"])),
                 hashlib.sha256(
@@ -673,7 +709,7 @@ class V8ProductClosureAuthorityTest(unittest.TestCase):
                 "engine.registration_schema:registration_schema.sql",
                 "engine/registration_schema.sql",
                 "engine.registration_schema",
-                "19",
+                "21",
                 "444",
                 str(len(payloads["engine/registration_schema.sql"])),
                 hashlib.sha256(
@@ -682,6 +718,124 @@ class V8ProductClosureAuthorityTest(unittest.TestCase):
             ),
         )
         return registration_projection.ImportManifestV2.create(records)
+
+    def test_v12_receiver_rooted_generator_owns_complete_recursive_closure(
+        self,
+    ) -> None:
+        self.assertEqual(
+            tuple(inspect.signature(
+                registration_installer.generate_import_manifest
+            ).parameters),
+            ("bundle_root",),
+            "caller-selected entry modules remain production authority",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "engine").mkdir()
+            (root / "engine/__init__.py").write_bytes(b"")
+            (root / "engine/registration_receiver.py").write_text(
+                "from . import registration_host\n",
+                encoding="utf-8",
+            )
+            (root / "engine/registration_host.py").write_text(
+                "from . import registration_hook_runtime\n"
+                "from . import registration_schema\n",
+                encoding="utf-8",
+            )
+            (root / "engine/registration_hook_runtime.py").write_bytes(b"")
+            (root / "engine/registration_schema.py").write_bytes(b"")
+            (root / "engine/registration_schema.sql").write_bytes(b"SELECT 1;\n")
+            manifest = registration_installer.generate_import_manifest(root)
+        self.assertIsInstance(
+            manifest, registration_projection.ImportManifestV2
+        )
+        names = [record.logical_name for record in manifest.records]
+        self.assertEqual(len(names), len(set(names)))
+        for required in (
+            "engine",
+            "engine.registration_receiver",
+            "engine.registration_host",
+            "engine.registration_hook_runtime",
+            "engine.registration_schema",
+            "engine.registration_schema:registration_schema.sql",
+        ):
+            self.assertEqual(names.count(required), 1)
+
+    def test_v12_import_v2_parser_refuses_omission_and_wrong_identity(
+        self,
+    ) -> None:
+        manifest = self._import_manifest()
+        self.assertTrue(
+            hasattr(registration_projection.ImportManifestV2, "from_bytes"),
+            "import-v2 has no canonical production parser",
+        )
+        self.assertEqual(
+            registration_projection.ImportManifestV2.from_bytes(
+                manifest.to_bytes()
+            ),
+            manifest,
+        )
+        for omitted in (
+            "engine.registration_host",
+            "engine.registration_hook_runtime",
+        ):
+            with self.subTest(omitted=omitted), self.assertRaises(ValueError):
+                registration_projection.ImportManifestV2.create(
+                    tuple(
+                        record
+                        for record in manifest.records
+                        if record.logical_name != omitted
+                    )
+                )
+        value = manifest.to_mapping()
+        value["schema"] = "awa-registration-import-manifest/v1"
+        with self.assertRaises(ValueError):
+            registration_projection.ImportManifestV2.from_mapping(value)
+
+    def test_v12_bundle_v3_is_canonical_and_rejects_wrong_version(self) -> None:
+        imports = self._import_manifest()
+        host = self._host()
+        payloads = {
+            record.relative_path: (
+                b""
+                if record.kind == "PACKAGE_INITIALIZER"
+                else b"SELECT 1;\n"
+                if record.kind == "RESOURCE"
+                else (
+                    b"VALUE = 1\n"
+                    if record.logical_name == "engine.registration_receiver"
+                    else b"VALUE = 2\n"
+                    if record.logical_name in {
+                        "engine.registration_host",
+                        "engine.registration_schema",
+                    }
+                    else b"VALUE = 3\n"
+                )
+            )
+            for record in imports.records
+        }
+        bundle = registration_projection.BundleManifestV3.create(
+            generation="1",
+            import_manifest=imports,
+            host_authority=host,
+            writer_capability_hash="9" * 64,
+            installed_file_hash="a" * 64,
+            payload_bytes=payloads,
+        )
+        try:
+            parsed = registration_projection.BundleManifestV3.from_bytes(
+                bundle.to_bytes()
+            )
+        except Exception as exc:
+            self.fail(
+                "bundle-v3 canonical production parser refused its own bytes: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        self.assertEqual(parsed, bundle)
+        changed = bundle.to_mapping()
+        changed["schema"] = "awa-registration-bundle-manifest/v2"
+        with self.assertRaises(ValueError):
+            registration_projection.BundleManifestV3.from_mapping(changed)
 
     def _host(self) -> registration_projection.HostAuthorityV2:
         targets = tuple(

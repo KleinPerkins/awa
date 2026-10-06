@@ -117,6 +117,47 @@ class RegistrationPackagingTest(unittest.TestCase):
         self.assertFalse(payload["process_kill_complete"])
         self.assertFalse(payload["receiver_continuity_complete"])
         self.assertEqual(
+            set(payload),
+            {
+                "schema",
+                "executed",
+                "predeployment_evidence",
+                "rollout_stage",
+                "cuts",
+                "barrier_catalog",
+                "barrier_catalog_complete",
+                "process_kill_complete",
+                "receiver_continuity_complete",
+                "governed_live_manifest_before_hash",
+                "governed_live_manifest_after_hash",
+                "throwaway_target_manifest_hash",
+                "external_write_observer",
+                "external_write_observation_hash",
+                "cut_evidence_hash",
+                "claim_scope",
+                "missing",
+                "final_r0_requires_merged_exact_head",
+                "live_state_changed",
+            },
+        )
+        for field in (
+            "governed_live_manifest_before_hash",
+            "governed_live_manifest_after_hash",
+            "throwaway_target_manifest_hash",
+            "external_write_observation_hash",
+            "cut_evidence_hash",
+        ):
+            with self.subTest(field=field):
+                self.assertIsNone(payload[field])
+        self.assertEqual(payload["external_write_observer"], "unavailable")
+        self.assertEqual(
+            payload["claim_scope"],
+            "FINITE_GOVERNED_SURFACES_AND_OBSERVED_TARGETS",
+        )
+        self.assertEqual(payload["missing"], [])
+        self.assertTrue(payload["final_r0_requires_merged_exact_head"])
+        self.assertFalse(payload["live_state_changed"])
+        self.assertEqual(
             payload["barrier_catalog"],
             [
                 "C0.PREFLIGHT",
@@ -140,6 +181,55 @@ class RegistrationPackagingTest(unittest.TestCase):
                 "C7.RESIDUE_RECONCILED",
             ],
         )
+
+    def test_r0_run_refuses_inertly_without_authority_or_side_effects(self) -> None:
+        before = subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.quotePath=true",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+        ).stdout
+        environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        result = subprocess.run(
+            ["python3", str(R0), "--run"],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            timeout=60,
+        )
+        after = subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.quotePath=true",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+        ).stdout
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr, b"")
+        self.assertEqual(after, before)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["executed"])
+        self.assertEqual(payload["predeployment_evidence"], "absent")
+        self.assertEqual(payload["rollout_stage"], "NONE")
+        self.assertEqual(payload["cuts"], [])
+        self.assertFalse(payload["barrier_catalog_complete"])
+        self.assertFalse(payload["process_kill_complete"])
+        self.assertFalse(payload["receiver_continuity_complete"])
+        self.assertFalse(payload["live_state_changed"])
+        self.assertIn("exact merged --expected-head", payload["error"])
 
     def test_desktop_uat_script_defaults_to_non_mutating_check(self) -> None:
         result = subprocess.run(

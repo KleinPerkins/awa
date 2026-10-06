@@ -3259,7 +3259,17 @@ class _V7MappingAuthority:
 
     @classmethod
     def from_bytes(cls, raw: bytes):
-        value = registration_jcs.parse_canonical(raw)
+        if (
+            not isinstance(raw, bytes)
+            or not raw.endswith(b"\n")
+            or raw.endswith(b"\n\n")
+            or b"\r" in raw
+            or b"\0" in raw
+        ):
+            raise ValueError(f"{cls.__name__} framing is invalid")
+        value = registration_jcs.parse_canonical(raw[:-1])
+        if registration_jcs.canonical_bytes(value) + b"\n" != raw:
+            raise ValueError(f"{cls.__name__} bytes are not canonical")
         if not isinstance(value, dict):
             raise ValueError(f"{cls.__name__} must be an object")
         return cls.from_mapping(value)
@@ -3754,6 +3764,8 @@ class ImportManifestV2:
             ("engine.registration_schema", "registration_schema.sql")
             not in resources
             or "engine.registration_receiver" not in modules
+            or "engine.registration_host" not in modules
+            or "engine.registration_hook_runtime" not in modules
             or "engine.registration_schema" not in modules
             or "engine" not in packages
         ):
@@ -3785,6 +3797,53 @@ class ImportManifestV2:
 
     def to_bytes(self) -> bytes:
         return registration_jcs.canonical_bytes(self.to_mapping()) + b"\n"
+
+    @classmethod
+    def from_mapping(
+        cls, value: Mapping[str, object]
+    ) -> "ImportManifestV2":
+        expected = {
+            "schema",
+            "records",
+            "record_count",
+            "aggregate_size",
+            "import_manifest_hash",
+        }
+        if set(value) != expected:
+            raise ValueError("import manifest fields are not exact")
+        records_value = value.get("records")
+        if not isinstance(records_value, list):
+            raise ValueError("import manifest records are invalid")
+        records = tuple(
+            ImportRecordV2.from_mapping(record)
+            if isinstance(record, Mapping)
+            else (_ for _ in ()).throw(
+                ValueError("import manifest record is invalid")
+            )
+            for record in records_value
+        )
+        observed = cls.create(records)
+        if observed.to_mapping() != dict(value):
+            raise ValueError("import manifest authority is inconsistent")
+        return observed
+
+    @classmethod
+    def from_bytes(cls, raw: bytes) -> "ImportManifestV2":
+        if (
+            not isinstance(raw, bytes)
+            or not raw.endswith(b"\n")
+            or raw.endswith(b"\n\n")
+            or b"\r" in raw
+            or b"\0" in raw
+        ):
+            raise ValueError("import manifest framing is invalid")
+        value = registration_jcs.parse_canonical(raw[:-1])
+        if (
+            not isinstance(value, dict)
+            or registration_jcs.canonical_bytes(value) + b"\n" != raw
+        ):
+            raise ValueError("import manifest bytes are not canonical")
+        return cls.from_mapping(value)
 
 
 @dataclass(frozen=True)
@@ -4010,6 +4069,53 @@ class BundleManifestV3(_V7MappingAuthority):
             _require_hash(self._value[name], name)
         if "bundle_relative_dir" in self._value:
             raise ValueError("bundle directory is derived, not manifest authority")
+        records_value = self._value["records"]
+        if not isinstance(records_value, list) or not records_value:
+            raise ValueError("bundle records are invalid")
+        expected_fields = {field.name for field in fields(BundleRecordV3)}
+        records: list[BundleRecordV3] = []
+        for value in records_value:
+            if not isinstance(value, dict) or set(value) != expected_fields:
+                raise ValueError("bundle record fields are not exact")
+            record = BundleRecordV3(**value)
+            _v9_relative_path(record.relative_path)
+            if record.kind not in {
+                "PACKAGE_INITIALIZER",
+                "MODULE",
+                "RESOURCE",
+                "AUTHORITY",
+            }:
+                raise ValueError("bundle record kind is invalid")
+            if record.mode != "0444":
+                raise ValueError("bundle record mode is invalid")
+            _require_decimal(record.size, "bundle record size")
+            _require_hash(record.sha256, "bundle record sha256")
+            records.append(record)
+        ordered = sorted(
+            records, key=lambda item: item.relative_path.encode("utf-8")
+        )
+        if (
+            records != ordered
+            or len({record.relative_path for record in records})
+            != len(records)
+            or self._value["record_count"] != str(len(records))
+            or self._value["aggregate_size"]
+            != str(sum(int(record.size) for record in records))
+        ):
+            raise ValueError("bundle record inventory is inconsistent")
+        by_path = {record.relative_path: record for record in records}
+        import_record = by_path.get("authority/import-manifest.json")
+        host_record = by_path.get("authority/host-authority.json")
+        writer_record = by_path.get("authority/writer-capability.json")
+        if (
+            import_record is None
+            or host_record is None
+            or writer_record is None
+            or import_record.kind != "AUTHORITY"
+            or host_record.kind != "AUTHORITY"
+            or writer_record.kind != "AUTHORITY"
+        ):
+            raise ValueError("bundle authority inventory is incomplete")
         body = self.to_mapping()
         claim = body.pop("bundle_digest")
         if claim != _domain_hash_lf(self.DOMAIN, body):

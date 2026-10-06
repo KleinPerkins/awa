@@ -329,6 +329,33 @@ def _verify_runtime_bytes(
         )
 
 
+def _verify_retained_runtime_bytes(
+    *,
+    host_authority: object,
+    retained_resources: dict[str, bytes],
+) -> None:
+    """Verify installed host and wrapper bytes without reopening any path."""
+    try:
+        host = retained_resources["engine/registration_host.py"]
+        wrapper = retained_resources["bin/awa-registration-entrypoint"]
+        installed = hashlib.sha256(
+            b"awa-registration-installed-file/v1\0" + host
+        ).hexdigest()
+        wrapper_hash = hashlib.sha256(
+            b"awa-registration-wrapper-runtime/v2\0" + wrapper
+        ).hexdigest()
+        if (
+            installed != getattr(host_authority, "installed_file_hash")
+            or wrapper_hash
+            != getattr(host_authority, "wrapper_runtime_hash")
+        ):
+            raise ValueError("retained runtime bytes drifted")
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise registration_hook_runtime.HookUnavailable(
+            "retained runtime identity is unavailable"
+        ) from exc
+
+
 def _serializer_ready() -> bool:
     try:
         decision = registration_admission.AdmissionDecision(
@@ -636,6 +663,14 @@ class HostService:
         ],
         proof_parent: Path,
         host_tick_path: Path,
+        host_authority: object | None = None,
+        direct_receipt: registration_projection.DirectReceipt | None = None,
+        owner_gate: object | None = None,
+        product_current: object | None = None,
+        bundle_projection: object | None = None,
+        import_manifest: object | None = None,
+        writer_capability: bytes | None = None,
+        resource_provider: object | None = None,
     ) -> None:
         self.store = store
         self.candidate = candidate
@@ -645,6 +680,14 @@ class HostService:
         self.proof_parent = proof_parent
         self.host_tick_path = host_tick_path
         self.inventory_entries = inventory_entries
+        self.host_authority = host_authority
+        self.direct_receipt = direct_receipt or receipt
+        self.owner_gate = owner_gate
+        self.product_current = product_current
+        self.bundle_projection = bundle_projection
+        self.import_manifest = import_manifest
+        self.writer_capability = writer_capability
+        self.resource_provider = resource_provider
         self.inventory_tokens = {
             (
                 item.event,
@@ -1046,30 +1089,42 @@ class HostService:
 
 
 @contextmanager
-def open_service() -> Iterator[HostService]:
-    config = _load_config()
-    receipt_path = _absolute(
-        config["direct_receipt_path"], "DIRECT receipt path"
+def open_service(
+    *,
+    host_authority: object,
+    direct_receipt: registration_projection.DirectReceipt,
+    owner_gate: object,
+    product_current: object,
+    bundle_projection: object,
+    import_manifest: object,
+    writer_capability: bytes,
+    resource_provider: dict[str, bytes],
+) -> Iterator[HostService]:
+    """Open from child-retained bytes only; no live config/path authority."""
+    _require_runtime_receipt(direct_receipt)
+    _verify_retained_runtime_bytes(
+        host_authority=host_authority,
+        retained_resources=resource_provider,
     )
-    bundle_root = os.environ.get("AWA_REGISTRATION_BUNDLE_ROOT")
-    if bundle_root is not None and receipt_path != (
-        _absolute(bundle_root, "signed bundle root")
-        / "direct-receipt.json"
-    ):
-        raise registration_hook_runtime.HookUnavailable(
-            "DIRECT receipt is outside the signed bundle"
-        )
     try:
-        receipt = registration_projection.DirectReceipt.from_bytes(
-            _private_bytes(receipt_path)
+        targets = _profile_targets(host_authority.profile_targets)
+        entries = _inventory(host_authority.inventory)
+        proof_parent = _absolute(
+            host_authority.proof_parent, "proof parent"
         )
-    except ValueError as exc:
+        projection_parent = _absolute(
+            host_authority.projection_parent, "projection parent"
+        )
+        legacy_parent = _absolute(
+            host_authority.legacy_parent, "legacy parent"
+        )
+        host_tick_path = _absolute(
+            host_authority.host_tick_receipt_path, "host tick receipt path"
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
         raise registration_hook_runtime.HookUnavailable(
-            "DIRECT receipt is invalid"
+            "retained host authority is malformed"
         ) from exc
-    _require_runtime_receipt(receipt)
-    _verify_runtime_bytes(config, receipt)
-    targets = _profile_targets(config["profile_targets"])
     try:
         store = registration_store.RegistrationStore.open_default(
             profile_targets=targets
@@ -1086,16 +1141,16 @@ def open_service() -> Iterator[HostService]:
             )
         candidate = _candidate_from_protocol(protocol)
         if (
-            receipt.schema_hash != protocol["schema_hash"]
-            or receipt.protocol_generation
+            direct_receipt.schema_hash != protocol["schema_hash"]
+            or direct_receipt.protocol_generation
             != str(protocol["protocol_generation"])
-            or receipt.digest != candidate.projection_receipt_hash
+            or direct_receipt.digest != candidate.projection_receipt_hash
         ):
             raise registration_hook_runtime.HookUnavailable(
                 "DIRECT receipt does not match protocol"
             )
         if any(
-            receipt.to_mapping()[field]
+            direct_receipt.to_mapping()[field]
             != (
                 str(getattr(candidate, field))
                 if field
@@ -1121,38 +1176,21 @@ def open_service() -> Iterator[HostService]:
             raise registration_hook_runtime.HookUnavailable(
                 "DIRECT receipt does not match protocol"
             )
-        capability = _private_bytes(
-            _absolute(
-                config["writer_capability_path"],
-                "writer capability path",
-            ),
-            limit=4_096,
-        )
         data = registration_store.authenticate_data(
-            capability, candidate.writer_capability_hash
+            writer_capability, candidate.writer_capability_hash
         )
-        entries = _inventory(config["inventory"])
         if (
             registration_projection.tool_inventory_hash(entries)
-            != receipt.tool_inventory_hash
+            != direct_receipt.tool_inventory_hash
         ):
             raise registration_hook_runtime.HookUnavailable(
                 "tool inventory receipt mismatch"
             )
-        proof_parent = _absolute(
-            config["proof_parent"], "proof parent"
-        )
-        projection_parent = _absolute(
-            config["projection_parent"], "projection parent"
-        )
-        legacy_parent = _absolute(
-            config["legacy_parent"], "legacy parent"
-        )
         service = HostService(
             store=store,
             candidate=candidate,
             data=data,
-            receipt=receipt,
+            receipt=direct_receipt,
             collector=registration_basis.GitBasisCollector(
                 proof_parent=proof_parent,
                 projection_parent=projection_parent,
@@ -1160,14 +1198,62 @@ def open_service() -> Iterator[HostService]:
             ),
             inventory_entries=entries,
             proof_parent=proof_parent,
-            host_tick_path=_absolute(
-                config["host_tick_receipt_path"],
-                "host tick receipt path",
-            ),
+            host_tick_path=host_tick_path,
+            host_authority=host_authority,
+            direct_receipt=direct_receipt,
+            owner_gate=owner_gate,
+            product_current=product_current,
+            bundle_projection=bundle_projection,
+            import_manifest=import_manifest,
+            writer_capability=writer_capability,
+            resource_provider=resource_provider,
         )
         yield service
     finally:
         store.close()
+
+
+def retained_main(*, route: str, authority: object) -> int:
+    """Fail closed until all typed retained host objects are present."""
+    if route not in {"admission", "startup", "tick"}:
+        return 2
+    # The platform child owns conversion from transport bytes to these typed
+    # values. A partial receiver object is never expanded from ambient state.
+    required = (
+        "host_authority",
+        "direct_receipt",
+        "owner_gate",
+        "product_current",
+        "bundle_projection",
+        "import_manifest",
+        "writer_capability",
+        "resource_provider",
+    )
+    if any(not hasattr(authority, name) for name in required):
+        return 1
+    try:
+        with open_service(
+            **{name: getattr(authority, name) for name in required}
+        ) as service:
+            if route == "tick":
+                receipt = service.tick()
+                return 1 if receipt.fairness_suspended else 0
+            if route == "startup":
+                service.startup(_strict_json(_read_stdin()))
+                return 0
+            payload = _strict_json(_read_stdin())
+            invocation = registration_hook_runtime.parse_observable_invocation(
+                payload
+            )
+            decision = service.handle(payload, invocation)
+            sys.stdout.buffer.write(
+                registration_hook_runtime.serialize_decision(
+                    invocation.event, decision
+                )
+            )
+            return 0 if decision.allowed else 2
+    except BaseException:
+        return 1
 
 
 def _read_stdin() -> bytes:

@@ -7,6 +7,7 @@ import hashlib
 import importlib
 import importlib.resources
 import importlib.util
+import inspect
 import os
 import tempfile
 import types
@@ -49,13 +50,11 @@ def _load_child():
 class FdMappingTest(unittest.TestCase):
     def test_high_fd_plan_survives_all_source_target_collisions(self) -> None:
         bootstrap = _load_bootstrap()
+        roles = tuple(bootstrap.FD_ASSIGNMENTS)
+        targets = tuple(bootstrap.FD_ASSIGNMENTS.values())
         sources = {
-            "control": 4,
-            "runtime_manifest": 3,
-            "awa_import_manifest": 8,
-            "signed_authority": 5,
-            "current": 6,
-            "launch": 7,
+            role: targets[(index + 1) % len(targets)]
+            for index, role in enumerate(roles)
         }
         actions = bootstrap.plan_fd_remap(sources)
         target_by_role = {
@@ -87,17 +86,90 @@ class FdMappingTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             bootstrap.plan_fd_remap(
                 {
-                    "control": 9,
-                    "runtime_manifest": 9,
-                    "awa_import_manifest": 10,
-                    "signed_authority": 11,
-                    "current": 12,
-                    "launch": 13,
+                    **{
+                        role: 20 + index
+                        for index, role in enumerate(
+                            bootstrap.FD_ASSIGNMENTS
+                        )
+                    },
+                    "runtime_manifest": 20,
                 }
             )
 
 
 class V8FdTopologyTest(unittest.TestCase):
+    def test_v12_fixed_fd3_through_fd15_roles_are_exact(self) -> None:
+        bootstrap = _load_bootstrap()
+        self.assertEqual(
+            bootstrap.FD_ASSIGNMENTS,
+            {
+                "control": 3,
+                "runtime_manifest": 4,
+                "import_manifest": 5,
+                "owner_gate": 6,
+                "runtime_current": 7,
+                "launch_context": 8,
+                "product_current": 9,
+                "product_bundle_directory": 10,
+                "bundle_manifest": 11,
+                "bundle_projection": 12,
+                "direct_receipt": 13,
+                "host_authority": 14,
+                "writer_capability": 15,
+            },
+        )
+        self.assertEqual(
+            set(bootstrap.FD_ASSIGNMENTS.values()), set(range(3, 16))
+        )
+
+    def test_v12_child_remeasures_all_authority_at_ready_and_go(self) -> None:
+        source = CHILD_PATH.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        await_parent_go = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "await_parent_go"
+        )
+        verify_calls = sorted(
+            (
+                node
+                for node in ast.walk(await_parent_go)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_verify_authority_fds"
+            ),
+            key=lambda node: (node.lineno, node.col_offset),
+        )
+        ready_send = next(
+            node
+            for node in ast.walk(await_parent_go)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "sendall"
+            and any(
+                isinstance(part, ast.Constant)
+                and isinstance(part.value, str)
+                and "READY " in part.value
+                for argument in node.args
+                for part in ast.walk(argument)
+            )
+        )
+        go_receive = next(
+            node
+            for node in ast.walk(await_parent_go)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "recv"
+        )
+        self.assertGreaterEqual(
+            len(verify_calls),
+            2,
+            "child must independently verify retained descriptors at READY and GO",
+        )
+        self.assertLess(verify_calls[0].lineno, ready_send.lineno)
+        self.assertGreater(verify_calls[-1].lineno, go_receive.lineno)
+
     def _record(
         self,
         bootstrap,
@@ -320,11 +392,12 @@ class ParentChildBarrierTest(unittest.TestCase):
             runtime_manifest_sha256="1" * 64,
             version_lock_identity="3" * 64,
             authority_fds={
-                "runtime_manifest": 10,
-                "awa_import_manifest": 11,
-                "signed_authority": 12,
-                "current": 13,
-                "launch": 14,
+                role: 20 + index
+                for index, role in enumerate(
+                    role
+                    for role in bootstrap.FD_ASSIGNMENTS
+                    if role != "control"
+                )
             },
             executable_vnode=vnode,
             reverify=lambda: rechecks.append("reverify"),
@@ -454,7 +527,7 @@ class BootstrapMeasurementTest(unittest.TestCase):
                 "AWA_REGISTRATION_SPAWN_NONCE": "a" * 64,
             },
         )
-        self.assertEqual(plan.fixed_fds, frozenset({3, 4, 5, 6, 7, 8}))
+        self.assertEqual(plan.fixed_fds, frozenset(range(3, 16)))
 
     def test_common_measurement_rejects_symlink_linkcount_mode_and_hash_drift(
         self,

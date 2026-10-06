@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import hashlib
 import json
 import tempfile
 import unittest
@@ -16,7 +17,6 @@ from engine import (
     registration_projection,
     registration_runtime,
 )
-from engine.tests.test_registration_installer_c import _immutable_authority
 
 
 def _receipt(*, suspended: bool = False) -> registration_runtime.TickReceipt:
@@ -47,6 +47,36 @@ def _cursor(boot_id: str = "boot-a") -> registration_runtime.SameBootCursor:
 
 
 class RegistrationHostTickTest(unittest.TestCase):
+    def test_v12_host_has_no_environment_selected_authority(self) -> None:
+        source = inspect.getsource(registration_host.open_service)
+        for forbidden in (
+            "AWA_REGISTRATION_RUNTIME_CONFIG",
+            "AWA_REGISTRATION_BUNDLE_ROOT",
+            "_config_path",
+            "_load_config",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(
+                    forbidden,
+                    source,
+                    "host still reopens config/product path authority",
+                )
+        parameters = inspect.signature(
+            registration_host.HostService.__init__
+        ).parameters
+        for required in (
+            "host_authority",
+            "direct_receipt",
+            "owner_gate",
+            "product_current",
+            "bundle_projection",
+            "import_manifest",
+            "writer_capability",
+            "resource_provider",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, parameters)
+
     def test_startup_json_rejects_duplicate_keys(self) -> None:
         with self.assertRaises(ValueError):
             registration_host._strict_json(
@@ -57,29 +87,39 @@ class RegistrationHostTickTest(unittest.TestCase):
     def test_runtime_byte_binding_rejects_installed_or_wrapper_drift(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            authority, receipt, _old = _immutable_authority(
-                Path(raw).resolve()
-            )
-            authority.install_candidate()
-            environment = {
-                "AWA_REGISTRATION_BUNDLE_ROOT": str(
-                    authority.bundle_dir
-                )
-            }
-            with mock.patch.dict(
-                "os.environ", environment, clear=False
-            ):
-                registration_host._verify_runtime_bytes({}, receipt)
-                runtime = (
-                    authority.bundle_dir
-                    / "engine/registration_host.py"
-                )
-                runtime.write_bytes(b"drift")
+        self.assertTrue(
+            hasattr(registration_host, "_verify_retained_runtime_bytes"),
+            "host lacks retained-resource runtime verification",
+        )
+        host = b"VALUE = 1\n"
+        wrapper = b"#!/bin/sh\nexit 2\n"
+        sealed = SimpleNamespace(
+            installed_file_hash=hashlib.sha256(
+                b"awa-registration-installed-file/v1\0" + host
+            ).hexdigest(),
+            wrapper_runtime_hash=hashlib.sha256(
+                b"awa-registration-wrapper-runtime/v2\0" + wrapper
+            ).hexdigest(),
+        )
+        retained = {
+            "engine/registration_host.py": host,
+            "bin/awa-registration-entrypoint": wrapper,
+        }
+        registration_host._verify_retained_runtime_bytes(
+            host_authority=sealed,
+            retained_resources=retained,
+        )
+        for path in retained:
+            with self.subTest(path=path):
+                changed = dict(retained)
+                changed[path] = b"drift"
                 with self.assertRaises(
                     registration_host.registration_hook_runtime.HookUnavailable
                 ):
-                    registration_host._verify_runtime_bytes({}, receipt)
+                    registration_host._verify_retained_runtime_bytes(
+                        host_authority=sealed,
+                        retained_resources=changed,
+                    )
 
     def test_host_envelope_uses_fresh_storage_and_serializer_checks(
         self,

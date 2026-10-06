@@ -62,6 +62,33 @@ class InstallerStateMachineTest(unittest.TestCase):
         self.assertLess(events.index("current:replace"), events.index("parent:sync"))
         self.assertEqual(events[-1], "audit:append")
 
+    def test_v12_runtime_and_product_currents_publish_as_one_commit(self) -> None:
+        receipt = self.installer.apply(_request("INSTALL"))
+        self.assertEqual(receipt.outcome, "SUCCESS")
+        self.assertTrue(
+            hasattr(self.backend, "product_current"),
+            "installer did not publish product-current authority",
+        )
+        self.assertIsNotNone(self.backend.current)
+        self.assertIsNotNone(self.backend.product_current)
+        self.assertEqual(
+            self.backend.product_current.runtime_current_digest,
+            self.backend.current.current_digest,
+        )
+        before = self.backend.snapshot()
+        self.backend.fail_at = "currents:parent-sync"
+        failed = self.installer.apply(
+            _request(
+                "UPDATE",
+                current=self.backend.current,
+                request_id="d" * 64,
+            )
+        )
+        self.assertEqual(failed.outcome, "FAILED")
+        after = self.backend.snapshot()
+        self.assertEqual(after.current, before.current)
+        self.assertEqual(after.product_current, before.product_current)
+
     def test_update_rejects_stale_current_and_preserves_prior(self) -> None:
         self.installer.apply(_request("INSTALL", request_id="a" * 64))
         before = self.backend.snapshot()

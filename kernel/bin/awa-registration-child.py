@@ -498,12 +498,22 @@ def main(argv: list[str] | None = None) -> int:
     control = socket.socket(fileno=CONTROL_FD)
     watchdog: _Watchdog | None = None
     try:
+        # Independently measure every retained descriptor before READY barrier.
+        ready_authorities = _verify_authority_fds(
+            route=args.route, nonce=args.nonce
+        )
         watchdog, authorities = await_parent_go(
             control,
             expected_parent_pid=args.expected_parent_pid,
             route=args.route,
             nonce=args.nonce,
         )
+        # Independently remeasure after GO barrier, before the first product import.
+        go_authorities = _verify_authority_fds(
+            route=args.route, nonce=args.nonce
+        )
+        if ready_authorities != authorities or go_authorities != authorities:
+            raise ChildRefusal("retained authority changed across barriers")
         # This is the first AWA product import in the process. Every authority
         # and barrier above has completed before this exact statement.
         receiver = importlib.import_module("engine.registration_receiver")

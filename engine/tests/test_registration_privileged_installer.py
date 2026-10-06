@@ -24,6 +24,16 @@ EXACT_HEAD = "03d0d3dd3e840925149d3ae1c5dd94e7791e8c3d"
 SOURCE_LOCK_DIGEST = (
     "a8b1415067e7b33c18ccc3c1d42e19ae27a9ad5784a7f294fffc562083762d72"
 )
+V12_PRODUCT_AUTHORITY_ROLES = (
+    "PRODUCT_CURRENT",
+    "BUNDLE_MANIFEST",
+    "BUNDLE_PROJECTION",
+    "IMPORT_MANIFEST",
+    "HOST_AUTHORITY",
+    "DIRECT_RECEIPT",
+    "OWNER_GATE",
+    "WRITER_CAPABILITY",
+)
 
 
 def _load_admin():
@@ -557,6 +567,21 @@ def _complete_packet_builder(
             ),
             encoding=encoding,
         )
+    if set(V12_PRODUCT_AUTHORITY_ROLES) <= privileged.PACKET_ROOT_ROLES:
+        for role in V12_PRODUCT_AUTHORITY_ROLES:
+            builder.add_packet_root_blob(
+                role=role,
+                domain=f"synthetic:{role}",
+                content=privileged.canonical_lf_bytes(
+                    {
+                        "schema": (
+                            f"synthetic-{role.lower().replace('_', '-')}/v1"
+                        )
+                    }
+                ),
+                media_type="application/json",
+                encoding="JCS_LF",
+            )
     for role, content in (extra_root_blobs or {}).items():
         builder.add_packet_root_blob(
             role=role,
@@ -793,6 +818,36 @@ class QualificationFixtureTest(unittest.TestCase):
 
 
 class QualificationPacketTest(unittest.TestCase):
+    def test_v12_packet_binds_every_exact_product_authority_asset(self) -> None:
+        self.assertTrue(
+            set(V12_PRODUCT_AUTHORITY_ROLES)
+            <= privileged.PACKET_ROOT_ROLES,
+            "packet root omits accepted product-authority roles",
+        )
+        self.assertEqual(
+            privileged.PACKET_ROOT_ROLES,
+            privileged._READER_ROOT_ROLES,
+        )
+        packet = _complete_packet_builder().finalize(_final_packet_values())
+        by_role = {
+            record["role"]: record
+            for record in packet["packet_root_index"]["records"]
+        }
+        for role in V12_PRODUCT_AUTHORITY_ROLES:
+            with self.subTest(role=role):
+                self.assertIn(role, by_role)
+                content = packet["blobs"][by_role[role]["sha256"]]
+                self.assertEqual(
+                    hashlib.sha256(content).hexdigest(),
+                    by_role[role]["sha256"],
+                )
+        changed = dict(packet)
+        changed["blobs"] = dict(packet["blobs"])
+        target = by_role["IMPORT_MANIFEST"]["sha256"]
+        changed["blobs"][target] = b'{"schema":"wrong/v1"}\n'
+        with self.assertRaises(ValueError):
+            privileged.validate_qualification_packet(changed)
+
     def test_packet_indices_bind_content_addressed_fixture_blobs(self) -> None:
         builder = _complete_packet_builder()
         packet_root = builder.finalize_packet_root()

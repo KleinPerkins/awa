@@ -788,6 +788,20 @@ class CutoverMatrixTest(unittest.TestCase):
 
 
 class InstallerAuthenticationTest(unittest.TestCase):
+    def test_v12_installer_constructs_only_import_v2_and_bundle_v3(self) -> None:
+        source = inspect.getsource(registration_installer)
+        self.assertIn("ImportManifestV2", source)
+        self.assertIn("BundleManifestV3", source)
+        self.assertIn("engine.registration_receiver", source)
+        self.assertNotIn(
+            'schema="awa-registration-import-manifest/v1"',
+            source,
+        )
+        self.assertNotIn(
+            'schema="awa-registration-bundle-manifest/v1"',
+            source,
+        )
+
     @unittest.skipIf(
         sqlite3.sqlite_version_info < registration_store.MIN_SQLITE_VERSION,
         "ADR 0025 requires stock SQLite >=3.51.3",

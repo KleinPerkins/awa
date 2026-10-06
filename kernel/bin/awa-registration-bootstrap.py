@@ -51,12 +51,19 @@ ROUTES = ("admission", "receiver", "startup", "tick")
 FD_ASSIGNMENTS = {
     "control": 3,
     "runtime_manifest": 4,
-    "awa_import_manifest": 5,
-    "signed_authority": 6,
-    "current": 7,
-    "launch": 8,
+    "import_manifest": 5,
+    "owner_gate": 6,
+    "runtime_current": 7,
+    "launch_context": 8,
+    "product_current": 9,
+    "product_bundle_directory": 10,
+    "bundle_manifest": 11,
+    "bundle_projection": 12,
+    "direct_receipt": 13,
+    "host_authority": 14,
+    "writer_capability": 15,
 }
-MINIMUM_REMAP_FD = 10
+MINIMUM_REMAP_FD = 16
 COMMON_MEASUREMENT_FILES = (
     "bootstrap.py",
     "child.py",

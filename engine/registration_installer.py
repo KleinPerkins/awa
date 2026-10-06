@@ -54,7 +54,15 @@ def _manifest_module_path(root: Path, module: str) -> Path:
     return path
 
 
-def _manifest_file(root: Path, path: Path) -> registration_projection.ImportRecord:
+def _manifest_file(
+    root: Path,
+    path: Path,
+    *,
+    kind: str,
+    logical_name: str,
+    owner_module: str | None,
+    fd_target: int,
+) -> registration_projection.ImportRecordV2:
     try:
         relative = path.relative_to(root).as_posix()
         metadata = path.lstat()
@@ -83,14 +91,13 @@ def _manifest_file(root: Path, path: Path) -> registration_projection.ImportReco
         if isinstance(exc, CutoverRefused):
             raise
         raise CutoverRefused("import-manifest file is unavailable") from exc
-    return registration_projection.ImportRecord(
-        path=relative,
-        role=(
-            "PACKAGE_INITIALIZER"
-            if path.name == "__init__.py"
-            else "MODULE"
-        ),
-        mode=str(stat.S_IMODE(metadata.st_mode)),
+    return registration_projection.ImportRecordV2(
+        kind=kind,
+        logical_name=logical_name,
+        relative_path=relative,
+        owner_module=owner_module,
+        fd_target=str(fd_target),
+        mode="444",
         size=str(len(payload)),
         sha256=hashlib.sha256(payload).hexdigest(),
     )
@@ -153,9 +160,8 @@ def _resolved_product_imports(
 
 def generate_import_manifest(
     bundle_root: Path,
-    entry_modules: tuple[str, ...],
-) -> registration_projection.ImportManifest:
-    """Generate the closed static product-import manifest."""
+) -> registration_projection.ImportManifestV2:
+    """Generate the receiver-rooted closed static product-import manifest."""
     root = Path(bundle_root)
     try:
         root = root.resolve(strict=True)
@@ -168,23 +174,21 @@ def generate_import_manifest(
         or metadata.st_uid != os.geteuid()
     ):
         raise CutoverRefused("bundle root identity is unsafe")
-    ordered_entries = tuple(
-        sorted(set(entry_modules), key=lambda value: value.encode("utf-8"))
-    )
-    if not ordered_entries or len(ordered_entries) != len(entry_modules):
-        raise CutoverRefused("entry modules are not unique")
-    package_roots = {module.split(".", 1)[0] for module in ordered_entries}
-    if len(package_roots) != 1:
-        raise CutoverRefused("entry modules must share one product package")
-    package_root = next(iter(package_roots))
-    pending = list(ordered_entries)
+    package_root = "engine"
+    pending = ["engine.registration_receiver"]
     visited: set[str] = set()
-    files: dict[str, Path] = {}
+    files: dict[str, tuple[Path, str, str, str | None]] = {}
     while pending:
         module = pending.pop(0)
         if module in visited:
             continue
         candidate = _manifest_module_path(root, module)
+        if not candidate.is_file():
+            package_candidate = (
+                root / Path(*module.split(".")) / "__init__.py"
+            )
+            if package_candidate.is_file():
+                candidate = package_candidate
         if not candidate.is_file():
             # `from package import symbol` may identify an attribute rather
             # than a module. It is ignored only when its containing module
@@ -203,7 +207,16 @@ def generate_import_manifest(
                 f"product import could not be parsed: {module}"
             ) from exc
         visited.add(module)
-        files[candidate.relative_to(root).as_posix()] = candidate
+        files[candidate.relative_to(root).as_posix()] = (
+            candidate,
+            (
+                "PACKAGE_INITIALIZER"
+                if candidate.name == "__init__.py"
+                else "MODULE"
+            ),
+            module,
+            None,
+        )
         relative = candidate.relative_to(root)
         for parent in tuple(relative.parents)[:-1]:
             initializer = root / parent / "__init__.py"
@@ -211,7 +224,13 @@ def generate_import_manifest(
                 raise CutoverRefused(
                     "package initializer is missing"
                 )
-            files[initializer.relative_to(root).as_posix()] = initializer
+            package_name = ".".join(parent.parts)
+            files[initializer.relative_to(root).as_posix()] = (
+                initializer,
+                "PACKAGE_INITIALIZER",
+                package_name,
+                None,
+            )
         for imported in sorted(
             _resolved_product_imports(
                 tree=tree,
@@ -222,14 +241,51 @@ def generate_import_manifest(
         ):
             if imported not in visited and imported not in pending:
                 pending.append(imported)
-    records = tuple(
-        _manifest_file(root, files[path])
-        for path in sorted(files, key=lambda value: value.encode("utf-8"))
+    schema_resource = root / "engine/registration_schema.sql"
+    if (
+        "engine.registration_schema" not in visited
+        or not schema_resource.is_file()
+    ):
+        raise CutoverRefused("mandatory schema resource is unavailable")
+    files[schema_resource.relative_to(root).as_posix()] = (
+        schema_resource,
+        "RESOURCE",
+        "engine.registration_schema:registration_schema.sql",
+        "engine.registration_schema",
     )
-    return registration_projection.ImportManifest(
-        schema="awa-registration-import-manifest/v1",
-        entry_modules=ordered_entries,
-        records=records,
+    records = tuple(
+        _manifest_file(
+            root,
+            files[path][0],
+            kind=files[path][1],
+            logical_name=files[path][2],
+            owner_module=files[path][3],
+            fd_target=16 + ordinal,
+        )
+        for ordinal, path in enumerate(
+            sorted(files, key=lambda value: value.encode("utf-8"))
+        )
+    )
+    return registration_projection.ImportManifestV2.create(records)
+
+
+def generate_bundle_manifest(
+    *,
+    generation: str,
+    import_manifest: registration_projection.ImportManifestV2,
+    host_authority: registration_projection.HostAuthorityV2,
+    writer_capability_hash: str,
+    installed_file_hash: str,
+    payload_bytes: Mapping[str, bytes],
+) -> registration_projection.BundleManifestV3:
+    """Construct only the accepted acyclic bundle-manifest v3 authority."""
+    return registration_projection.BundleManifestV3.create(
+        generation=generation,
+        import_manifest=import_manifest,
+        host_authority=host_authority,
+        writer_capability_hash=writer_capability_hash,
+        installed_file_hash=installed_file_hash,
+        payload_bytes=payload_bytes,
     )
 
 

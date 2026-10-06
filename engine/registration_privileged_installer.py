@@ -961,6 +961,25 @@ class CurrentRecord:
         )
 
 
+@dataclass(frozen=True)
+class ProductCurrentRecord:
+    runtime_current_digest: str
+    product_current_digest: str
+
+    @classmethod
+    def create(cls, current: CurrentRecord) -> "ProductCurrentRecord":
+        body = {
+            "runtime_current_digest": current.current_digest,
+            "active_manifest_sha256": current.active_manifest_sha256,
+        }
+        return cls(
+            runtime_current_digest=current.current_digest,
+            product_current_digest=authority_digest(
+                "awa-registration-product-current/v1", body
+            ),
+        )
+
+
 def _paths_hash(paths: Iterable[str]) -> str:
     framed = b"".join(
         path.encode("utf-8") + b"\n"
@@ -1197,6 +1216,7 @@ class PathMetadata:
 @dataclass(frozen=True)
 class BackendSnapshot:
     current: CurrentRecord | None
+    product_current: ProductCurrentRecord | None
     runtime_roots: dict[str, bytes]
     managed_roots: frozenset[str]
     directories: tuple[str, ...]
@@ -1216,12 +1236,14 @@ class MemoryAdminBackend:
         "payload:sync",
         "version:publish",
         "current:replace",
+        "currents:parent-sync",
         "parent:sync",
         "audit:append",
     )
 
     def __init__(self) -> None:
         self.current: CurrentRecord | None = None
+        self.product_current: ProductCurrentRecord | None = None
         self.runtime_roots: dict[str, bytes] = {}
         self.managed_roots: set[str] = set()
         self.directories = EXACT_ROOT_DIRECTORIES
@@ -1245,6 +1267,7 @@ class MemoryAdminBackend:
     def snapshot(self) -> BackendSnapshot:
         return BackendSnapshot(
             self.current,
+            self.product_current,
             copy.deepcopy(self.runtime_roots),
             frozenset(self.managed_roots),
             tuple(self.directories),
@@ -1254,6 +1277,7 @@ class MemoryAdminBackend:
 
     def restore(self, snapshot: BackendSnapshot) -> None:
         self.current = snapshot.current
+        self.product_current = snapshot.product_current
         self.runtime_roots = copy.deepcopy(snapshot.runtime_roots)
         self.managed_roots = set(snapshot.managed_roots)
 
@@ -1461,6 +1485,10 @@ class PrivateRuntimeInstaller:
                         self.backend.managed_roots.remove(digest)
             self.backend.checkpoint("current:replace")
             self.backend.current = post
+            self.backend.product_current = (
+                None if post is None else ProductCurrentRecord.create(post)
+            )
+            self.backend.checkpoint("currents:parent-sync")
             self.backend.checkpoint("parent:sync")
             receipt = self._receipt(
                 request,
@@ -1655,6 +1683,14 @@ PACKET_ROOT_ROLES = frozenset(
         "LOADED_IMAGES",
         "DEPENDENCY_ESCAPES",
         "PURE_VALIDATOR_REJECTION_EVIDENCE",
+        "PRODUCT_CURRENT",
+        "BUNDLE_MANIFEST",
+        "BUNDLE_PROJECTION",
+        "IMPORT_MANIFEST",
+        "HOST_AUTHORITY",
+        "DIRECT_RECEIPT",
+        "OWNER_GATE",
+        "WRITER_CAPABILITY",
     }
 )
 BOUND_ROLES = frozenset({"PRIVILEGED_REQUEST", "PRIVILEGED_CONTEXT"})
@@ -3058,6 +3094,9 @@ _READER_ROOT_ROLES = frozenset(
         "TEST_STDERR", "TREE_COMPARISON", "ARCHIVE_COMPARISON",
         "LOADED_IMAGES", "DEPENDENCY_ESCAPES",
         "PURE_VALIDATOR_REJECTION_EVIDENCE",
+        "PRODUCT_CURRENT", "BUNDLE_MANIFEST", "BUNDLE_PROJECTION",
+        "IMPORT_MANIFEST", "HOST_AUTHORITY", "DIRECT_RECEIPT",
+        "OWNER_GATE", "WRITER_CAPABILITY",
     }
 )
 _READER_BOUND_ROLES = frozenset({"PRIVILEGED_REQUEST", "PRIVILEGED_CONTEXT"})
