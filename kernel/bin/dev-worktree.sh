@@ -1759,11 +1759,12 @@ if missing:
     raise SystemExit(f"policy missing keys: {', '.join(missing)}")
 print(f"policy: {p}")
 
-# Additive per-repo MODE validation (schema awa-modes/v1). Validate `modes:` /
-# `default_mode:` when present — inline OR via a `modes_file:` pointer — parsed with the
-# SAME kernel loader the classifier uses. Absence is valid (these are NOT required keys).
-# EVERYTHING here WARNs only; it NEVER hard-fails (back-compat: only missing required keys
-# fail policy-check). policy-check ALWAYS prints `policy-check: OK` and exits 0.
+# Validate the optional hard-no-touch field with the SAME kernel loader used by
+# pre-access consumers. A malformed configured field hard-fails policy-check:
+# uncertainty must never silently weaken a no-touch boundary. Absence remains valid.
+#
+# Per-repo MODE validation (schema awa-modes/v1) remains warning-only and
+# backward-compatible.
 warnings = []
 # A glob/broad key set to `off` disables the guard for EVERY matched repo: explicit OFF beats
 # the safety-excludes, so a glob off key is the ONLY thing that can silence AWA for repos the
@@ -1773,6 +1774,14 @@ BROAD_LITERAL_KEYS = {".", "*", "**"}
 try:
     import awa_policy
     data = awa_policy.parse_mini_yaml(text)
+    hard_no_touch = awa_policy.hard_no_touch_matcher_from_text(text)
+    if not hard_no_touch.valid:
+        print(
+            "policy-check: FAIL hard_no_touch_paths is malformed "
+            f"({','.join(hard_no_touch.errors)})",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     if any(k in data for k in ("modes", "default_mode", "modes_file")):
         modes, default_mode = awa_policy._resolve_modes(data, str(p))
         allowed = "|".join(awa_policy.MODE_VALUES)
