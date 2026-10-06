@@ -72,7 +72,8 @@ lands — this directory already follows the reference shape it derived from.
 | `native-entry-durable-registration-v8.md` | SUPERSEDED BY V9 — 2026-10-03 | Bounded product-closure successor to accepted v7; seals retained-byte import, closed version retention, immutable admin ancestry, acyclic packet-v2 qualification, and exact startup/reconciliation. |
 | `native-entry-durable-registration-v9.md` | SUPERSEDED BY V10 — 2026-10-04 | Minimal fixed-point successor to accepted v8; replaces only circular bundle-manifest v2 with acyclic v3 derivation and expands the exact static set to 16. |
 | `native-entry-durable-registration-v10.md` | SUPERSEDED BY V11 — 2026-10-05 | Minimal semantic-inventory successor to accepted v9; adds only the kernel-off matrix test to distinguish accepted registration locks/ABI layout from forbidden worktree locks and immutable-flag operations. |
-| `native-entry-durable-registration-v11.md` | ACCEPTED — DOCUMENTATION ONLY; IMPLEMENTATION AND R0 NO-GO — 2026-10-05 | Minimal packet-authority successor to accepted v10; replaces packet-before-key with dependency-correct qualification preparation and upgrades exact-head packet producer/consumer authority from historical v1 to accepted v2. |
+| `native-entry-durable-registration-v11.md` | SUPERSEDED BY V12 — 2026-10-05 | Minimal packet-authority successor to accepted v10; replaces packet-before-key with dependency-correct qualification preparation and upgrades exact-head packet producer/consumer authority from historical v1 to accepted v2. |
+| `native-entry-durable-registration-v12.md` | ACCEPTED — DOCUMENTATION ONLY; IMPLEMENTATION AND R0 NO-GO — 2026-10-05 | Corrective authority successor to accepted v11; closes receiver-rooted import-manifest v2, bundle-manifest v3, retained launch, four-field hook ABI and inert R0 before exact-head qualification. |
 
 ## Related conventions
 
