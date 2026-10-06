@@ -83,8 +83,16 @@ class SerializerUnavailable(HookUnavailable):
 
 class Service(Protocol):
     def handle(
-        self, payload: object, discriminator: str
+        self, payload: object, invocation: "ObservableInvocation"
     ) -> registration_admission.AdmissionDecision: ...
+
+
+@dataclass(frozen=True)
+class ObservableInvocation:
+    event: str
+    server_or_empty: str
+    discriminator: str
+    serializer_schema: str
 
 
 @dataclass(frozen=True)
@@ -108,6 +116,7 @@ def _decode(raw: bytes) -> dict:
     if not isinstance(raw, bytes) or not 1 <= len(raw) <= MAX_PAYLOAD_BYTES:
         raise ValueError("payload size unsupported")
     try:
+        registration_admission._scan_json_shape(raw)
         value = json.loads(
             raw.decode("utf-8", "strict"),
             object_pairs_hook=_pairs,
@@ -115,7 +124,15 @@ def _decode(raw: bytes) -> dict:
                 ValueError(value)
             ),
         )
-    except (UnicodeError, json.JSONDecodeError, TypeError) as exc:
+    except (
+        UnicodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        RecursionError,
+        MemoryError,
+        registration_admission.EventRefused,
+    ) as exc:
         raise ValueError("payload is not strict JSON") from exc
     if not isinstance(value, dict):
         raise ValueError("payload must be an object")
@@ -153,6 +170,36 @@ def _event_and_discriminator(value: dict) -> tuple[str, str]:
     return event, discriminator
 
 
+def _observable_invocation(
+    value: dict, event: str, discriminator: str
+) -> ObservableInvocation:
+    server = (
+        value.get("mcp_server_name", "")
+        if event in {"beforeMCPExecution", "beforeMCP"}
+        else ""
+    )
+    if (
+        not isinstance(server, str)
+        or "\0" in server
+        or (
+            event in {"beforeMCPExecution", "beforeMCP"}
+            and not server
+        )
+    ):
+        raise ValueError("MCP server identity is invalid")
+    serializer = (
+        "cursor-subagent/v1"
+        if event == "subagentStart"
+        else "cursor-permission/v1"
+    )
+    return ObservableInvocation(
+        event=event,
+        server_or_empty=server,
+        discriminator=discriminator,
+        serializer_schema=serializer,
+    )
+
+
 def _normalized_event(value: dict, event: str) -> dict:
     normalized = {
         key: value[key]
@@ -182,14 +229,24 @@ def _normalized_event(value: dict, event: str) -> dict:
         if len(nested.encode("utf-8")) > MAX_PAYLOAD_BYTES:
             raise ValueError("nested tool input exceeds bound")
         try:
+            nested_raw = nested.encode("utf-8", "strict")
+            registration_admission._scan_json_shape(nested_raw)
             nested = json.loads(
-                nested,
+                nested_raw.decode("utf-8", "strict"),
                 object_pairs_hook=_pairs,
                 parse_constant=lambda item: (_ for _ in ()).throw(
                     ValueError(item)
                 ),
             )
-        except (json.JSONDecodeError, TypeError) as exc:
+        except (
+            UnicodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            RecursionError,
+            MemoryError,
+            registration_admission.EventRefused,
+        ) as exc:
             raise ValueError("nested tool input is not strict JSON") from exc
     if nested is not None:
         if not isinstance(nested, dict):
@@ -242,6 +299,7 @@ def dispatch_bytes(raw: bytes, service: Service) -> DispatchResult:
     try:
         value = _decode(raw)
         event, discriminator = _event_and_discriminator(value)
+        invocation = _observable_invocation(value, event, discriminator)
         normalized = _normalized_event(value, event)
         # Preserve accepted discriminator ordering: preidentity/root parsing
         # happens before launch/unknown/ordinary policy.
@@ -264,7 +322,7 @@ def dispatch_bytes(raw: bytes, service: Service) -> DispatchResult:
             decision,
             serialize_decision(event, decision),
         )
-    decision = service.handle(normalized, discriminator)
+    decision = service.handle(normalized, invocation)
     if decision.reason in {
         "STORE_UNAVAILABLE",
         "CONTAINMENT_UNAVAILABLE",

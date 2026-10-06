@@ -1,6 +1,6 @@
 # AWA — Agent Worktree Automation (standalone system). Make targets: help-first, .PHONY.
 .DEFAULT_GOAL := help
-.PHONY: help install repair doctor check uninstall verify verify-docs verify-focused verify-pre-pr verify-performance verify-release verify-install verify-guard-installed-full test trial version
+.PHONY: help install repair doctor check uninstall verify verify-docs verify-focused verify-pre-pr verify-performance verify-release verify-install verify-guard-installed-full private-runtime-check private-runtime-fixture private-runtime-qualification-inputs private-runtime-qualification-build test trial version
 unexport VERIFY_BASE TESTS
 
 help: ## Show available targets
@@ -18,6 +18,8 @@ help: ## Show available targets
 	@echo "  make verify-release  - selected release trial (TRIAL_ARGS='<args>')"
 	@echo "  make verify-install  - full install lifecycle in a throwaway HOME (headless/CI-safe)"
 	@echo "  make verify-guard-installed-full - complete serial installed-guard fallback"
+	@echo "  make private-runtime-check - verify exact source lock/build tooling"
+	@echo "  make private-runtime-fixture - two bounded synthetic builds (FIXTURE_SOURCE/FIXTURE_WORK)"
 	@echo "  make test            - engine tests (2 workers; AWA_TEST_JOBS=1 for serial)"
 	@echo "  make trial           - run the exact seven-step real-PM trial"
 	@echo "  make version         - print the engine version"
@@ -50,6 +52,7 @@ verify: ## Full local verification: tests + freeze + zero-link + install --check
 	  if [ -z "$$receipt" ]; then receipt=$$(mktemp "$${TMPDIR:-/tmp}/awa-performance-receipt.XXXXXX"); fi; \
 	  trap 'if [ -z "$$external_receipt" ]; then rm -f "$$receipt"; fi' EXIT; \
 	  AWA_TEST_RECEIPT="$$receipt" AWA_TEST_LANE=pre-pr bash engine/tests/run-tests.sh; \
+	  bash build/private-runtime/build.sh --check; \
 	  bash ./install.sh --check; \
 	  bash live-verify/verify-live-verify.sh; \
 	  echo "verify: OK"; \
@@ -77,6 +80,27 @@ verify-focused: ## Run explicit tests (non-authoritative)
 	@bash engine/tests/run-tests.sh --jobs 1 --selectors-env AWA_TEST_SELECTORS
 
 verify-pre-pr: verify ## Run complete authoritative local verification
+
+private-runtime-check: ## Verify accepted source-lock and deterministic tooling
+	@bash build/private-runtime/build.sh --check
+
+private-runtime-fixture: ## Build one bounded synthetic fixture twice
+	@test -n "$(FIXTURE_SOURCE)" -a -n "$(FIXTURE_WORK)" || { \
+	  echo "FIXTURE_SOURCE and FIXTURE_WORK are required" >&2; exit 2; }
+	@bash build/private-runtime/build.sh --synthetic-fixture \
+	  "$(FIXTURE_SOURCE)" "$(FIXTURE_WORK)"
+
+private-runtime-qualification-inputs: ## Later-gated exact input collection
+	@test -n "$(PRIVATE_RUNTIME_CACHE)" || { \
+	  echo "PRIVATE_RUNTIME_CACHE is required" >&2; exit 2; }
+	@bash build/private-runtime/build.sh --qualification-inputs \
+	  "$(PRIVATE_RUNTIME_CACHE)"
+
+private-runtime-qualification-build: ## Later-gated real two-root build
+	@test -n "$(PRIVATE_RUNTIME_CACHE)" -a -n "$(PRIVATE_RUNTIME_WORK)" || { \
+	  echo "PRIVATE_RUNTIME_CACHE and PRIVATE_RUNTIME_WORK are required" >&2; exit 2; }
+	@bash build/private-runtime/build.sh --qualification-build \
+	  "$(PRIVATE_RUNTIME_CACHE)" "$(PRIVATE_RUNTIME_WORK)"
 
 verify-performance: ## Explicit expensive process profile + one authoritative verify
 	@set -u; profile=$$(mktemp "$${TMPDIR:-/tmp}/awa-performance-profile.XXXXXX"); \

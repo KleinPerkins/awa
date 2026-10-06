@@ -1,147 +1,245 @@
-"""Body C stable wrapper routing to the exact active receiver projection."""
+"""Body C stable routing through one exact immutable active bundle."""
 
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import tempfile
+import io
+import inspect
 import unittest
-from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
-from engine import registration_projection
-
-
-ROOT = Path(__file__).resolve().parents[2]
+from engine import registration_projection, registration_receiver
 
 
 class RegistrationReceiverRouterTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory(
-            prefix="awa-registration-receiver."
-        )
-        self.root = Path(self.tmp.name).resolve()
-        self.receiver = self.root / "receivers/candidate/receiver"
-        self.receiver.parent.mkdir(parents=True, mode=0o700)
-        self.receiver.write_text(
-            "#!/bin/sh\n"
-            "route=$1\n"
-            "payload=$(cat)\n"
-            "printf '{\"route\":\"%s\",\"payload\":%s}\\n' "
-            "\"$route\" \"${payload:-null}\"\n",
-            encoding="utf-8",
-        )
-        self.receiver.chmod(0o700)
-        base = registration_projection.DirectReceipt.vector_r1()
-        self.receipt = registration_projection.DirectReceipt.from_mapping(
-            {
-                **base.to_mapping(),
-                "installed_file_hash": (
-                    registration_projection.installed_file_hash(
-                        self.receiver
-                    )
-                ),
-            }
-        )
-        self.receipt_path = self.root / "direct-receipt.json"
-        self.receipt_path.write_bytes(self.receipt.to_bytes())
-        self.receipt_path.chmod(0o600)
-        self.projection = self.root / "active-projection.json"
-        self.projection.write_text(
-            json.dumps(
-                {
-                    "schema": "awa-registration-receiver-projection/v1",
-                    "candidate_digest": self.receipt.candidate_digest,
-                    "receiver": str(self.receiver),
-                    "installed_file_hash": self.receipt.installed_file_hash,
-                    "direct_receipt_hash": self.receipt.digest,
-                    "projection_file_generation": (
-                        self.receipt.projection_file_generation
-                    ),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            + "\n",
-            encoding="ascii",
-        )
-        self.projection.chmod(0o600)
-        self.env = {
-            **os.environ,
-            "AWA_REGISTRATION_PROJECTION": str(self.projection),
-            "PYTHONPATH": str(ROOT),
-            "PYTHONDONTWRITEBYTECODE": "1",
-        }
-
-    def tearDown(self) -> None:
-        self.tmp.cleanup()
-
-    def _run(self, route: str, payload: bytes = b"null"):
-        return subprocess.run(
-            [
-                "python3",
-                "-B",
-                "-m",
-                "engine.registration_receiver",
-                route,
-            ],
-            input=payload,
-            capture_output=True,
-            env=self.env,
-            timeout=10,
-        )
-
-    def test_exact_projection_routes_admission_startup_and_tick(self) -> None:
-        for route in ("admission", "startup", "tick"):
-            with self.subTest(route=route):
-                result = self._run(route, b'{"fixture":true}')
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(
-                    json.loads(result.stdout),
-                    {"route": route, "payload": {"fixture": True}},
+    def test_v12_private_entry_accepts_only_retained_authority_bytes(self) -> None:
+        parameters = inspect.signature(registration_receiver.private_runtime_main).parameters
+        self.assertIn("retained_authority", parameters)
+        source = inspect.getsource(registration_receiver.private_runtime_main)
+        for forbidden in (
+            "AWA_REGISTRATION_ACTIVE_BUNDLE",
+            "AWA_REGISTRATION_PROJECTION",
+            "XDG_DATA_HOME",
+            "_active_pointer_path",
+            "_projection_path",
+            "_bundle_launcher",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(
+                    forbidden,
+                    source,
+                    "receiver still reopens path/config authority",
                 )
 
-    def test_missing_projection_and_tampered_receiver_fail_open_quietly(
+    def test_exact_bundle_routes_only_validated_receiver(self) -> None:
+        self.assertTrue(hasattr(registration_receiver, "RetainedReceiverAuthority"))
+        self.assertTrue(hasattr(registration_receiver, "retained_host_main"))
+        authority = registration_receiver.RetainedReceiverAuthority.synthetic()
+        for route in ("admission", "startup", "tick"):
+            with self.subTest(route=route), mock.patch.object(
+                registration_receiver,
+                "retained_host_main",
+                return_value=0,
+            ) as retained:
+                self.assertEqual(
+                    registration_receiver.private_runtime_main(
+                        [route], retained_authority=authority
+                    ),
+                    0,
+                )
+                retained.assert_called_once_with(
+                    route=route,
+                    authority=authority,
+                )
+
+    def test_tampered_bundle_fails_before_exec(self) -> None:
+        self.assertTrue(hasattr(registration_receiver, "RetainedReceiverAuthority"))
+        authority = registration_receiver.RetainedReceiverAuthority.synthetic()
+        tampered = authority.replace(
+            import_manifest_hash="f" * 64,
+            validated=False,
+        )
+        with mock.patch.object(
+            registration_receiver,
+            "retained_host_main",
+            side_effect=AssertionError("tampered authority reached host"),
+            create=True,
+        ):
+            self.assertEqual(
+                registration_receiver.private_runtime_main(
+                    ["admission"], retained_authority=tampered
+                ),
+                1,
+            )
+
+    def test_staged_and_r0_interfaces_are_deterministic_deny_only(
         self,
     ) -> None:
-        self.projection.unlink()
-        missing = self._run("admission")
-        self.assertNotEqual(missing.returncode, 0)
-        self.assertEqual(missing.stdout, b"")
-        self.assertEqual(missing.stderr, b"")
-
-        self.setUp_projection_only()
-        self.receiver.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        tampered = self._run("admission")
-        self.assertNotEqual(tampered.returncode, 0)
-        self.assertEqual(tampered.stdout, b"")
-        self.assertEqual(tampered.stderr, b"")
-
-    def setUp_projection_only(self) -> None:
-        self.projection.write_text(
-            json.dumps(
-                {
-                    "schema": "awa-registration-receiver-projection/v1",
-                    "candidate_digest": self.receipt.candidate_digest,
-                    "receiver": str(self.receiver),
-                    "installed_file_hash": self.receipt.installed_file_hash,
-                    "direct_receipt_hash": self.receipt.digest,
-                    "projection_file_generation": (
-                        self.receipt.projection_file_generation
-                    ),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            + "\n",
-            encoding="ascii",
+        self.assertTrue(hasattr(registration_receiver, "RetainedReceiverAuthority"))
+        authority = registration_receiver.RetainedReceiverAuthority.synthetic(
+            deny_only=True
         )
-        self.projection.chmod(0o600)
+        for event, expected_keys in (
+            (
+                "preToolUse",
+                {"permission", "user_message", "agent_message"},
+            ),
+            (
+                "subagentStart",
+                {"permission", "user_message"},
+            ),
+        ):
+            stdin = SimpleNamespace(
+                buffer=io.BytesIO(
+                    (
+                        '{"hook_event_name":"'
+                        + event
+                        + '"}'
+                    ).encode()
+                )
+            )
+            output = io.BytesIO()
+            stdout = SimpleNamespace(buffer=output)
+            with mock.patch.object(
+                registration_receiver,
+                "retained_host_main",
+                return_value=registration_receiver._deny_only("admission"),
+                create=True,
+            ), mock.patch.object(
+                registration_receiver.sys, "stdin", stdin
+            ), mock.patch.object(
+                registration_receiver.sys, "stdout", stdout
+            ):
+                self.assertEqual(
+                    registration_receiver.private_runtime_main(
+                        ["admission"], retained_authority=authority
+                    ),
+                    2,
+                )
+            value = __import__("json").loads(output.getvalue())
+            self.assertEqual(set(value), expected_keys)
+            self.assertEqual(value["permission"], "deny")
+        for route in ("startup", "tick"):
+            with mock.patch.object(
+                registration_receiver,
+                "retained_host_main",
+                return_value=2,
+                create=True,
+            ):
+                self.assertEqual(
+                    registration_receiver.private_runtime_main(
+                        [route], retained_authority=authority
+                    ),
+                    2,
+                )
+
+    def test_current_receiver_execs_exact_closed_environment(self) -> None:
+        self.assertTrue(hasattr(registration_receiver, "RetainedReceiverAuthority"))
+        authority = registration_receiver.RetainedReceiverAuthority.synthetic()
+        with mock.patch.object(
+            registration_receiver,
+            "retained_host_main",
+            return_value=0,
+            create=True,
+        ) as retained:
+            self.assertEqual(
+                registration_receiver.private_runtime_main(
+                    ["tick"], retained_authority=authority
+                ),
+                0,
+            )
+        retained.assert_called_once_with(route="tick", authority=authority)
+
+    def test_protocol_classifies_only_exact_current_or_staged(self) -> None:
+        receipt, _gate = registration_projection.fixed_authority_vector(
+            "R1_CANARY"
+        )
+        fields = registration_receiver._PROTOCOL_RECEIPT_FIELDS
+        current = {
+            "mode": "WRITABLE",
+            "protocol_generation": int(receipt.protocol_generation),
+            "schema_hash": receipt.schema_hash,
+            **{
+                field: registration_receiver._receipt_protocol_value(
+                    receipt, field
+                )
+                for field in fields
+            },
+        }
+
+        class Store:
+            def __init__(self, protocol):
+                self.protocol = protocol
+
+            def current_protocol(self):
+                return self.protocol
+
+            def close(self):
+                pass
+
+        with mock.patch.object(
+            registration_receiver.registration_store,
+            "RegistrationStore",
+            return_value=Store(current),
+        ):
+            self.assertEqual(
+                registration_receiver._receiver_authority_state(
+                    receipt
+                ),
+                "CURRENT",
+            )
+        staged = {
+            "mode": "DRAINING",
+            "protocol_generation": 1,
+            "staged_generation": int(
+                receipt.protocol_generation
+            ),
+            "staged_schema_hash": receipt.schema_hash,
+            **{
+                f"staged_{field}": (
+                    registration_receiver._receipt_protocol_value(
+                        receipt, field
+                    )
+                )
+                for field in fields
+            },
+        }
+        with mock.patch.object(
+            registration_receiver.registration_store,
+            "RegistrationStore",
+            return_value=Store(staged),
+        ):
+            self.assertEqual(
+                registration_receiver._receiver_authority_state(
+                    receipt
+                ),
+                "DENY_ONLY",
+            )
+        staged["staged_hook_projection_hash"] = "f" * 64
+        with mock.patch.object(
+            registration_receiver.registration_store,
+            "RegistrationStore",
+            return_value=Store(staged),
+        ), self.assertRaises(ValueError):
+            registration_receiver._receiver_authority_state(
+                receipt
+            )
 
     def test_unknown_route_is_refused_without_exec(self) -> None:
-        result = self._run("repair")
-        self.assertEqual(result.returncode, 2)
-        self.assertEqual(result.stdout, b"")
+        parameters = inspect.signature(
+            registration_receiver.private_runtime_main
+        ).parameters
+        authority = (
+            {"retained_authority": object()}
+            if "retained_authority" in parameters
+            else {"authority_bytes": ()}
+        )
+        self.assertEqual(
+            registration_receiver.private_runtime_main(
+                ["repair"], **authority
+            ),
+            2,
+        )
 
 
 if __name__ == "__main__":

@@ -1,12 +1,9 @@
-#!/usr/bin/env bash
-# Quiet fail-open startup reconciliation opportunity.
+#!/bin/sh
+# Quiet refusal through the fixed root entrypoint.
 set -u
+unset ENV BASH_ENV
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd -P)" || exit 1
-AWA_ROOT="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd -P)" || exit 1
-[ -f "$AWA_ROOT/engine/registration_receiver.py" ] || exit 1
-
-AWA_HOME="$AWA_ROOT" \
-PYTHONDONTWRITEBYTECODE=1 \
-PYTHONPATH="$AWA_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
-  python3 -B -m engine.registration_receiver startup >/dev/null 2>&1
+ENTRYPOINT="/Library/Application Support/AWA/bin/awa-registration"
+[ -f "$ENTRYPOINT" ] && [ ! -L "$ENTRYPOINT" ] && [ -x "$ENTRYPOINT" ] ||
+  exit 1
+exec "$ENTRYPOINT" startup >/dev/null 2>&1

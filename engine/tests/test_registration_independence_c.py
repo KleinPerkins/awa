@@ -39,11 +39,11 @@ class BodyCFixtureCatalogTest(unittest.TestCase):
         self.assertEqual(
             [row.expected_action for row in fixtures.A27_CONTROL_SEQUENCE],
             [
-                "R0_PREFLIGHT",
-                "PROJECT_NEW",
-                "DISABLE_OLD",
-                "BEGIN_DRAIN",
-                "STAGE_ADOPT",
+                "INSTALL_BUNDLE",
+                "DRAIN_STAGE_PROVE",
+                "SWITCH_POINTER",
+                "PROVE_DISABLE_OLD",
+                "RECONCILE_CUSTODY",
                 "ADVANCE",
                 "CLEAN_OLD",
                 "VERIFY",

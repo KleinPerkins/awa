@@ -26,11 +26,17 @@ def _payload(event: str, **extra: object) -> bytes:
 class FakeService:
     def __init__(self, decisions: dict[str, str] | None = None) -> None:
         self.decisions = decisions or {}
-        self.calls: list[str] = []
+        self.calls: list[registration_hook_runtime.ObservableInvocation] = []
 
-    def handle(self, payload: object, discriminator: str):
-        self.calls.append(discriminator)
-        reason = self.decisions.get(discriminator, "READY")
+    def handle(
+        self,
+        payload: object,
+        invocation: registration_hook_runtime.ObservableInvocation,
+    ):
+        self.calls.append(invocation)
+        reason = self.decisions.get(
+            invocation.discriminator, "READY"
+        )
         return registration_admission.AdmissionDecision(
             allowed=reason == "READY",
             reason=reason,
@@ -40,6 +46,50 @@ class FakeService:
 
 
 class HookIngressTest(unittest.TestCase):
+    def test_mcp_and_subagent_identity_propagates_all_four_fields(self) -> None:
+        service = FakeService()
+        for raw, expected in (
+            (
+                _payload(
+                    "beforeMCPExecution",
+                    mcp_server_name="server-a",
+                    tool_name="lookup",
+                ),
+                registration_hook_runtime.ObservableInvocation(
+                    "beforeMCPExecution",
+                    "server-a",
+                    "MCP:lookup",
+                    "cursor-permission/v1",
+                ),
+            ),
+            (
+                _payload(
+                    "beforeMCPExecution",
+                    mcp_server_name="server-b",
+                    tool_name="lookup",
+                ),
+                registration_hook_runtime.ObservableInvocation(
+                    "beforeMCPExecution",
+                    "server-b",
+                    "MCP:lookup",
+                    "cursor-permission/v1",
+                ),
+            ),
+            (
+                _payload("subagentStart", subagent_type="generalPurpose"),
+                registration_hook_runtime.ObservableInvocation(
+                    "subagentStart",
+                    "",
+                    "Task",
+                    "cursor-subagent/v1",
+                ),
+            ),
+        ):
+            with self.subTest(expected=expected):
+                registration_hook_runtime.dispatch_bytes(raw, service)
+                self.assertEqual(service.calls[-1], expected)
+        self.assertNotEqual(service.calls[0], service.calls[1])
+
     def test_catch_all_receives_ordinary_unknown_renamed_mcp_and_task(self) -> None:
         service = FakeService(
             {
@@ -87,7 +137,7 @@ class HookIngressTest(unittest.TestCase):
                     output["permission"], "allow" if allowed else "deny"
                 )
         self.assertEqual(
-            service.calls,
+            [call.discriminator for call in service.calls],
             [case[2] for case in cases],
         )
 
@@ -97,7 +147,9 @@ class HookIngressTest(unittest.TestCase):
             _payload("preToolUse", tool_name="Task"), service
         )
         self.assertEqual(result.decision.reason, "TASK_SUBAGENT_DENIED")
-        self.assertEqual(service.calls, ["Task"])
+        self.assertEqual(
+            [call.discriminator for call in service.calls], ["Task"]
+        )
 
     def test_real_host_denies_task_before_basis_or_persistence(self) -> None:
         class RefusingCollector:
@@ -109,6 +161,15 @@ class HookIngressTest(unittest.TestCase):
             ordinary=frozenset({"Shell"}),
             task_launch=frozenset({"Task"}),
         )
+        service.inventory_entries = (
+            registration_host.registration_projection.InventoryEntry(
+                "preToolUse",
+                "",
+                "Task",
+                "task_launch",
+                "cursor-permission/v1",
+            ),
+        )
         service.collector = RefusingCollector()
         service.admission = registration_admission.AdmissionController
         decision = service.handle(
@@ -118,7 +179,12 @@ class HookIngressTest(unittest.TestCase):
                 "conversation_id": "conversation-1",
                 "generation_id": "generation-1",
             },
-            "Task",
+            registration_hook_runtime.ObservableInvocation(
+                "preToolUse",
+                "",
+                "Task",
+                "cursor-permission/v1",
+            ),
         )
         self.assertEqual(decision.reason, "TASK_SUBAGENT_DENIED")
 
@@ -139,6 +205,23 @@ class HookIngressTest(unittest.TestCase):
                 ordinary=frozenset({"Shell"}),
                 task_launch=frozenset({"Task"}),
             )
+            service.inventory_entries = (
+                registration_host.registration_projection.InventoryEntry(
+                    "preToolUse",
+                    "",
+                    "Shell",
+                    "ordinary",
+                    "cursor-permission/v1",
+                ),
+            )
+            service.inventory_tokens = {
+                (
+                    "preToolUse",
+                    "",
+                    "Shell",
+                    "cursor-permission/v1",
+                ): "Shell"
+            }
             service.collector = RefusingCollector()
             service.admission = registration_admission.AdmissionController
             with self.subTest(reason=reason):
@@ -149,7 +232,12 @@ class HookIngressTest(unittest.TestCase):
                         "conversation_id": "conversation-1",
                         "generation_id": "generation-1",
                     },
-                    "Shell",
+                    registration_hook_runtime.ObservableInvocation(
+                        "preToolUse",
+                        "",
+                        "Shell",
+                        "cursor-permission/v1",
+                    ),
                 )
                 self.assertFalse(decision.allowed)
                 self.assertEqual(decision.reason, reason)
@@ -203,7 +291,9 @@ class HookIngressTest(unittest.TestCase):
             service,
         )
         self.assertTrue(matching.decision.allowed)
-        self.assertEqual(service.calls, ["Shell"])
+        self.assertEqual(
+            [call.discriminator for call in service.calls], ["Shell"]
+        )
 
     def test_event_specific_serializers_are_closed_and_deterministic(self) -> None:
         deny = registration_admission.AdmissionDecision(

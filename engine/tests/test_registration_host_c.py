@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import hashlib
 import json
 import tempfile
 import unittest
@@ -30,7 +31,52 @@ def _receipt(*, suspended: bool = False) -> registration_runtime.TickReceipt:
     )
 
 
+def _cursor(boot_id: str = "boot-a") -> registration_runtime.SameBootCursor:
+    return registration_runtime.SameBootCursor(
+        boot_id=boot_id,
+        protocol_seq=1,
+        protocol_hash="11" * 32,
+        selection_snapshot_hash="22" * 32,
+        last_member_id=None,
+        last_pre_status_hash=None,
+        last_post_status_hash=None,
+        outcome=None,
+        batch_count=0,
+        wrapped=False,
+    )
+
+
 class RegistrationHostTickTest(unittest.TestCase):
+    def test_v12_host_has_no_environment_selected_authority(self) -> None:
+        source = inspect.getsource(registration_host.open_service)
+        for forbidden in (
+            "AWA_REGISTRATION_RUNTIME_CONFIG",
+            "AWA_REGISTRATION_BUNDLE_ROOT",
+            "_config_path",
+            "_load_config",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(
+                    forbidden,
+                    source,
+                    "host still reopens config/product path authority",
+                )
+        parameters = inspect.signature(
+            registration_host.HostService.__init__
+        ).parameters
+        for required in (
+            "host_authority",
+            "direct_receipt",
+            "owner_gate",
+            "product_current",
+            "bundle_projection",
+            "import_manifest",
+            "writer_capability",
+            "resource_provider",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, parameters)
+
     def test_startup_json_rejects_duplicate_keys(self) -> None:
         with self.assertRaises(ValueError):
             registration_host._strict_json(
@@ -41,43 +87,39 @@ class RegistrationHostTickTest(unittest.TestCase):
     def test_runtime_byte_binding_rejects_installed_or_wrapper_drift(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw).resolve()
-            installed = root / "receiver"
-            wrapper = root / "wrapper"
-            runtime = root / "runtime.py"
-            installed.write_bytes(b"receiver-v1")
-            wrapper.write_bytes(b"wrapper-v1")
-            runtime.write_bytes(b"runtime-v1")
-            for path in (installed, wrapper, runtime):
-                path.chmod(0o700)
-            base = registration_projection.DirectReceipt.vector_r1()
-            receipt = registration_projection.DirectReceipt.from_mapping(
-                {
-                    **base.to_mapping(),
-                    "installed_file_hash": (
-                        registration_projection.installed_file_hash(
-                            installed
-                        )
-                    ),
-                    "wrapper_runtime_hash": (
-                        registration_projection.wrapper_runtime_hash(
-                            wrapper, (runtime,)
-                        )
-                    ),
-                }
-            )
-            config = {
-                "installed_file_path": str(installed),
-                "wrapper_path": str(wrapper),
-                "runtime_files": [str(runtime)],
-            }
-            registration_host._verify_runtime_bytes(config, receipt)
-            runtime.write_bytes(b"runtime-v2")
-            with self.assertRaises(
-                registration_host.registration_hook_runtime.HookUnavailable
-            ):
-                registration_host._verify_runtime_bytes(config, receipt)
+        self.assertTrue(
+            hasattr(registration_host, "_verify_retained_runtime_bytes"),
+            "host lacks retained-resource runtime verification",
+        )
+        host = b"VALUE = 1\n"
+        wrapper = b"#!/bin/sh\nexit 2\n"
+        sealed = SimpleNamespace(
+            installed_file_hash=hashlib.sha256(
+                b"awa-registration-installed-file/v1\0" + host
+            ).hexdigest(),
+            wrapper_runtime_hash=hashlib.sha256(
+                b"awa-registration-wrapper-runtime/v2\0" + wrapper
+            ).hexdigest(),
+        )
+        retained = {
+            "engine/registration_host.py": host,
+            "bin/awa-registration-entrypoint": wrapper,
+        }
+        registration_host._verify_retained_runtime_bytes(
+            host_authority=sealed,
+            retained_resources=retained,
+        )
+        for path in retained:
+            with self.subTest(path=path):
+                changed = dict(retained)
+                changed[path] = b"drift"
+                with self.assertRaises(
+                    registration_host.registration_hook_runtime.HookUnavailable
+                ):
+                    registration_host._verify_retained_runtime_bytes(
+                        host_authority=sealed,
+                        retained_resources=changed,
+                    )
 
     def test_host_envelope_uses_fresh_storage_and_serializer_checks(
         self,
@@ -140,14 +182,8 @@ class RegistrationHostTickTest(unittest.TestCase):
         self.assertEqual(reason, "ROOT_UNSUPPORTED")
 
     def test_r0_scope_never_runs_startup_or_tick_runtime(self) -> None:
-        r1 = registration_projection.DirectReceipt.vector_r1()
-        r0 = registration_projection.DirectReceipt.from_mapping(
-            {
-                **r1.to_mapping(),
-                "deployment_scope": "R0_THROWAWAY",
-                "canonical_root_hash": None,
-                "member_id": None,
-            }
+        r0, _gate = registration_projection.fixed_authority_vector(
+            "R0_THROWAWAY"
         )
         service = object.__new__(registration_host.HostService)
         service.receipt = r0
@@ -166,6 +202,7 @@ class RegistrationHostTickTest(unittest.TestCase):
                 _receipt(),
                 boot_id="boot-a",
                 written_mono_ns=100,
+                same_boot_cursor=_cursor(),
             )
             value = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(
@@ -175,12 +212,11 @@ class RegistrationHostTickTest(unittest.TestCase):
                     "boot_id",
                     "written_mono_ns",
                     "interval_ns",
-                    "snapshot_token",
-                    "selected_member_ids",
-                    "selected_status_hashes",
-                    "missed_member_ids",
-                    "member_reasons",
-                    "recovery_member_ids",
+                    "protocol_seq",
+                    "protocol_hash",
+                    "same_boot_cursor",
+                    "same_boot_cursor_hash",
+                    "due_snapshot_hash",
                     "fairness_suspended",
                 },
             )
@@ -201,6 +237,7 @@ class RegistrationHostTickTest(unittest.TestCase):
                 _receipt(suspended=True),
                 boot_id="boot-a",
                 written_mono_ns=100,
+                same_boot_cursor=_cursor(),
             )
             with mock.patch(
                 "engine.registration_host.registration_clock.mach_continuous_time_ns",
@@ -221,6 +258,7 @@ class RegistrationHostTickTest(unittest.TestCase):
                 _receipt(),
                 boot_id="boot-a",
                 written_mono_ns=100,
+                same_boot_cursor=_cursor(),
             )
             for boot, now in (
                 ("boot-b", 101),
