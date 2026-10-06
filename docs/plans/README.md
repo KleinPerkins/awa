@@ -66,6 +66,7 @@ lands — this directory already follows the reference shape it derived from.
 | `native-entry-durable-registration-v2.md` | SUPERSEDED DRAFT — 2026-09-26 | Rejected as non-minimal and superseded by the v3 draft indexed immediately below; preserved byte-identically for provenance and never implementation authority. |
 | `native-entry-durable-registration-v3.md` | ACCEPTED — C0-DESIGN NO-GO — 2026-09-26 | Single-root candidate with one merged request/effect authority and member epoch, exact 7-table/9-trigger/97-generated-leaf manifest, direct OPEN authority, audit-only transition witness, stateless rendering, member-isolated admission, and distinct implementation/R1/C1/R2 gates; fresh exact-hash review/verifier adjudication remain C0 gates. |
 | `native-entry-durable-registration-v4.md` | ACCEPTED — GOVERNANCE ONLY; IMPLEMENTATION AND R0 NO-GO — 2026-09-29 | Conditional v3 successor with exact SQL v2, typed exhaustion, measured installer-selected interpreter, staged custody and >8 recovery, closed authority vectors, generation bundles, offline signing, status-last acceptance, three bodies, and finite-scope R0. |
+| `hard-no-touch-host-policy-v1.md` | ACCEPTED — FROZEN — 2026-10-06 | Implement ADR 0027's optional version-1 pre-access hard-no-touch schema, immutable lexical kernel/engine matchers, fail-closed validation, zero-target-access tests, and one ready AWA PR. |
 
 ## Related conventions
 

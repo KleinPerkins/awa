@@ -235,6 +235,24 @@ content/ignored-state, recovery, operation, branch-safety, and explicit operator
 failure therefore reduces registration recall and integrity health but never weakens kernel-first
 refusal or changes linked-worktree shell allowance.
 
+## Hard-no-touch pre-access boundary
+
+`hard_no_touch_paths` is a host-owned lexical refusal primitive, not a repository detector.
+Consumers must classify a candidate before opening a child directory, resolving a symlink, or
+asking Git for identity. Exact-root and managed-namespace entries match their root and descendants
+only on component boundaries; basename, substring, and glob matching are forbidden.
+
+The trusted policy file and trusted `HOME` are the only readable inputs. Candidate normalization
+uses strings only and performs no realpath/resolve/stat/lstat/open/read/list/scan/Git/subprocess
+operation. This intentionally does not infer physical symlink aliases; a host lists each lexical
+alias it needs protected. Relative or malformed candidates and unreadable/malformed configured
+policy fail closed.
+
+The canonical engine-off matcher lives in `kernel/lib/awa_policy.py`; the independent engine mirror
+is parity-tested. Neither imports router/consumer code or reads router output. This boundary does
+not alter include/exclude, read-only/reference, artifact, lifecycle, guard-command, or cleanup
+semantics. Product bytes carry no concrete host values.
+
 ## Cluster D — Security ledger
 
 Status legend: **Verified** (closed with evidence) / **Partially closed** (kernel part done, engine
@@ -252,6 +270,7 @@ decision).
 | S7 | Integrity status/alert bookkeeping is private, crash-safe, CAS-idempotent, and never overwrites a newer evaluation. | **Verified (engine)** | `test_integrity_store` and `test_integrity_alert` cover `0600`/`0700`, status-last crash cuts, child-dir fsync, immutable outbox/receipt artifacts, dispatch-lock concurrency, same-severity pending replay, failed-delivery retry, stale-transition audit/refusal, the explicit at-least-once external-notification crash boundary, exactly-once receipt advancement, no recursion, and bounded native failure. |
 | S8 | The integrity console/installer leaks no raw evidence/path/credential, executes no remote content, and cannot activate the host job. | **Verified (engine + install sandbox)** | `test_integrity_console` covers closed projection revalidation, injection/path/credential dropping, deterministic bytes, CSP hash, one clock-only script, no form/action surface, self-staling RED, private mode, shipped assets, no plist, no host activation, and unchanged external hook-file bytes. |
 | S9 | Native post-entry registration cannot seize ambiguous state, follow hostile links, forge ensure evidence, block Cursor entry, or weaken cleanup gates. | **Verified (engine + kernel compatibility)** | `test_native_entry` covers strict payload/root/session parsing, exact policy/Git/index/clean-state checks, under-lock identity drift, one-adoption concurrency, exact asymmetry repair, private distinct receipts, malformed/mismatched/duplicate/symlink preservation, fail-open lock/engine/exception paths, stale replay, and independent cleanup refusal. `test_entry_handshake`, `test_lifecycle_reconcile`, `test_kernel_off_matrix`, hook-owner/install tests, and the full guard suites preserve ensure, discovery, kernel-off, direct/external ownership, and guard behavior. |
+| S10 | Hard-no-touch classification occurs before target access, matches only component roots, fails closed, and retains kernel/engine parity. | **Verified (kernel + engine)** | `test_hard_no_touch_policy` covers immutable typed schema, exact/managed root and descendant decisions, sibling nonmatch, trusted lexical normalization, malformed policy/candidate refusal, old-policy compatibility, semantic round trip, access spies over filesystem/Git/subprocess surfaces, policy-check rejection, kernel-off structure, parity, semantic isolation, and global contamination absence. |
 
 **Gating.** Phase 2 (git/worktree lifecycle) gated on **S2, S6** — both **Verified**. Phase 3
 (recovery manager) gated on **S1, S5** — both **Verified** (S1 kernel bundle denylist; S5 engine

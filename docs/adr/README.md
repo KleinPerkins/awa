@@ -84,6 +84,7 @@ lands — this directory already follows the reference shape it derived from.
 | [0024](0024-first-prompt-native-entry-recovery.md) | Accepted — 2026-09-25 | Adopt payload-bound first-prompt recovery because no documented Cursor event combines immediate workspace-entry timing with exact conversation identity; supersedes ADR 0023. |
 | [0025](0025-durable-registration-episodes-and-tool-admission.md) | Accepted — C0-DESIGN NO-GO — 2026-09-26 | Propose single-root durable registration with one merged request/effect authority and member epoch, exact 7-table/9-trigger/97-generated-leaf manifest, direct OPEN authority, audit-only transition witness, stateless rendering, member-isolated admission, and distinct implementation/R1/C1/R2 gates; fresh exact-hash review/verifier adjudication remain C0 gates. |
 | [0026](0026-durable-registration-authority-hardening.md) | Accepted — 2026-09-29 | Conditionally supersede ADR 0025 with canonical SQL v2, typed recovery boundaries, installer-selected measured interpreter capability, external-deny/internal custody, complete authority preimages, restart-stable recovery, offline owner gates, and separately gated evidence. |
+| [0027](0027-hard-no-touch-host-policy.md) | Accepted — 2026-10-06 | Add an optional version-1 hard-no-touch host-policy field with immutable kernel/engine lexical matchers, component-boundary roots, fail-closed malformed input, and zero target access. |
 
 ## Related conventions
 
