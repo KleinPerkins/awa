@@ -200,6 +200,13 @@ def _observable_invocation(
     )
 
 
+def parse_observable_invocation(payload: object) -> ObservableInvocation:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    event, discriminator = _event_and_discriminator(payload)
+    return _observable_invocation(payload, event, discriminator)
+
+
 def _normalized_event(value: dict, event: str) -> dict:
     normalized = {
         key: value[key]
@@ -298,8 +305,9 @@ def serialize_decision(
 def dispatch_bytes(raw: bytes, service: Service) -> DispatchResult:
     try:
         value = _decode(raw)
-        event, discriminator = _event_and_discriminator(value)
-        invocation = _observable_invocation(value, event, discriminator)
+        invocation = parse_observable_invocation(value)
+        event = invocation.event
+        discriminator = invocation.discriminator
         normalized = _normalized_event(value, event)
         # Preserve accepted discriminator ordering: preidentity/root parsing
         # happens before launch/unknown/ordinary policy.

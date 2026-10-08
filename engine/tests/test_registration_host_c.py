@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import hashlib
+import io
 import json
 import tempfile
 import unittest
@@ -83,6 +84,164 @@ class RegistrationHostTickTest(unittest.TestCase):
                 b'{"hook_event_name":"sessionStart",'
                 b'"hook_event_name":"preToolUse"}'
             )
+
+    def test_retained_admission_uses_public_invocation_parser(self) -> None:
+        payload = {
+            "hook_event_name": "beforeMCPExecution",
+            "workspace_roots": ["/fixture/root"],
+            "conversation_id": "conversation-1",
+            "generation_id": "generation-1",
+            "mcp_server_name": "server-a",
+            "tool_name": "lookup",
+        }
+        invocation = registration_host.registration_hook_runtime.ObservableInvocation(
+            "beforeMCPExecution",
+            "server-a",
+            "MCP:lookup",
+            "cursor-permission/v1",
+        )
+
+        class ControlledService:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def handle(self, observed_payload, observed_invocation):
+                self.calls.append((observed_payload, observed_invocation))
+                return registration_admission.AdmissionDecision(
+                    True,
+                    "READY",
+                    registration_admission.render_reason("READY"),
+                    1,
+                )
+
+        service = ControlledService()
+        retained = {
+            "host_authority": object(),
+            "direct_receipt": object(),
+            "owner_gate": object(),
+            "product_current": object(),
+            "bundle_projection": object(),
+            "import_manifest": object(),
+            "writer_capability": b"writer",
+            "resource_provider": {},
+        }
+        sealed_authority = SimpleNamespace(**retained)
+        manager = mock.MagicMock()
+        manager.__enter__.return_value = service
+        manager.__exit__.return_value = False
+        output = io.BytesIO()
+        with mock.patch.object(
+            registration_host,
+            "_read_stdin",
+            return_value=json.dumps(payload, separators=(",", ":")).encode(),
+        ), mock.patch.object(
+            registration_host,
+            "open_service",
+            return_value=manager,
+        ) as open_service, mock.patch.object(
+            registration_host.sys,
+            "stdout",
+            SimpleNamespace(buffer=output),
+        ):
+            result = registration_host.retained_main(
+                route="admission",
+                authority=sealed_authority,
+            )
+        self.assertEqual(result, 0)
+        self.assertEqual(service.calls, [(payload, invocation)])
+        open_service.assert_called_once_with(**retained)
+        self.assertEqual(json.loads(output.getvalue())["permission"], "allow")
+
+        service.calls.clear()
+        output = io.BytesIO()
+        with mock.patch.object(
+            registration_host,
+            "_read_stdin",
+            return_value=b"[]",
+        ), mock.patch.object(
+            registration_host,
+            "open_service",
+            return_value=manager,
+        ), mock.patch.object(
+            registration_host.sys,
+            "stdout",
+            SimpleNamespace(buffer=output),
+        ):
+            malformed = registration_host.retained_main(
+                route="admission",
+                authority=sealed_authority,
+            )
+        self.assertEqual(malformed, 1)
+        self.assertEqual(service.calls, [])
+        self.assertEqual(output.getvalue(), b"")
+
+    def test_host_rejects_each_observable_field_mismatch(self) -> None:
+        expected = registration_projection.InventoryEntry(
+            "beforeMCPExecution",
+            "server-a",
+            "MCP:lookup",
+            "ordinary",
+            "cursor-permission/v1",
+        )
+
+        class RefusingCollector:
+            def collect_observation(self, _event):
+                raise AssertionError("mismatched invocation reached basis")
+
+        service = object.__new__(registration_host.HostService)
+        service.inventory_entries = (expected,)
+        service.inventory_tokens = {
+            (
+                expected.event,
+                expected.server_or_empty,
+                expected.discriminator,
+                expected.serializer_schema,
+            ): "inventory-token"
+        }
+        service.admission = registration_admission.AdmissionController
+        service.collector = RefusingCollector()
+        payload = {
+            "hook_event_name": "beforeMCPExecution",
+            "workspace_roots": ["/fixture/root"],
+            "conversation_id": "conversation-1",
+            "generation_id": "generation-1",
+        }
+        mismatches = {
+            "event": (
+                "beforeMCP",
+                "server-a",
+                "MCP:lookup",
+                "cursor-permission/v1",
+            ),
+            "server": (
+                "beforeMCPExecution",
+                "server-b",
+                "MCP:lookup",
+                "cursor-permission/v1",
+            ),
+            "discriminator": (
+                "beforeMCPExecution",
+                "server-a",
+                "MCP:other",
+                "cursor-permission/v1",
+            ),
+            "serializer": (
+                "beforeMCPExecution",
+                "server-a",
+                "MCP:lookup",
+                "cursor-subagent/v1",
+            ),
+        }
+        for field, values in mismatches.items():
+            with self.subTest(field=field):
+                decision = service.handle(
+                    payload,
+                    registration_host.registration_hook_runtime.ObservableInvocation(
+                        *values
+                    ),
+                )
+                self.assertFalse(decision.allowed)
+                self.assertEqual(decision.reason, "UNKNOWN_DISCRIMINATOR")
 
     def test_runtime_byte_binding_rejects_installed_or_wrapper_drift(
         self,

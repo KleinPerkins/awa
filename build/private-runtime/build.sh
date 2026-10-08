@@ -67,7 +67,7 @@ require_empty_private_directory() {
   else
     /bin/mkdir -m 700 "$path"
   fi
-  [ "$(/usr/bin/stat -f '%Lp:%l' "$path")" = "700:1" ] ||
+  [ "$(/usr/bin/stat -f '%Lp:%l' "$path")" = "700:2" ] ||
     die "qualification directory metadata refused"
 }
 

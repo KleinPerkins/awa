@@ -281,6 +281,30 @@ class SyntheticManifestTest(unittest.TestCase):
         self.assertIn("AWA_PRIVATE_RUNTIME_QUALIFICATION_GO", script)
         self.assertNotIn("curl |", script)
 
+    def test_darwin_empty_private_directory_requires_link_count_two(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="awa-private-runtime-empty."
+        ) as raw:
+            private = Path(raw) / "private"
+            private.mkdir(mode=0o700)
+            private.chmod(0o700)
+            metadata = private.stat()
+            self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o700)
+            self.assertEqual(tuple(private.iterdir()), ())
+            self.assertEqual(metadata.st_nlink, 2)
+
+        script = BUILD_SCRIPT.read_text(encoding="utf-8")
+        guard = script.split(
+            "require_empty_private_directory() {", 1
+        )[1].split("\n}\n\nlock_value()", 1)[0]
+        self.assertIn(
+            """[ "$(/usr/bin/stat -f '%Lp:%l' "$path")" = "700:2" ]""",
+            guard,
+        )
+        self.assertNotIn("700:1", guard)
+
 
 if __name__ == "__main__":
     unittest.main()
