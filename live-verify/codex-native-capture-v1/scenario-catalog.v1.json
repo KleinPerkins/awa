@@ -1,0 +1,926 @@
+{
+  "schema": "awa-codex-capture-catalog/v1",
+  "scenarios": [
+    {
+      "id": "A01",
+      "action": "START_FIXTURE",
+      "gate": "CP2-A",
+      "executable": true,
+      "session_rule": "OBSERVE",
+      "event_predicates": [
+        {
+          "event_names": [
+            "SessionStart"
+          ],
+          "sources": [
+            "startup"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "A02",
+      "action": "FIRST_SYNTHETIC_PROMPT",
+      "gate": "CP2-A",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "UserPromptSubmit"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "A03",
+      "action": "LATER_SYNTHETIC_PROMPT",
+      "gate": "CP2-A",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "UserPromptSubmit"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "A04",
+      "action": "BASH_FIXED_FILE",
+      "gate": "CP2-A",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            "BASH"
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "A05",
+      "action": "EXEC_NO_HANDLE",
+      "gate": "CP2-A",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            "UNIFIED_EXEC"
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "A06",
+      "action": "EXEC_EMPTY_POLL",
+      "gate": "CP2-A",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            "UNIFIED_EXEC",
+            "WRITE_STDIN"
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "A07",
+      "action": "FIXTURE_EDIT",
+      "gate": "CP2-A",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            "APPLY_PATCH"
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "A08",
+      "action": "LOCAL_FUNCTION",
+      "gate": "CP2-A",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            "UPDATE_PLAN"
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "A09",
+      "action": "HOSTED_TOOL",
+      "gate": "CP2-HOSTED",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            "HOSTED_WEB_SEARCH"
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "B01",
+      "action": "COMPACT_FIXTURE",
+      "gate": "CP3",
+      "executable": true,
+      "session_rule": "OBSERVE",
+      "event_predicates": [
+        {
+          "event_names": [
+            "PreCompact",
+            "PostCompact"
+          ],
+          "sources": [
+            "manual",
+            "auto"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        },
+        {
+          "event_names": [
+            "SessionStart"
+          ],
+          "sources": [
+            "compact"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "B02",
+      "action": "RESUME_FIXTURE",
+      "gate": "CP3",
+      "executable": true,
+      "session_rule": "OBSERVE",
+      "event_predicates": [
+        {
+          "event_names": [
+            "SessionStart"
+          ],
+          "sources": [
+            "resume"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "B03",
+      "action": "FORK_FIXTURE",
+      "gate": "CP3",
+      "executable": true,
+      "session_rule": "OBSERVE",
+      "event_predicates": [
+        {
+          "event_names": [
+            "SessionStart"
+          ],
+          "sources": [
+            "fork"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "B04",
+      "action": "ROOT_CWD",
+      "gate": "CP3",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            "BASH",
+            "UNIFIED_EXEC"
+          ],
+          "root_labels": [
+            "R1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "B05",
+      "action": "SUBDIR_CWD",
+      "gate": "CP3",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            "BASH",
+            "UNIFIED_EXEC"
+          ],
+          "root_labels": [
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "B06",
+      "action": "HANDOFF_FIXTURE",
+      "gate": "CP3",
+      "executable": true,
+      "session_rule": "OBSERVE",
+      "event_predicates": [
+        {
+          "event_names": [
+            "SessionStart"
+          ],
+          "sources": [
+            "startup",
+            "resume",
+            "fork"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR",
+            "CHANGED",
+            "MISSING",
+            "AMBIGUOUS"
+          ]
+        },
+        {
+          "event_names": [
+            "SessionEnd"
+          ],
+          "sources": [
+            null,
+            "other"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR",
+            "CHANGED",
+            "MISSING",
+            "AMBIGUOUS"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "B07",
+      "action": "RETURN_FIXTURE",
+      "gate": "CP3",
+      "executable": true,
+      "session_rule": "OBSERVE",
+      "event_predicates": [
+        {
+          "event_names": [
+            "SessionStart"
+          ],
+          "sources": [
+            "startup",
+            "resume",
+            "fork"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR",
+            "CHANGED",
+            "MISSING",
+            "AMBIGUOUS"
+          ]
+        },
+        {
+          "event_names": [
+            "SessionEnd"
+          ],
+          "sources": [
+            null,
+            "other"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR",
+            "CHANGED",
+            "MISSING",
+            "AMBIGUOUS"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "B08",
+      "action": "LOCAL_BRANCH",
+      "gate": "CP3",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            "BASH",
+            "UNIFIED_EXEC"
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "B09",
+      "action": "SYNTHETIC_SUBAGENT",
+      "gate": "CP3",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "SubagentStart",
+            "SubagentStop"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        },
+        {
+          "event_names": [
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            "SPAWN_AGENT"
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "B10",
+      "action": "INTERRUPT_FIXTURE",
+      "gate": "CP3",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "Interrupt"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "B11",
+      "action": "STOP_FIXTURE",
+      "gate": "CP3",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "Stop"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "B12",
+      "action": "END_FIXTURE",
+      "gate": "CP3",
+      "executable": true,
+      "session_rule": "OBSERVE",
+      "event_predicates": [
+        {
+          "event_names": [
+            "SessionEnd"
+          ],
+          "sources": [
+            null,
+            "other"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR",
+            "CHANGED",
+            "MISSING",
+            "AMBIGUOUS"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "C01",
+      "action": "EXEC_INPUT",
+      "gate": "CP4",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            "WRITE_STDIN"
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "C02",
+      "action": "DISABLED_HOOK",
+      "gate": "CP4",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": []
+    },
+    {
+      "id": "C03",
+      "action": "TIMEOUT_HOOK",
+      "gate": "CP4",
+      "executable": false,
+      "session_rule": "NONE",
+      "event_predicates": []
+    },
+    {
+      "id": "C04",
+      "action": "MALFORMED_HOOK",
+      "gate": "CP4",
+      "executable": false,
+      "session_rule": "NONE",
+      "event_predicates": []
+    },
+    {
+      "id": "C05",
+      "action": "MISSING_MCP_DOCUMENTATION",
+      "gate": "NONE",
+      "executable": false,
+      "session_rule": "NONE",
+      "event_predicates": []
+    },
+    {
+      "id": "C06",
+      "action": "ASYNC_HOOK",
+      "gate": "CP4",
+      "executable": false,
+      "session_rule": "NONE",
+      "event_predicates": []
+    },
+    {
+      "id": "C07",
+      "action": "HOST_DUPLICATE",
+      "gate": "CP4",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            "BASH"
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "C08",
+      "action": "HOST_REORDER",
+      "gate": "CP4",
+      "executable": true,
+      "session_rule": "OBSERVE",
+      "event_predicates": [
+        {
+          "event_names": [
+            "SessionStart"
+          ],
+          "sources": [
+            "startup",
+            "resume",
+            "clear",
+            "compact",
+            "fork"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        },
+        {
+          "event_names": [
+            "PreCompact",
+            "PostCompact"
+          ],
+          "sources": [
+            "manual",
+            "auto"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        },
+        {
+          "event_names": [
+            "SessionEnd"
+          ],
+          "sources": [
+            null,
+            "other"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "C09",
+      "action": "HOST_CONCURRENCY",
+      "gate": "CP4",
+      "executable": true,
+      "session_rule": "SAME",
+      "event_predicates": [
+        {
+          "event_names": [
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse"
+          ],
+          "sources": [
+            null
+          ],
+          "tool_discriminators": [
+            "BASH",
+            "UNIFIED_EXEC"
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "D01",
+      "action": "ARCHIVE_FIXTURE",
+      "gate": "CP5",
+      "executable": true,
+      "session_rule": "OBSERVE",
+      "event_predicates": [
+        {
+          "event_names": [
+            "SessionEnd"
+          ],
+          "sources": [
+            null,
+            "other"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR",
+            "CHANGED",
+            "MISSING",
+            "AMBIGUOUS"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "D02",
+      "action": "DELETE_DISPOSABLE_WORKTREE",
+      "gate": "CP5",
+      "executable": true,
+      "session_rule": "OBSERVE",
+      "event_predicates": [
+        {
+          "event_names": [
+            "SessionEnd"
+          ],
+          "sources": [
+            null,
+            "other"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR",
+            "CHANGED",
+            "MISSING",
+            "AMBIGUOUS"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "D03",
+      "action": "SNAPSHOT_OFFER",
+      "gate": "CP5",
+      "executable": true,
+      "session_rule": "OBSERVE",
+      "event_predicates": [
+        {
+          "event_names": [
+            "SessionStart"
+          ],
+          "sources": [
+            "startup",
+            "resume",
+            "fork"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR",
+            "CHANGED",
+            "MISSING",
+            "AMBIGUOUS"
+          ]
+        },
+        {
+          "event_names": [
+            "SessionEnd"
+          ],
+          "sources": [
+            null,
+            "other"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR",
+            "CHANGED",
+            "MISSING",
+            "AMBIGUOUS"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "D04",
+      "action": "RESTORE_DISPOSABLE_SNAPSHOT",
+      "gate": "CP5",
+      "executable": true,
+      "session_rule": "OBSERVE",
+      "event_predicates": [
+        {
+          "event_names": [
+            "SessionStart"
+          ],
+          "sources": [
+            "startup",
+            "resume",
+            "fork"
+          ],
+          "tool_discriminators": [
+            null
+          ],
+          "root_labels": [
+            "R1",
+            "SUBDIR",
+            "CHANGED",
+            "MISSING",
+            "AMBIGUOUS"
+          ]
+        }
+      ]
+    }
+  ]
+}
