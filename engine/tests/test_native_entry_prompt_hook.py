@@ -90,6 +90,36 @@ class TestNativeEntryPromptAdapter(unittest.TestCase):
             time.sleep(0.01)
         self.assertFalse(any(self._alive(pid) for pid in pids), pids)
 
+    def test_worker_startup_consumes_the_fixed_recovery_deadline(self) -> None:
+        clock = [100.0]
+        timeouts: list[float] = []
+
+        class SlowStartingProcess:
+            pid = 12345
+
+            def communicate(self, *, input, timeout):
+                timeouts.append(timeout)
+
+            def poll(self):
+                return 0
+
+        def slow_popen(*args, **kwargs):
+            clock[0] += 1.75
+            return SlowStartingProcess()
+
+        with mock.patch.object(adapter.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(adapter.subprocess, "Popen", side_effect=slow_popen), \
+             mock.patch.object(adapter, "_signal_group") as signal_group:
+            adapter._supervise(b'{"prompt":"synthetic-startup-delay"}')
+
+        self.assertEqual(adapter.HARD_BUDGET_SECONDS, 2.0)
+        self.assertEqual(len(timeouts), 1)
+        self.assertAlmostEqual(timeouts[0], 0.21)
+        self.assertEqual(
+            signal_group.call_args_list,
+            [mock.call(mock.ANY, signal.SIGTERM), mock.call(mock.ANY, signal.SIGKILL)],
+        )
+
     def test_adapter_cleans_descendants_after_worker_leader_exits(self) -> None:
         pidfile = self.root / "orphan-pids.json"
         worker = self.root / "orphan.py"
@@ -227,17 +257,24 @@ class TestBeforeSubmitPromptComposite(unittest.TestCase):
             timeout=8,
         )
 
-    def _assert_parity(self, payload: bytes) -> float:
+    def _assert_parity(self, payload: bytes) -> None:
         hooks = self.runtime / "kernel" / "hooks"
         expected = self._run(hooks / _FINISH.name, payload)
-        started = time.monotonic()
         actual = self._run(hooks / _COMPOSITE.name, payload)
-        elapsed = time.monotonic() - started
         self.assertEqual(
             (actual.returncode, actual.stdout, actual.stderr),
             (expected.returncode, expected.stdout, expected.stderr),
         )
-        return elapsed
+
+    def test_finish_latency_is_outside_the_recovery_budget(self) -> None:
+        executor = self.runtime / "consumer" / "finish_current.py"
+        executor.write_text(
+            executor.read_text(encoding="utf-8") + "\nimport time; time.sleep(2.1)\n",
+            encoding="utf-8",
+        )
+        # Missing recovery worker: finish still receives the complete payload.
+        # Its own latency is not part of the adapter's fixed two-second budget.
+        self._assert_parity(b'{"prompt":"synthetic-slow-finish"}')
 
     def test_success_missing_failure_and_timeout_preserve_finish_bytes(self) -> None:
         payload = json.dumps(
@@ -268,23 +305,19 @@ class TestBeforeSubmitPromptComposite(unittest.TestCase):
         for name, source in cases.items():
             with self.subTest(name=name):
                 worker.write_text(source, encoding="utf-8")
-                elapsed = self._assert_parity(payload)
-                self.assertLessEqual(elapsed, 3.5)
+                self._assert_parity(payload)
 
         worker.write_text(
             "import sys; sys.stdin.buffer.read()\n",
             encoding="utf-8",
         )
-        self.assertLess(
-            self._assert_parity(payload + b"\n \t\r\n"),
-            2.0,
-        )
+        self._assert_parity(payload + b"\n \t\r\n")
         oversized = (
             b'{"prompt":"'
             + (b"x" * (adapter.MAX_PAYLOAD_BYTES + 8192))
             + b'"}\n'
         )
-        self.assertLess(self._assert_parity(oversized), 2.0)
+        self._assert_parity(oversized)
 
         installed_adapter = self.runtime / "engine" / _ADAPTER.name
         adapter_bytes = installed_adapter.read_bytes()
@@ -294,16 +327,16 @@ class TestBeforeSubmitPromptComposite(unittest.TestCase):
             encoding="utf-8",
         )
         try:
-            self.assertLess(self._assert_parity(payload), 1.5)
+            self._assert_parity(payload)
         finally:
             installed_adapter.write_bytes(adapter_bytes)
 
         worker.unlink()
-        self.assertLess(self._assert_parity(payload), 2.0)
+        self._assert_parity(payload)
         absent_adapter = installed_adapter.with_suffix(".absent")
         installed_adapter.rename(absent_adapter)
         try:
-            self.assertLess(self._assert_parity(payload), 1.5)
+            self._assert_parity(payload)
         finally:
             absent_adapter.rename(installed_adapter)
 

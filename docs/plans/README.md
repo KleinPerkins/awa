@@ -69,6 +69,7 @@ lands — this directory already follows the reference shape it derived from.
 | `hard-no-touch-host-policy-v1.md` | ACCEPTED — FROZEN — 2026-10-06 | Implement ADR 0027's optional version-1 pre-access hard-no-touch schema, immutable lexical kernel/engine matchers, fail-closed validation, zero-target-access tests, and one ready AWA PR. |
 | `awa-v1-8-maintenance-release-v1.md` | ACCEPTED — FROZEN — 2026-10-06 | Establish the serial AWA → controller → ruleset/ref → v1.8.2 backport → Release-GO path for one protected `release/1.8` safety-maintenance line. |
 | `native-codex-interoperability-v1.md` | DRAFT — OWNER PROFILE DECISION, CAPTURE, IMPLEMENTATION, AND ROLLOUT NO-GO — 2026-10-28 | Evidence-first Codex host qualification with separate C-Bounded/C-Parity decisions, exact identity/tool residuals, under-lock validation, and independent capture/implementation/release/host gates. |
+| `native-codex-bounded-evidence-capture-preview-v1.md` | DRAFT — D0 SELECTED; BUNDLE PREPARATION, LIVE CAPTURE, HOST CHANGES, AND IMPLEMENTATION NO-GO — 2026-10-29 | Consequence preview for a disposable, project-local, sanitized C-Bounded evidence capture; freezes future artifact paths, data minimization, negative-evidence controls, cleanup residuals, and independent CP0–CP7 gates without authorizing capture. |
 
 ## Related conventions
 
