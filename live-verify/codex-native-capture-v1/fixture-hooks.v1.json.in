@@ -1,0 +1,6 @@
+{
+  "description": "Disposable synthetic capture; requires separate CP1 and CP2-T approval.",
+  "hooks": {
+    "PreToolUse": [{"hooks":[{"type":"command","command":"/usr/bin/python3 -I -S -B \"@@CAPTURE_HOOK_PATH@@\"","timeout":3}]}]
+  }
+}
