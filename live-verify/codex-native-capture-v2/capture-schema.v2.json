@@ -1,0 +1,1183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Closed native Codex capture export v2: controller-bound A03",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "awa-codex-capture-export/v2"
+    },
+    "run_label": {
+      "type": "string",
+      "pattern": "^C[1-9][0-9]{0,2}$"
+    },
+    "input_sha256": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "README.md": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "capture_hook.py": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "verify_capture.py": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "capture-schema.v2.json": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "scenario-catalog.v2.json": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "forbidden-fields.v2.txt": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "fixture-hooks.v2.json.in": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "README.md",
+        "capture_hook.py",
+        "verify_capture.py",
+        "capture-schema.v2.json",
+        "scenario-catalog.v2.json",
+        "forbidden-fields.v2.txt",
+        "fixture-hooks.v2.json.in"
+      ]
+    },
+    "events": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "$ref": "#/$defs/event"
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 34,
+      "items": {
+        "$ref": "#/$defs/scenario"
+      }
+    },
+    "session_scope": {
+      "const": "CONTROLLER_BOUND"
+    },
+    "collector_contention": {
+      "const": "NOT_RECORDED"
+    }
+  },
+  "required": [
+    "schema",
+    "run_label",
+    "input_sha256",
+    "events",
+    "scenarios",
+    "session_scope",
+    "collector_contention"
+  ],
+  "$defs": {
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "awa-codex-capture-event/v2"
+        },
+        "run_label": {
+          "type": "string",
+          "pattern": "^C[1-9][0-9]{0,2}$"
+        },
+        "scenario_id": {
+          "enum": [
+            "A01",
+            "A02",
+            "A03",
+            "A04",
+            "A05",
+            "A06",
+            "A07",
+            "A08",
+            "A09",
+            "B01",
+            "B02",
+            "B03",
+            "B04",
+            "B05",
+            "B06",
+            "B07",
+            "B08",
+            "B09",
+            "B10",
+            "B11",
+            "B12",
+            "C01",
+            "C02",
+            "C07",
+            "C08",
+            "C09",
+            "D01",
+            "D02",
+            "D03",
+            "D04"
+          ]
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        },
+        "event_name": {
+          "enum": [
+            "SessionStart",
+            "SessionEnd",
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse",
+            "PreCompact",
+            "PostCompact",
+            "UserPromptSubmit",
+            "SubagentStart",
+            "SubagentStop",
+            "Stop",
+            "Interrupt"
+          ]
+        },
+        "source": {
+          "enum": [
+            null,
+            "startup",
+            "resume",
+            "clear",
+            "compact",
+            "fork",
+            "manual",
+            "auto",
+            "other",
+            "UNKNOWN"
+          ]
+        },
+        "session_label": {
+          "const": "S1"
+        },
+        "turn_label": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^T(?:[1-9]|[1-9][0-9]|[1-9][0-9]{2}|1[0-9]{3}|20[0-3][0-9]|204[0-8])$"
+            }
+          ]
+        },
+        "root_label": {
+          "enum": [
+            "R1",
+            "SUBDIR",
+            "CHANGED",
+            "MISSING",
+            "AMBIGUOUS"
+          ]
+        },
+        "identity_presence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "session": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "presence": {
+                  "enum": [
+                    "PRESENT",
+                    "MISSING"
+                  ]
+                },
+                "type": {
+                  "enum": [
+                    "STRING",
+                    "NULL",
+                    "OTHER"
+                  ]
+                },
+                "length_bucket": {
+                  "enum": [
+                    null,
+                    "EMPTY",
+                    "1_64",
+                    "65_256",
+                    "257_4096",
+                    "OVER_4096"
+                  ]
+                }
+              },
+              "required": [
+                "presence",
+                "type",
+                "length_bucket"
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "type": {
+                        "const": "STRING"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "length_bucket": {
+                        "enum": [
+                          "EMPTY",
+                          "1_64",
+                          "65_256",
+                          "257_4096",
+                          "OVER_4096"
+                        ]
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "length_bucket": {
+                        "type": "null"
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "presence": {
+                        "const": "MISSING"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "type": {
+                        "const": "NULL"
+                      },
+                      "length_bucket": {
+                        "type": "null"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "turn": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "presence": {
+                  "enum": [
+                    "PRESENT",
+                    "MISSING"
+                  ]
+                },
+                "type": {
+                  "enum": [
+                    "STRING",
+                    "NULL",
+                    "OTHER"
+                  ]
+                },
+                "length_bucket": {
+                  "enum": [
+                    null,
+                    "EMPTY",
+                    "1_64",
+                    "65_256",
+                    "257_4096",
+                    "OVER_4096"
+                  ]
+                }
+              },
+              "required": [
+                "presence",
+                "type",
+                "length_bucket"
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "type": {
+                        "const": "STRING"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "length_bucket": {
+                        "enum": [
+                          "EMPTY",
+                          "1_64",
+                          "65_256",
+                          "257_4096",
+                          "OVER_4096"
+                        ]
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "length_bucket": {
+                        "type": "null"
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "presence": {
+                        "const": "MISSING"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "type": {
+                        "const": "NULL"
+                      },
+                      "length_bucket": {
+                        "type": "null"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "cwd": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "presence": {
+                  "enum": [
+                    "PRESENT",
+                    "MISSING"
+                  ]
+                },
+                "type": {
+                  "enum": [
+                    "STRING",
+                    "NULL",
+                    "OTHER"
+                  ]
+                },
+                "length_bucket": {
+                  "enum": [
+                    null,
+                    "EMPTY",
+                    "1_64",
+                    "65_256",
+                    "257_4096",
+                    "OVER_4096"
+                  ]
+                }
+              },
+              "required": [
+                "presence",
+                "type",
+                "length_bucket"
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "type": {
+                        "const": "STRING"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "length_bucket": {
+                        "enum": [
+                          "EMPTY",
+                          "1_64",
+                          "65_256",
+                          "257_4096",
+                          "OVER_4096"
+                        ]
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "length_bucket": {
+                        "type": "null"
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "presence": {
+                        "const": "MISSING"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "type": {
+                        "const": "NULL"
+                      },
+                      "length_bucket": {
+                        "type": "null"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "session",
+            "turn",
+            "cwd"
+          ]
+        },
+        "tool_class": {
+          "enum": [
+            null,
+            "LOCAL",
+            "MCP",
+            "HOSTED",
+            "UNKNOWN"
+          ]
+        },
+        "tool_discriminator": {
+          "enum": [
+            null,
+            "BASH",
+            "UNIFIED_EXEC",
+            "WRITE_STDIN",
+            "APPLY_PATCH",
+            "UPDATE_PLAN",
+            "SPAWN_AGENT",
+            "HOSTED_WEB_SEARCH",
+            "UNKNOWN"
+          ]
+        },
+        "hook_outcome": {
+          "const": "OBSERVED"
+        },
+        "ordering_counter": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        },
+        "timing_bucket": {
+          "enum": [
+            "LT_10MS",
+            "LT_100MS",
+            "LT_1S",
+            "LT_5S",
+            "GTE_5S"
+          ]
+        },
+        "process_exit_class": {
+          "const": "NOT_APPLICABLE"
+        }
+      },
+      "required": [
+        "schema",
+        "run_label",
+        "scenario_id",
+        "sequence",
+        "event_name",
+        "source",
+        "session_label",
+        "turn_label",
+        "root_label",
+        "identity_presence",
+        "tool_class",
+        "tool_discriminator",
+        "hook_outcome",
+        "ordering_counter",
+        "timing_bucket",
+        "process_exit_class"
+      ],
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "tool_class": {
+                  "const": null
+                },
+                "tool_discriminator": {
+                  "const": null
+                }
+              }
+            },
+            {
+              "properties": {
+                "tool_class": {
+                  "const": "LOCAL"
+                },
+                "tool_discriminator": {
+                  "const": "BASH"
+                }
+              }
+            },
+            {
+              "properties": {
+                "tool_class": {
+                  "const": "LOCAL"
+                },
+                "tool_discriminator": {
+                  "const": "UNIFIED_EXEC"
+                }
+              }
+            },
+            {
+              "properties": {
+                "tool_class": {
+                  "const": "LOCAL"
+                },
+                "tool_discriminator": {
+                  "const": "WRITE_STDIN"
+                }
+              }
+            },
+            {
+              "properties": {
+                "tool_class": {
+                  "const": "LOCAL"
+                },
+                "tool_discriminator": {
+                  "const": "APPLY_PATCH"
+                }
+              }
+            },
+            {
+              "properties": {
+                "tool_class": {
+                  "const": "LOCAL"
+                },
+                "tool_discriminator": {
+                  "const": "UPDATE_PLAN"
+                }
+              }
+            },
+            {
+              "properties": {
+                "tool_class": {
+                  "const": "LOCAL"
+                },
+                "tool_discriminator": {
+                  "const": "SPAWN_AGENT"
+                }
+              }
+            },
+            {
+              "properties": {
+                "tool_class": {
+                  "const": "HOSTED"
+                },
+                "tool_discriminator": {
+                  "const": "HOSTED_WEB_SEARCH"
+                }
+              }
+            },
+            {
+              "properties": {
+                "tool_class": {
+                  "const": "UNKNOWN"
+                },
+                "tool_discriminator": {
+                  "const": "UNKNOWN"
+                }
+              }
+            },
+            {
+              "properties": {
+                "tool_class": {
+                  "const": "MCP"
+                },
+                "tool_discriminator": {
+                  "const": "UNKNOWN"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "if": {
+            "properties": {
+              "event_name": {
+                "enum": [
+                  "PreToolUse",
+                  "PermissionRequest",
+                  "PostToolUse"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "tool_class": {
+                "type": "string"
+              },
+              "tool_discriminator": {
+                "type": "string"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "tool_class": {
+                "type": "null"
+              },
+              "tool_discriminator": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "session_label": {
+                "type": "string"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "identity_presence": {
+                "properties": {
+                  "session": {
+                    "properties": {
+                      "type": {
+                        "const": "STRING"
+                      },
+                      "length_bucket": {
+                        "enum": [
+                          "1_64",
+                          "65_256",
+                          "257_4096",
+                          "OVER_4096"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "turn_label": {
+                "type": "string"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "identity_presence": {
+                "properties": {
+                  "turn": {
+                    "properties": {
+                      "type": {
+                        "const": "STRING"
+                      },
+                      "length_bucket": {
+                        "enum": [
+                          "1_64",
+                          "65_256",
+                          "257_4096",
+                          "OVER_4096"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "turn_label": {
+                "type": "string"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "session_label": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "awa-codex-capture-scenario/v2"
+        },
+        "run_label": {
+          "type": "string",
+          "pattern": "^C[1-9][0-9]{0,2}$"
+        },
+        "scenario_id": {
+          "const": "A03"
+        },
+        "scenario_action_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "pre_barrier_id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8192
+        },
+        "post_barrier_id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8192
+        },
+        "expected_event_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "SessionStart": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "SessionEnd": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "PreToolUse": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "PermissionRequest": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "PostToolUse": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "PreCompact": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "PostCompact": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "UserPromptSubmit": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "SubagentStart": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "SubagentStop": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "Stop": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "Interrupt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            }
+          },
+          "required": [
+            "SessionStart",
+            "SessionEnd",
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse",
+            "PreCompact",
+            "PostCompact",
+            "UserPromptSubmit",
+            "SubagentStart",
+            "SubagentStop",
+            "Stop",
+            "Interrupt"
+          ]
+        },
+        "observed_event_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "SessionStart": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "SessionEnd": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "PreToolUse": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "PermissionRequest": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "PostToolUse": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "PreCompact": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "PostCompact": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "UserPromptSubmit": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "SubagentStart": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "SubagentStop": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "Stop": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "Interrupt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            }
+          },
+          "required": [
+            "SessionStart",
+            "SessionEnd",
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse",
+            "PreCompact",
+            "PostCompact",
+            "UserPromptSubmit",
+            "SubagentStart",
+            "SubagentStop",
+            "Stop",
+            "Interrupt"
+          ]
+        },
+        "harness_health": {
+          "enum": [
+            "HEALTHY",
+            "UNKNOWN"
+          ]
+        },
+        "hook_content_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "config_template_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "rendered_config_stability": {
+          "enum": [
+            "MATCH",
+            "UNAVAILABLE"
+          ]
+        },
+        "action_witness": {
+          "enum": [
+            "MATCHED",
+            "NOT_APPLICABLE"
+          ]
+        },
+        "positive_control_route_match": {
+          "enum": [
+            "SAME_ROUTE",
+            "UNAVAILABLE"
+          ]
+        },
+        "process_exit_class": {
+          "enum": [
+            "ZERO",
+            "TWO",
+            "OTHER",
+            "SIGNAL",
+            "TIMEOUT",
+            "NOT_APPLICABLE"
+          ]
+        },
+        "completion_status": {
+          "enum": [
+            "OBSERVED",
+            "UNPROVEN",
+            "DOCUMENTATION_ONLY"
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "run_label",
+        "scenario_id",
+        "scenario_action_sha256",
+        "pre_barrier_id",
+        "post_barrier_id",
+        "expected_event_counts",
+        "observed_event_counts",
+        "harness_health",
+        "hook_content_sha256",
+        "config_template_sha256",
+        "rendered_config_stability",
+        "action_witness",
+        "positive_control_route_match",
+        "process_exit_class",
+        "completion_status"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "scenario_id": {
+                "const": "C05"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "pre_barrier_id": {
+                "const": 0
+              },
+              "post_barrier_id": {
+                "const": 0
+              },
+              "expected_event_counts": {
+                "properties": {
+                  "PreToolUse": {
+                    "const": 0
+                  },
+                  "PermissionRequest": {
+                    "const": 0
+                  },
+                  "PostToolUse": {
+                    "const": 0
+                  },
+                  "SessionStart": {
+                    "const": 0
+                  },
+                  "SessionEnd": {
+                    "const": 0
+                  },
+                  "PreCompact": {
+                    "const": 0
+                  },
+                  "PostCompact": {
+                    "const": 0
+                  },
+                  "UserPromptSubmit": {
+                    "const": 0
+                  },
+                  "SubagentStart": {
+                    "const": 0
+                  },
+                  "SubagentStop": {
+                    "const": 0
+                  },
+                  "Stop": {
+                    "const": 0
+                  },
+                  "Interrupt": {
+                    "const": 0
+                  }
+                }
+              },
+              "observed_event_counts": {
+                "properties": {
+                  "PreToolUse": {
+                    "const": 0
+                  },
+                  "PermissionRequest": {
+                    "const": 0
+                  },
+                  "PostToolUse": {
+                    "const": 0
+                  },
+                  "SessionStart": {
+                    "const": 0
+                  },
+                  "SessionEnd": {
+                    "const": 0
+                  },
+                  "PreCompact": {
+                    "const": 0
+                  },
+                  "PostCompact": {
+                    "const": 0
+                  },
+                  "UserPromptSubmit": {
+                    "const": 0
+                  },
+                  "SubagentStart": {
+                    "const": 0
+                  },
+                  "SubagentStop": {
+                    "const": 0
+                  },
+                  "Stop": {
+                    "const": 0
+                  },
+                  "Interrupt": {
+                    "const": 0
+                  }
+                }
+              },
+              "harness_health": {
+                "const": "UNKNOWN"
+              },
+              "rendered_config_stability": {
+                "const": "UNAVAILABLE"
+              },
+              "action_witness": {
+                "const": "NOT_APPLICABLE"
+              },
+              "positive_control_route_match": {
+                "const": "UNAVAILABLE"
+              },
+              "process_exit_class": {
+                "const": "NOT_APPLICABLE"
+              },
+              "completion_status": {
+                "const": "DOCUMENTATION_ONLY"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "pre_barrier_id": {
+                "minimum": 1
+              },
+              "post_barrier_id": {
+                "minimum": 1
+              },
+              "rendered_config_stability": {
+                "const": "MATCH"
+              },
+              "action_witness": {
+                "const": "MATCHED"
+              },
+              "completion_status": {
+                "enum": [
+                  "OBSERVED",
+                  "UNPROVEN"
+                ]
+              },
+              "process_exit_class": {
+                "enum": [
+                  "ZERO",
+                  "TWO",
+                  "OTHER",
+                  "NOT_APPLICABLE"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "harness_health": {
+                "const": "HEALTHY"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "positive_control_route_match": {
+                "const": "SAME_ROUTE"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "positive_control_route_match": {
+                "const": "UNAVAILABLE"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "completion_status": {
+                "const": "OBSERVED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "harness_health": {
+                "const": "HEALTHY"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$comment": "Structural mirror only. verify_capture.py and capture_hook.py enforce cross-row ordering, equality, exact counts and source integrity; schema-only validation is insufficient."
+}

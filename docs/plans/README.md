@@ -71,6 +71,7 @@ lands — this directory already follows the reference shape it derived from.
 | `native-codex-interoperability-v1.md` | DRAFT — OWNER PROFILE DECISION, CAPTURE, IMPLEMENTATION, AND ROLLOUT NO-GO — 2026-10-28 | Evidence-first Codex host qualification with separate C-Bounded/C-Parity decisions, exact identity/tool residuals, under-lock validation, and independent capture/implementation/release/host gates. |
 | `native-codex-bounded-evidence-capture-preview-v1.md` | SUPERSEDED DECISION FRONTIER — CP0 AUTHORITY RETAINED — 2026-10-29 | Immutable CP0 authority and inherited capture/data/consent contract; source delivered in PR #188; v2 refreshes the next decision against those exact merged bytes. |
 | `native-codex-bounded-evidence-capture-preview-v2.md` | DRAFT — CP0 SOURCE DELIVERY COMPLETE; CP1 ALLOCATION AND ALL LATER GATES NO-GO — 2026-10-29 | Post-CP0 refresh at `125d1724`; binds source hashes, the private exact-byte CP1 approval packet, minimal A01-only allocation, failure residuals and the separate later gates without authorizing host writes. |
+| `native-codex-hook-control-repair-v1.md` | DRAFT — REPAIR SOURCE; NATIVE QUALIFICATION PENDING — 2026-10-31 | Bind A03 controls to one native session, preserve strict counts and v1 bytes, and record the unapplied hook cleanup rejected by automatic approval review. |
 
 ## Related conventions
 
