@@ -231,11 +231,14 @@ def verify(path):
             stack.callback(os.close, private_fd)
         directory = c.open_directory(path, private=True)
         stack.callback(os.close, directory)
-        c.require(set(os.listdir(directory)) == {"manifest.json", "ledger.ndjson", "capture.lock"})
+        c.require(set(os.listdir(directory)) == {"manifest.json", "ledger.ndjson", "capture.lock", "collector-contention.bin"})
         lock = c.open_file(directory, "capture.lock", write=True)
         stack.callback(os.close, lock)
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         c.require(os.fstat(lock).st_size == 0)
+        contention = c.open_file(directory, "collector-contention.bin")
+        stack.callback(os.close, contention)
+        c.require(c.collector_contention(directory, contention) == b"0")
         manifest_fd = c.open_file(directory, "manifest.json")
         stack.callback(os.close, manifest_fd)
         manifest_raw = c.read_bytes(manifest_fd, c.MAX_JSON)
@@ -261,6 +264,7 @@ def verify(path):
         export = {
             "schema": "awa-codex-capture-export/v2", "run_label": run["run_label"],
             "session_scope": "CONTROLLER_BOUND",
+            "collector_contention": "NOT_RECORDED",
             "input_sha256": inputs, "events": events,
             "scenarios": [scenario_row(i, scenarios.get(i), run, catalog) for i in run["scenario_ids"]],
         }
@@ -275,7 +279,8 @@ def verify(path):
         try:
             c.require((os.fstat(fresh).st_dev, os.fstat(fresh).st_ino) ==
                       (os.fstat(directory).st_dev, os.fstat(directory).st_ino))
-            c.require(set(os.listdir(fresh)) == {"manifest.json", "ledger.ndjson", "capture.lock"})
+            c.require(set(os.listdir(fresh)) == {"manifest.json", "ledger.ndjson", "capture.lock", "collector-contention.bin"})
+            c.require(c.collector_contention(directory, contention) == b"0")
         finally:
             os.close(fresh)
         fd = os.open("export.pending", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -288,6 +293,7 @@ def verify(path):
                 c.require(written > 0)
                 remaining = remaining[written:]
             os.fsync(fd)
+            c.require(c.collector_contention(directory, contention) == b"0")
             os.link("export.pending", "export.json", src_dir_fd=directory, dst_dir_fd=directory,
                     follow_symlinks=False)
             os.unlink("export.pending", dir_fd=directory)

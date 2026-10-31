@@ -1,5 +1,7 @@
 """Synthetic offline capture tests; these are never native-host evidence."""
 import copy
+import fcntl
+import os
 import hashlib
 import hmac
 import importlib.util
@@ -9,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / 'live-verify/codex-native-capture-v2'
@@ -82,7 +85,7 @@ class TestObserverAndVerifier(unittest.TestCase):
         self.action_hash = c.digest(c.canonical(catalog['A03']))
         for name, raw in {'manifest.json':manifest, 'salt.bin':self.salt, 'session.bin':self.binding,
                           'labels.json':c.canonical({'session':{self.binding.hex():'S1'},'turn':{}}),
-                          'capture.lock':b'', 'ledger.ndjson':b''}.items():
+                          'capture.lock':b'', 'collector-contention.bin':b'0', 'ledger.ndjson':b''}.items():
             self.put(self.capture/name, raw)
         self.append({'kind':'pre','scenario_id':'A03','nonce':'1'*32,'action_sha256':self.action_hash,
                      'manifest_sha256':self.manifest_hash})
@@ -151,6 +154,7 @@ class TestObserverAndVerifier(unittest.TestCase):
         raw = (self.capture/'export.json').read_bytes(); export = json.loads(raw)
         self.assertEqual(digest,c.digest(raw))
         self.assertEqual(export['session_scope'],'CONTROLLER_BOUND')
+        self.assertEqual(export['collector_contention'],'NOT_RECORDED')
         self.assertEqual(export['scenarios'][0]['completion_status'],'OBSERVED')
         self.assertEqual([e['session_label'] for e in export['events']],['S1']*3)
         self.assertNotIn(b'primary',raw); self.assertNotIn(self.binding.hex().encode(),raw)
@@ -171,6 +175,37 @@ class TestObserverAndVerifier(unittest.TestCase):
         row = json.loads((self.capture/'export.json').read_bytes())['scenarios'][0]
         self.assertEqual(row['completion_status'], 'UNPROVEN')
         self.assertEqual(row['harness_health'], 'UNKNOWN')
+
+    def test_contended_callback_leaves_sticky_evidence_and_cannot_export(self):
+        fd = os.open(self.capture/'capture.lock', os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.invoke()
+            self.assertEqual((self.capture/'collector-contention.bin').read_bytes(), b'1')
+        finally:
+            os.close(fd)
+        # Otherwise exact controls cannot hide the earlier dropped invocation.
+        self.seal()
+        self.assertEqual((self.capture/'collector-contention.bin').read_bytes(), b'1')
+        with self.assertRaises(c.Invalid):v.verify(str(self.capture))
+        self.assertFalse((self.capture/'export.json').exists())
+
+    def test_contention_evidence_must_remain_until_export(self):
+        self.seal()
+        (self.capture/'collector-contention.bin').unlink()
+        with self.assertRaises(c.Invalid):v.verify(str(self.capture))
+
+    def test_contention_recorded_during_verification_refuses_publication(self):
+        self.seal()
+        original = c.read_rows
+        def rows_then_contend(fd):
+            rows = original(fd)
+            (self.capture/'collector-contention.bin').write_bytes(b'1')
+            return rows
+        with mock.patch.object(c, 'read_rows', side_effect=rows_then_contend):
+            with self.assertRaises(c.Invalid):v.verify(str(self.capture))
+        self.assertFalse((self.capture/'export.json').exists())
+        self.assertFalse((self.capture/'export.pending').exists())
 
     def test_binding_ephemera_must_be_removed_before_export(self):
         self.seal(); self.put(self.capture/'session.bin',self.binding)

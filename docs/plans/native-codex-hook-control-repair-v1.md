@@ -19,7 +19,7 @@ The native UI also reported exit 127 and invalid SessionStart JSON. Targeted hoo
 1. Preserve the complete v1 bundle and all frozen documents byte-for-byte. Add `live-verify/codex-native-capture-v2/`, restricted to A03 only.
 2. Before the control starts, bind the actual target native session through a controller-derived, salted HMAC. Store the binding in a private 0600 `capture/session.bin`, its digest in the run manifest and exactly one S1 mapping in the private labels file. The pre-witness binds this manifest. Never persist the raw session id.
 3. Reject foreign/missing session identity before label allocation or ledger append. Require S1 in every ledger event. Keep the exact one-callback expectation for BEFORE, ACTION and AFTER; reject widened counts/routes/scenarios. Record `session_scope = CONTROLLER_BOUND` in exports. This deliberately cannot support host-wide absence claims.
-4. Remove session.bin, salt and labels before offline verification. Preserve descriptor/owner/mode/source checks and fail-open observation. Reject same-session duplicates and forged foreign-session ledger rows.
+4. Preallocate a private one-byte collector-contention.bin flag. Lock contention sets it durably and makes the run ineligible for export regardless of apparently exact counts or witness health. Never clear or salvage that run. Remove session.bin, salt and labels before offline verification; retain the contention flag through verifier checks and recheck it before copying an export. Preserve descriptor/owner/mode/source checks and fail-open observation. Reject same-session duplicates and forged foreign-session ledger rows.
 5. Deliver source through full repository verification and normal verifier/reviewer-App PR handling before any native v2 capture. Offline synthetic tests remain distinct from host evidence.
 
 ## Host correction and current restriction
@@ -34,7 +34,7 @@ Automatic approval review rejected this persistent seven-entry removal because i
 |---|---|---|
 | Reject foreign-session contamination | Synthetic real-observer stdin tests and unchanged label/ledger assertions | Observer scope only |
 | Preserve count controls | Duplicate-primary, widened-manifest and foreign-ledger rejection tests | No relaxed success criteria |
-| Safe export | Three-phase synthetic verifier test and ephemeral-binding rejection | No native capture claim |
+| Safe export | Three-phase synthetic verifier test, ephemeral-binding rejection and sticky contention/race refusal | No native capture claim |
 | Preserve prior authority | v1 bytes unchanged; no frozen plan/ADR edits | No profile or implementation acceptance |
 | Correct host hooks | Exact cleanup still requires authorization accepted by automatic review, followed by fresh supported metadata/UI validation | Not yet applied |
 

@@ -71,6 +71,9 @@
     },
     "session_scope": {
       "const": "CONTROLLER_BOUND"
+    },
+    "collector_contention": {
+      "const": "NOT_RECORDED"
     }
   },
   "required": [
@@ -79,7 +82,8 @@
     "input_sha256",
     "events",
     "scenarios",
-    "session_scope"
+    "session_scope",
+    "collector_contention"
   ],
   "$defs": {
     "event": {

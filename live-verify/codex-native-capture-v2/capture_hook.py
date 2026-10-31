@@ -355,6 +355,31 @@ def root_relation(cwd, fixture):
         return "AMBIGUOUS"
 
 
+def collector_contention(directory, fd):
+    """Read the preallocated sticky byte only through its original private inode."""
+    info = os.stat("collector-contention.bin", dir_fd=directory, follow_symlinks=False)
+    expected = os.fstat(fd)
+    require((info.st_dev, info.st_ino) == (expected.st_dev, expected.st_ino))
+    require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid())
+    require(info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600)
+    value = read_bytes(fd, 1)
+    require(value in (b"0", b"1"))
+    return value
+
+
+def record_contention(directory, fd, capture):
+    fresh = open_directory(capture, private=True)
+    try:
+        require((os.fstat(fresh).st_dev, os.fstat(fresh).st_ino) ==
+                (os.fstat(directory).st_dev, os.fstat(directory).st_ino))
+        collector_contention(directory, fd)
+        require(os.pwrite(fd, b"1", 0) == 1)
+        os.fsync(fd)
+        require(collector_contention(directory, fd) == b"1")
+    finally:
+        os.close(fresh)
+
+
 def observe():
     # This must precede any read of raw stdin; no payload enters diagnostics.
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
@@ -373,7 +398,15 @@ def observe():
         stack.callback(os.close, directory)
         lock = open_file(directory, "capture.lock", write=True)
         stack.callback(os.close, lock)
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        contention = open_file(directory, "collector-contention.bin", write=True)
+        stack.callback(os.close, contention)
+        collector_contention(directory, contention)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Keep the host action fail-open, but never silently qualify a lost event.
+            record_contention(directory, contention, capture)
+            raise Invalid()
         require(os.fstat(lock).st_size == 0)
         fds = {}
         for name in ("manifest.json", "salt.bin", "session.bin", "labels.json", "ledger.ndjson"):
