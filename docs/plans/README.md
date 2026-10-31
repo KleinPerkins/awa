@@ -73,6 +73,7 @@ lands — this directory already follows the reference shape it derived from.
 | `native-codex-bounded-evidence-capture-preview-v2.md` | DRAFT — CP0 SOURCE DELIVERY COMPLETE; CP1 ALLOCATION AND ALL LATER GATES NO-GO — 2026-10-29 | Post-CP0 refresh at `125d1724`; binds source hashes, the private exact-byte CP1 approval packet, minimal A01-only allocation, failure residuals and the separate later gates without authorizing host writes. |
 | `native-codex-hook-control-repair-v1.md` | SUPERSEDED EXECUTION FRONTIER — SOURCE MERGED; HOST CLEANUP RESOLVED | Immutable provenance of PR #191; v2 records successful exact hook cleanup and the prompt-only fixture correction. |
 | `native-codex-hook-control-repair-v2.md` | ACCEPTED — BOUNDED SOURCE CORRECTION; NATIVE QUALIFICATION PENDING | Install only the A03 prompt hook, eliminating unused trust/toggle dependencies while preserving strict session/count/contention controls. |
+| `native-codex-first-prompt-tool-definitions-v1.md` | DRAFT — INERT SOURCE PREPARATION; NEW LIVE PREVIEW/ADJUDICATION PENDING | Preserve first-prompt unknown health with strict bound counts; keep local-tool identities/handles inert until supported contracts are resolved. |
 
 ## Related conventions
 
