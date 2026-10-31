@@ -137,6 +137,25 @@ class TestFirstPrompt(unittest.TestCase):
             self.assertEqual(handlers[0]['command'],'/usr/bin/python3 -I -S -B "'+str(e.hook)+'"')
             self.assertEqual(handlers[0]['timeout'],3)
 
+    def test_rehashed_controller_config_cannot_widen_or_replace_renderer(self):
+        for change in ('extra_route','extra_handler','command','timeout','encoding'):
+            with self.subTest(change=change),Epoch() as e:
+                config=json.loads(e.config)
+                group=config['hooks']['UserPromptSubmit']
+                if change=='extra_route':config['hooks']['PreToolUse']=group
+                elif change=='extra_handler':group[0]['hooks'].append(dict(group[0]['hooks'][0]))
+                elif change=='command':group[0]['hooks'][0]['command']='/usr/bin/true'
+                elif change=='timeout':group[0]['hooks'][0]['timeout']=30
+                altered=c.canonical(config)+b'\n'
+                if change=='encoding':altered=b' '+altered
+                e.put(e.fixture/'.codex/hooks.json',altered)
+                e.run['rendered_config_sha256']=c.digest(altered)
+                manifest=c.canonical(e.run)
+                e.manifest_hash=c.digest(manifest)
+                e.put(e.capture/'manifest.json',manifest)
+                rows=e.rows();rows[0]['manifest_sha256']=e.manifest_hash;e.rewrite(rows)
+                e.seal();self.refused(e)
+
     def test_manifest_cannot_enable_another_scenario_route_or_count(self):
         with Epoch() as e:
             variants=[('scenario_ids',['A03']),('control_event_names',{'A02':['SessionStart']})]
