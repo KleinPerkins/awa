@@ -193,6 +193,8 @@ def scenario_row(identifier, scenario, run, catalog):
         actual = collections.Counter(e["event_name"] for e in action_events)
         observed = {name: actual[name] for name in c.EVENTS}
         c.require(observed in run["expected_event_counts"][identifier])
+        # V2 is A03-only: exact controls are mandatory even when health is unknown.
+        c.require(same_route_controls(scenario, run))
         controlled = (catalog[identifier]["session_rule"] == "SAME" and
                       post["health"] == "SAME_ROUTE" and same_route_controls(scenario, run))
         # An asserted positive-control result must be backed by actual callbacks.

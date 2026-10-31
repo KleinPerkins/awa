@@ -104,7 +104,7 @@ class TestObserverAndVerifier(unittest.TestCase):
     def rows(self):
         return [json.loads(line) for line in (self.capture/'ledger.ndjson').read_bytes().splitlines()]
 
-    def seal(self, duplicate_before=False):
+    def seal(self, duplicate_before=False, health='SAME_ROUTE'):
         self.invoke(turn='before')
         if duplicate_before:self.invoke(turn='before')
         self.append({'kind':'phase','scenario_id':'A03','nonce':'1'*32,'phase':'ACTION','session_label':'S1'})
@@ -113,7 +113,7 @@ class TestObserverAndVerifier(unittest.TestCase):
         self.invoke(turn='after')
         n=4 if duplicate_before else 3
         self.append({'kind':'post','scenario_id':'A03','nonce':'1'*32,'action_sha256':self.action_hash,
-                     'manifest_sha256':self.manifest_hash,'terminal':'COMPLETED','origin':'HOST','health':'SAME_ROUTE',
+                     'manifest_sha256':self.manifest_hash,'terminal':'COMPLETED','origin':'HOST','health':health,
                      'config_stability':'MATCH','children_clean':True,'process_exit_class':'ZERO',
                      'action_session_label':'S1','control_sequences':{'UserPromptSubmit':{'before':1,'after':n}}})
         for name in ('salt.bin','session.bin','labels.json'):(self.capture/name).unlink()
@@ -159,6 +159,18 @@ class TestObserverAndVerifier(unittest.TestCase):
         self.seal(duplicate_before=True)
         with self.assertRaises(c.Invalid):v.verify(str(self.capture))
         self.assertFalse((self.capture/'export.json').exists())
+
+    def test_duplicate_primary_callback_unavailable_health_still_fails_control(self):
+        self.seal(duplicate_before=True, health='UNAVAILABLE')
+        with self.assertRaises(c.Invalid):v.verify(str(self.capture))
+        self.assertFalse((self.capture/'export.json').exists())
+
+    def test_exact_controls_unavailable_health_remain_unproven(self):
+        self.seal(health='UNAVAILABLE')
+        v.verify(str(self.capture))
+        row = json.loads((self.capture/'export.json').read_bytes())['scenarios'][0]
+        self.assertEqual(row['completion_status'], 'UNPROVEN')
+        self.assertEqual(row['harness_health'], 'UNKNOWN')
 
     def test_binding_ephemera_must_be_removed_before_export(self):
         self.seal(); self.put(self.capture/'session.bin',self.binding)
