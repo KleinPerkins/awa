@@ -133,6 +133,13 @@ class TestObserverAndVerifier(unittest.TestCase):
         self.invoke()
         self.assertEqual(self.rows()[-1]['event']['session_label'], 'S1')
 
+    def test_ascii_hex_binding_is_not_accepted_as_raw_digest(self):
+        wrong_encoding = self.binding.hex().encode('ascii')
+        self.assertEqual(len(wrong_encoding), 64)
+        self.put(self.capture/'session.bin', wrong_encoding)
+        self.invoke()
+        self.assertEqual(len(self.rows()), 1)
+
     def test_binding_file_drift_is_fail_open_without_capturing(self):
         self.put(self.capture/'session.bin', b'x'*32)
         self.invoke()

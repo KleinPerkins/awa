@@ -7,8 +7,9 @@ protection, or a compatibility profile.
 
 Before the first control, the external controller obtains the exact target native
 session id from the supported host interface. In memory it calculates
-`HMAC-SHA256(salt, b"session\0" + session_id.encode("utf-8"))`, writes that hex
-bytes to a new private `capture/session.bin` file (0600), binds its SHA-256 as
+`HMAC-SHA256(salt, b"session\0" + session_id.encode("utf-8"))`, writes the 32 raw digest
+bytes (the result of `.digest()`, never `.hexdigest()` or ASCII hex) to a new
+private `capture/session.bin` file (0600), binds its SHA-256 as
 `session_binding_sha256` in the private v2 run manifest, and prepopulates the
 private equality map with exactly `{binding.hex(): "S1"}`. No raw identifier is
 persisted. All three files are fixed before the pre-witness binds the manifest digest.
