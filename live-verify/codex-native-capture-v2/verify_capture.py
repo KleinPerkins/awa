@@ -121,7 +121,9 @@ def render_config(hook_path):
     c.closed(rendered, "description hooks")
     c.closed(rendered["hooks"], "PreToolUse")
     seed = rendered["hooks"]["PreToolUse"]
-    rendered["hooks"] = {name: copy.deepcopy(seed) for name in c.EVENTS}
+    # A03 exercises only this route. Omit unused definitions so supported trust
+    # never requires activating or persistently trusting unrelated event hooks.
+    rendered["hooks"] = {"UserPromptSubmit": copy.deepcopy(seed)}
     return c.canonical(rendered) + b"\n"
 
 

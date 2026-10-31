@@ -47,8 +47,10 @@ before verification, then recheck the flag before copying a verified export.
 Use `/usr/bin/python3 -I -S -B` for the observer and offline verifier. The source
 manifest binds these seven files. Retain all v1 descriptor, ownership, permission,
 source, witness, same-route, ephemera-absence and forbidden-field checks.
-Render the twelve definitions with the pure verifier helper, trust the exact
-fixture through supported controls, and enable only UserPromptSubmit for A03.
+Render only the UserPromptSubmit definition with the pure verifier helper and
+trust that exact fixture definition through supported controls. The other eleven
+event definitions are omitted: A03 never requires trusting or toggling them.
+The twelve-event schema still records zero for the unused event types.
 Record the actual baseline source set; never silently disable other sources or
 claim an unchanged baseline after an authorized repair. Any hook errors remain
 visible and separate from the observer's own same-route health.

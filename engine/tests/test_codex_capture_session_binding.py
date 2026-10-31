@@ -121,6 +121,17 @@ class TestObserverAndVerifier(unittest.TestCase):
                      'action_session_label':'S1','control_sequences':{'UserPromptSubmit':{'before':1,'after':n}}})
         for name in ('salt.bin','session.bin','labels.json'):(self.capture/name).unlink()
 
+    def test_rendered_fixture_exposes_only_the_executable_prompt_route(self):
+        # Native trust must never require activating unused lifecycle/tool hooks.
+        config = json.loads((self.fixture/'.codex/hooks.json').read_bytes())
+        self.assertEqual(list(config['hooks']), ['UserPromptSubmit'])
+        handlers = config['hooks']['UserPromptSubmit']
+        self.assertEqual(len(handlers), 1)
+        self.assertEqual(len(handlers[0]['hooks']), 1)
+        hook = handlers[0]['hooks'][0]
+        self.assertEqual(hook['command'], '/usr/bin/python3 -I -S -B "' + str(self.hook) + '"')
+        self.assertEqual(hook['timeout'], 3)
+
     def test_manifest_cannot_widen_counts_routes_or_selected_scenario(self):
         for field, value in (("scenario_ids", ["A01"]),
                              ("control_event_names", {"A03": ["SessionStart"]}),
