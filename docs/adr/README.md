@@ -87,6 +87,7 @@ lands — this directory already follows the reference shape it derived from.
 | [0027](0027-hard-no-touch-host-policy.md) | Accepted — 2026-10-06 | Add an optional version-1 hard-no-touch host-policy field with immutable kernel/engine lexical matchers, component-boundary roots, fail-closed malformed input, and zero target access. |
 | [0028](0028-govern-v1-8-maintenance-release-line.md) | Accepted — 2026-10-06 | Govern one protected `release/1.8` line from exact v1.8.1 for the PR #184 safety backport, with controller/ruleset-before-ref gates, reviewer-App-only merge, separate Release GO, one-way provenance, and explicit EOL. |
 | [0029](0029-native-codex-interoperability-boundary.md) | Draft — 2026-10-28 | Propose a host-tagged Codex identity and evidence boundary, preserving explicit owner choice between bounded registration with visible residuals and full-parity unsupported status; no implementation authority. |
+| [0030](0030-codex-association-registration.md) | Accepted | Codex association registration |
 
 ## Related conventions
 
