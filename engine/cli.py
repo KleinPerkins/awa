@@ -542,6 +542,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="awa", description="AWA engine CLI (backs the frozen kernel)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    sub.add_parser("codex-association", help="agent-mediated as-of bookkeeping: record, refresh, inspect (no protection or cleanup authority)")
+
     sub.add_parser("doctor", help="health check (WAL/local-disk/perms)").set_defaults(fn=cmd_doctor)
     sub.add_parser("state-init", help="initialize the durable state db").set_defaults(fn=cmd_state_init)
 
@@ -735,5 +737,19 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    values = list(sys.argv[1:] if argv is None else argv)
+    if values and values[0] == "codex-association":
+        from .codex_association_store import cli
+        from .codex_association import canonical
+        value, code = cli(values[1:], _DEFAULT_POLICY)
+        # The cap is checked against precisely these compact UTF-8 wire bytes.
+        # Legacy command formatting remains in _emit.
+        wire = canonical(value) + b"\n"
+        stream = getattr(sys.stdout, "buffer", None)
+        if stream is not None:
+            stream.write(wire)
+        else:
+            sys.stdout.write(wire.decode("utf-8"))
+        return code
+    args = build_parser().parse_args(values)
     return args.fn(args)
