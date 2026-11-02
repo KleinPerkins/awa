@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import errno
 import fcntl
 import io
 import json
@@ -15,6 +16,7 @@ import unittest
 from unittest import mock
 
 from engine import codex_association as abi
+from engine import codex_association_files as files
 from engine import codex_association_store as store
 from engine.codex_association_files import Access
 from engine.policy import HardNoTouchMatcher, hard_no_touch_matcher_from_data
@@ -25,6 +27,12 @@ class AssociationTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="awa-association-synthetic-")
         self.addCleanup(self.tmp.cleanup)
         self.root = pathlib.Path(self.tmp.name).resolve()
+        if sys.platform.startswith("linux"):
+            # Linux is not a supported product host. gVisor rejects
+            # RENAME_EXCHANGE with EINVAL, so these protocol fixtures model its
+            # successful postcondition instead of claiming native qualification.
+            # macOS runs every case against the real, unpatched kernel exchange.
+            self.enterContext(mock.patch.object(store, "exchange_operation", return_value=self.fixture_exchange))
         self.state = self.root / "private-state" / "awa"
         self.enterContext(mock.patch.object(store.paths, "awa_state_dir", return_value=self.state))
         self.enterContext(mock.patch.object(store, "supported_host", return_value=True))
@@ -38,6 +46,18 @@ class AssociationTest(unittest.TestCase):
         self.wt = self.root / "worktree"
         self.git("-C", str(self.primary), "worktree", "add", "-b", "fixture-one", str(self.wt))
         self.service = store.Store(self.matcher, clock=lambda: self.clock, wall=lambda: self.now)
+
+    @staticmethod
+    def fixture_exchange(directory, source, target):
+        """Test-only name-swap model; deliberately not an atomic implementation.
+
+        All names belong to this disposable fixture. The production publisher
+        never imports this model or falls back to these three rename calls.
+        """
+        held = source + ".fixture-exchange"
+        os.rename(target, held, src_dir_fd=directory, dst_dir_fd=directory)
+        os.rename(source, target, src_dir_fd=directory, dst_dir_fd=directory)
+        os.rename(held, source, src_dir_fd=directory, dst_dir_fd=directory)
 
     def git(self, *args):
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k != "DEV_SESSION_ID"}
@@ -777,6 +797,55 @@ class AssociationTest(unittest.TestCase):
             self.assertEqual(self.service.inspect(chat_id="chat-one")[0]["reason"], "unsafe_state")
             self.assertEqual(self.send(self.request(action="refresh", revision=1))[0]["reason"], "unsafe_state")
         self.assertEqual(path.read_bytes(), before)
+
+    def test_unavailable_exchange_refuses_refresh_before_publication(self):
+        self.positive(); path = self.record_path(); before = path.read_bytes()
+        names = set(path.parent.iterdir())
+        with mock.patch.object(store, "exchange_operation", side_effect=OSError(errno.ENOTSUP, "unavailable")):
+            value, code = self.send(self.request(action="refresh", revision=1))
+        self.assertEqual((code, value["outcome"], value["reason"], value["changed"]),
+                         (1, "refused", "publication_failed", False))
+        self.assertEqual(value["associations"], [])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(set(path.parent.iterdir()), names)
+
+    def test_rejected_exchange_is_uncertain_without_snapshot_loss_or_fallback(self):
+        self.positive(); path = self.record_path(); before = path.read_bytes()
+        names = set(path.parent.iterdir())
+        rejected = mock.Mock(side_effect=OSError(errno.EINVAL, "unsupported exchange flags"))
+        with mock.patch.object(store, "exchange_operation", return_value=rejected):
+            value, code = self.send(self.request(action="refresh", revision=1))
+        self.assertEqual((code, value["outcome"], value["reason"], value["changed"]),
+                         (1, "durability_unconfirmed", "publication_failed", None))
+        self.assertEqual(value["associations"], [])
+        rejected.assert_called_once()
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(set(path.parent.iterdir()), names)
+
+
+class NativeExchangeTest(unittest.TestCase):
+    def test_native_exchange_swaps_or_linux_refuses_without_mutation(self):
+        # This uses the real helper, independently of the Linux protocol model.
+        # An unsupported macOS primitive is a failure, never a skip or a model.
+        with tempfile.TemporaryDirectory(prefix="awa-association-exchange-") as tmp:
+            root = pathlib.Path(tmp).resolve()
+            first, second = root / "first", root / "second"
+            first.write_bytes(b"old"); second.write_bytes(b"new")
+            identities = [p.stat().st_ino for p in (first, second)]
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                try:
+                    files.exchange_operation()(fd, first.name, second.name)
+                except OSError as exc:
+                    self.assertTrue(sys.platform.startswith("linux"), exc)
+                    self.assertIn(exc.errno, (errno.EINVAL, errno.ENOSYS, errno.ENOTSUP))
+                    self.assertEqual([p.read_bytes() for p in (first, second)], [b"old", b"new"])
+                    self.assertEqual([p.stat().st_ino for p in (first, second)], identities)
+                else:
+                    self.assertEqual([p.read_bytes() for p in (first, second)], [b"new", b"old"])
+                    self.assertEqual([p.stat().st_ino for p in (first, second)], identities[::-1])
+            finally:
+                os.close(fd)
 
 
 if __name__ == "__main__":
