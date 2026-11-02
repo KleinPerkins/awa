@@ -204,6 +204,30 @@ can therefore reveal an inline exact key or another inline/file glob rather than
 Supplying `default_mode=off` to `awa_mode_sync` seeds only a missing or invalid file default, but
 when it does, each eligible repo with no combined exact or matching glob entry is excluded.
 
+### Hard-no-touch paths: classify before opening
+
+Host policy version 1 also has an optional pre-access contract:
+
+```yaml
+hard_no_touch_paths:
+  exact_roots:
+    - /synthetic/protected/root
+  managed_namespace_prefixes:
+    - ~/synthetic-managed/protected
+```
+
+Both kinds match the normalized root and descendants on path-component boundaries; neither
+matches a similarly named sibling. AWA expands `~` only from trusted `HOME`, normalizes `.`, `..`,
+repeated separators, and trailing separators lexically, and never resolves or inspects the target.
+Relative, empty, glob-bearing, unknown, or malformed configured values fail closed.
+
+The immutable matcher is canonical in `kernel/lib/awa_policy.py` and mirrored in
+`engine/policy.py`. It is intentionally separate from repository `exclude`, read-only/reference
+classification, artifact protection, and lifecycle-only `lifecycle_no_touch`. A consumer must load
+the trusted host policy and apply this matcher **before** child-directory or repository access.
+AWA ships no concrete path values; the host overlay owns them. Existing version-1 policies that
+omit the field retain a valid empty matcher and existing behavior.
+
 The MCP server puts routing and safety guidance directly in each tool description and in
 `initialize.instructions`. It also advertises one secondary, fixed on-demand document at
 `awa://assistant/operator-guide/v1` (`text/markdown`). Cursor decides whether and when to list/read

@@ -49,6 +49,26 @@ NOT_GIT = "not-git"
 # governs every read/write path: only `off` disables protection; ANY other value
 # (a typo, a removed legacy value, an unknown) resolves to ON/include.
 MODE_VALUES = ("on", "off")
+HARD_NO_TOUCH_SCHEMA = "awa-hard-no-touch/v1"
+HARD_NO_TOUCH_FIELD = "hard_no_touch_paths"
+HARD_NO_TOUCH_EXACT_ROOTS = "exact_roots"
+HARD_NO_TOUCH_MANAGED_PREFIXES = "managed_namespace_prefixes"
+HARD_NO_TOUCH_KINDS = (
+    "exact_root",
+    "managed_namespace",
+    "none",
+    "invalid_policy",
+    "invalid_candidate",
+)
+_HARD_NO_TOUCH_KEYS = frozenset(
+    {HARD_NO_TOUCH_EXACT_ROOTS, HARD_NO_TOUCH_MANAGED_PREFIXES}
+)
+_HARD_NO_TOUCH_GLOB_CHARS = frozenset("*?[]")
+_HARD_NO_TOUCH_ABSENT = object()
+
+
+class _HardNoTouchSyntaxError(ValueError):
+    pass
 
 
 def parse_mini_yaml(text: str) -> dict:
@@ -136,6 +156,515 @@ def _read_regular_text(path: str | Path) -> str:
             os.close(fd)
 
 
+def _hard_no_touch_yaml_line(raw: str) -> str:
+    """Strip a mini-YAML comment while respecting simple quoted path scalars."""
+    content_start = len(raw) - len(raw.lstrip())
+    quote_starts = {content_start}
+    if raw[content_start:].startswith("-"):
+        scalar_start = content_start + 1
+    else:
+        colon = raw.find(":", content_start)
+        scalar_start = colon + 1 if colon >= 0 else len(raw)
+    while scalar_start < len(raw) and raw[scalar_start].isspace():
+        scalar_start += 1
+    quote_starts.add(scalar_start)
+
+    quote = None
+    escaped = False
+    index = 0
+    while index < len(raw):
+        character = raw[index]
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+        elif quote == "'":
+            if character == quote:
+                if index + 1 < len(raw) and raw[index + 1] == quote:
+                    index += 1
+                else:
+                    quote = None
+        elif character in ("'", '"') and index in quote_starts:
+            quote = character
+        elif character == "#" and (index == 0 or raw[index - 1].isspace()):
+            return raw[:index].rstrip()
+        index += 1
+    if quote is not None or escaped:
+        raise _HardNoTouchSyntaxError("unbalanced_quote")
+    return raw.rstrip()
+
+
+def _hard_no_touch_scalar(raw: str) -> str:
+    value = raw.strip()
+    if not value:
+        return ""
+    if value[0] in ("'", '"'):
+        quote = value[0]
+        if len(value) < 2 or value[-1] != quote:
+            raise _HardNoTouchSyntaxError("unbalanced_quote")
+        inner = value[1:-1]
+        if quote in inner or (quote == '"' and "\\" in inner):
+            raise _HardNoTouchSyntaxError("unsupported_quote_escape")
+        return inner
+    return value
+
+
+def _hard_no_touch_reserved_key(raw: str) -> tuple[str, bool]:
+    """Return a reserved key plus whether a non-canonical spelling was used."""
+    value = raw.strip()
+    reserved = (
+        HARD_NO_TOUCH_FIELD,
+        HARD_NO_TOUCH_EXACT_ROOTS,
+        HARD_NO_TOUCH_MANAGED_PREFIXES,
+        "version",
+    )
+    if value in reserved:
+        return value, False
+    for name in reserved:
+        start = 0
+        while True:
+            index = value.find(name, start)
+            if index < 0:
+                break
+            before = value[index - 1] if index else ""
+            after_index = index + len(name)
+            after = value[after_index] if after_index < len(value) else ""
+            if (
+                (not before or not (before.isalnum() or before in "_.-"))
+                and (not after or not (after.isalnum() or after in "_.-"))
+            ):
+                return name, True
+            start = index + 1
+    return value, False
+
+
+def _hard_no_touch_value_from_text(text: str) -> tuple[object, object]:
+    """Strictly extract only the additive field without changing legacy parsing."""
+    if not isinstance(text, str):
+        raise _HardNoTouchSyntaxError("policy_not_text")
+
+    lines = text.splitlines()
+    found = False
+    orphan_child = False
+    version: object = _HARD_NO_TOUCH_ABSENT
+    version_error = False
+    result: object = _HARD_NO_TOUCH_ABSENT
+    index = 0
+    while index < len(lines):
+        raw = lines[index]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            index += 1
+            continue
+
+        candidate = raw.lstrip(" ")
+        leading = raw[: len(raw) - len(raw.lstrip())]
+        if not leading and candidate.startswith(
+            ("'", '"', "?", "!", "&", "*", "{", "[", "%", "\ufeff", "- ")
+        ):
+            raise _HardNoTouchSyntaxError("unsupported_top_level_syntax")
+        key, separator, _ = candidate.partition(":")
+        key_name, unsupported_key = _hard_no_touch_reserved_key(key)
+        if key_name == "version" and not leading:
+            if unsupported_key or not separator or version is not _HARD_NO_TOUCH_ABSENT:
+                version_error = True
+                index += 1
+                continue
+            try:
+                version_line = _hard_no_touch_yaml_line(raw)
+                _, _, version_inline = version_line.partition(":")
+                version_inline = version_inline.strip()
+                if not version_inline:
+                    raise _HardNoTouchSyntaxError("version_missing_value")
+                version = _hard_no_touch_scalar(version_inline)
+            except _HardNoTouchSyntaxError:
+                version_error = True
+            index += 1
+            continue
+
+        if key_name != HARD_NO_TOUCH_FIELD:
+            if candidate.strip() == HARD_NO_TOUCH_FIELD:
+                raise _HardNoTouchSyntaxError("field_missing_colon")
+            if key_name in _HARD_NO_TOUCH_KEYS and not leading:
+                if found:
+                    raise _HardNoTouchSyntaxError("orphan_child")
+                orphan_child = True
+            index += 1
+            continue
+        if unsupported_key or not separator:
+            raise _HardNoTouchSyntaxError("field_missing_colon")
+        if leading:
+            raise _HardNoTouchSyntaxError("field_not_top_level")
+        if found:
+            raise _HardNoTouchSyntaxError("duplicate_field")
+        if orphan_child or version_error:
+            raise _HardNoTouchSyntaxError("orphan_child")
+        found = True
+
+        line = _hard_no_touch_yaml_line(raw)
+        _, _, inline = line.partition(":")
+        inline = inline.strip()
+        if inline == "{}":
+            result = {}
+            index += 1
+            lookahead = index
+            while lookahead < len(lines):
+                following = lines[lookahead]
+                following_stripped = following.strip()
+                if not following_stripped or following_stripped.startswith("#"):
+                    lookahead += 1
+                    continue
+                if following[:1].isspace():
+                    raise _HardNoTouchSyntaxError("inline_map_has_children")
+                break
+            continue
+        if inline:
+            result = _hard_no_touch_scalar(inline)
+            index += 1
+            continue
+
+        value: dict[str, object] = {}
+        child_indent = None
+        active_list = None
+        list_indent = None
+        index += 1
+        while index < len(lines):
+            child_raw = lines[index]
+            child_stripped = child_raw.strip()
+            if not child_stripped or child_stripped.startswith("#"):
+                index += 1
+                continue
+            leading = child_raw[: len(child_raw) - len(child_raw.lstrip())]
+            if "\t" in leading:
+                raise _HardNoTouchSyntaxError("tab_indentation")
+            indent = len(child_raw) - len(child_raw.lstrip(" "))
+            if indent == 0:
+                break
+
+            child_line = _hard_no_touch_yaml_line(child_raw)
+            child_content = child_line.strip()
+            if child_indent is None:
+                child_indent = indent
+            if indent == child_indent:
+                if child_content.startswith("-"):
+                    raise _HardNoTouchSyntaxError("list_without_key")
+                child_key, child_separator, child_inline = child_content.partition(":")
+                child_key = child_key.strip()
+                if not child_separator or not child_key:
+                    raise _HardNoTouchSyntaxError("malformed_child")
+                if child_key in value:
+                    raise _HardNoTouchSyntaxError("duplicate_child")
+                child_inline = child_inline.strip()
+                if child_inline == "[]":
+                    value[child_key] = []
+                    active_list = None
+                    list_indent = None
+                elif not child_inline:
+                    value[child_key] = []
+                    active_list = child_key
+                    list_indent = None
+                else:
+                    value[child_key] = _hard_no_touch_scalar(child_inline)
+                    active_list = None
+                    list_indent = None
+            elif indent > child_indent:
+                if active_list is None:
+                    raise _HardNoTouchSyntaxError("unexpected_nested_value")
+                if list_indent is None:
+                    list_indent = indent
+                if indent != list_indent or not child_content.startswith("-"):
+                    raise _HardNoTouchSyntaxError("malformed_list")
+                item = child_content[1:]
+                if item and not item.startswith(" "):
+                    raise _HardNoTouchSyntaxError("malformed_list")
+                assert isinstance(value[active_list], list)
+                value[active_list].append(_hard_no_touch_scalar(item))
+            else:
+                raise _HardNoTouchSyntaxError("inconsistent_indentation")
+            index += 1
+        result = value
+    if found and version_error:
+        raise _HardNoTouchSyntaxError("malformed_version")
+    return result, version
+
+
+def _collapse_leading_separators(value: str) -> str:
+    """Keep one POSIX root separator so lexical equality is implementation-stable."""
+    return os.sep + value.lstrip(os.sep) if value.startswith(os.sep) else value
+
+
+def _trusted_home(home: str | Path | None = None) -> str | None:
+    """Return one lexical absolute HOME without user-database or filesystem access."""
+    raw = os.environ.get("HOME", "") if home is None else os.fspath(home)
+    if (
+        not isinstance(raw, str)
+        or not raw
+        or "\0" in raw
+        or "\n" in raw
+        or "\r" in raw
+        or raw.startswith("~")
+        or not os.path.isabs(raw)
+    ):
+        return None
+    normalized = _collapse_leading_separators(os.path.normpath(raw))
+    return normalized if os.path.isabs(normalized) else None
+
+
+def _lexical_hard_no_touch_path(
+    value: object,
+    *,
+    home: str | None,
+    policy_entry: bool,
+) -> str | None:
+    """Normalize one path using strings only; never inspect the target."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\0" in value
+        or "\n" in value
+        or "\r" in value
+        or (policy_entry and any(character in value for character in _HARD_NO_TOUCH_GLOB_CHARS))
+    ):
+        return None
+    if value == "~":
+        if home is None:
+            return None
+        expanded = home
+    elif value.startswith("~/"):
+        if home is None:
+            return None
+        expanded = home + os.sep + value[2:]
+    elif value.startswith("~"):
+        return None
+    else:
+        expanded = value
+    if not os.path.isabs(expanded):
+        return None
+    normalized = _collapse_leading_separators(os.path.normpath(expanded))
+    if not normalized or normalized == "." or not os.path.isabs(normalized):
+        return None
+    return normalized
+
+
+def _component_root_matches(root: str, candidate: str) -> bool:
+    if root == os.sep:
+        return candidate.startswith(os.sep)
+    return candidate == root or candidate.startswith(root + os.sep)
+
+
+@dataclass(frozen=True)
+class HardNoTouchDecision:
+    """Closed pre-access classification; configured roots are never returned."""
+
+    matched: bool
+    kind: str
+    policy_valid: bool
+
+    def __post_init__(self) -> None:
+        if self.kind not in HARD_NO_TOUCH_KINDS:
+            raise ValueError("invalid hard-no-touch decision kind")
+        expected = {
+            "exact_root": (True, True),
+            "managed_namespace": (True, True),
+            "none": (False, True),
+            "invalid_policy": (True, False),
+            "invalid_candidate": (True, True),
+        }
+        if (
+            type(self.matched) is not bool
+            or type(self.policy_valid) is not bool
+            or (self.matched, self.policy_valid) != expected[self.kind]
+        ):
+            raise ValueError("inconsistent hard-no-touch decision")
+
+
+@dataclass(frozen=True)
+class HardNoTouchMatcher:
+    """Immutable lexical matcher safe to call before target/repository access."""
+
+    exact_roots: tuple[str, ...] = ()
+    managed_namespace_prefixes: tuple[str, ...] = ()
+    home: str | None = None
+    valid: bool = True
+    errors: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.valid) is not bool:
+            raise ValueError("hard-no-touch validity must be boolean")
+        normalized_home = None if self.home is None else _trusted_home(self.home)
+        if self.home is not None and normalized_home is None:
+            raise ValueError("hard-no-touch home must be lexical and absolute")
+        if isinstance(self.errors, (str, bytes)):
+            raise ValueError("hard-no-touch errors must be an immutable sequence")
+        try:
+            errors = tuple(self.errors)
+        except TypeError as exc:
+            raise ValueError("hard-no-touch errors must be an immutable sequence") from exc
+        if any(not isinstance(error, str) or not error for error in errors):
+            raise ValueError("hard-no-touch errors must be non-empty strings")
+
+        normalized_fields = []
+        for raw_values in (self.exact_roots, self.managed_namespace_prefixes):
+            if isinstance(raw_values, (str, bytes)):
+                raise ValueError("hard-no-touch roots must be path sequences")
+            try:
+                values = tuple(raw_values)
+            except TypeError as exc:
+                raise ValueError("hard-no-touch roots must be path sequences") from exc
+            normalized_values = []
+            for value in values:
+                normalized = _lexical_hard_no_touch_path(
+                    value,
+                    home=normalized_home,
+                    policy_entry=True,
+                )
+                if normalized is None or normalized != value:
+                    raise ValueError("hard-no-touch matcher roots must be normalized")
+                if normalized not in normalized_values:
+                    normalized_values.append(normalized)
+            normalized_fields.append(tuple(normalized_values))
+
+        if not self.valid and any(normalized_fields):
+            raise ValueError("invalid hard-no-touch matcher cannot carry roots")
+        if self.valid and errors:
+            raise ValueError("valid hard-no-touch matcher cannot carry errors")
+        if not self.valid and not errors:
+            errors = ("invalid_policy",)
+        object.__setattr__(self, "home", normalized_home)
+        object.__setattr__(self, "exact_roots", normalized_fields[0])
+        object.__setattr__(self, "managed_namespace_prefixes", normalized_fields[1])
+        object.__setattr__(self, "errors", tuple(sorted(set(errors))))
+
+    @classmethod
+    def empty(cls, *, home: str | Path | None = None) -> "HardNoTouchMatcher":
+        return cls(home=_trusted_home(home))
+
+    @classmethod
+    def invalid(
+        cls,
+        *errors: str,
+        home: str | Path | None = None,
+    ) -> "HardNoTouchMatcher":
+        normalized_errors = tuple(sorted(set(errors or ("invalid_policy",))))
+        return cls(home=_trusted_home(home), valid=False, errors=normalized_errors)
+
+    def classify(self, candidate: object) -> HardNoTouchDecision:
+        if not self.valid:
+            return HardNoTouchDecision(True, "invalid_policy", False)
+        normalized = _lexical_hard_no_touch_path(
+            candidate,
+            home=self.home,
+            policy_entry=False,
+        )
+        if normalized is None:
+            return HardNoTouchDecision(True, "invalid_candidate", True)
+        for root in self.exact_roots:
+            if _component_root_matches(root, normalized):
+                return HardNoTouchDecision(True, "exact_root", True)
+        for root in self.managed_namespace_prefixes:
+            if _component_root_matches(root, normalized):
+                return HardNoTouchDecision(True, "managed_namespace", True)
+        return HardNoTouchDecision(False, "none", True)
+
+    def matches(self, candidate: object) -> bool:
+        return self.classify(candidate).matched
+
+    def to_policy_value(self) -> dict[str, list[str]]:
+        """Closed normalized projection used for parity and semantic round trips."""
+        if not self.valid:
+            raise ValueError("invalid hard-no-touch matcher has no policy projection")
+        return {
+            HARD_NO_TOUCH_EXACT_ROOTS: list(self.exact_roots),
+            HARD_NO_TOUCH_MANAGED_PREFIXES: list(self.managed_namespace_prefixes),
+        }
+
+
+def hard_no_touch_matcher_from_data(
+    data: object,
+    *,
+    home: str | Path | None = None,
+) -> HardNoTouchMatcher:
+    """Validate the optional v1 field; any malformed value produces a deny-all matcher."""
+    normalized_home = _trusted_home(home)
+    if not isinstance(data, dict):
+        return HardNoTouchMatcher.invalid("policy_not_map", home=home)
+    if HARD_NO_TOUCH_FIELD not in data:
+        return HardNoTouchMatcher(home=normalized_home)
+    if str(data.get("version", 1)).strip() != "1":
+        return HardNoTouchMatcher.invalid("unsupported_version", home=home)
+    raw = data.get(HARD_NO_TOUCH_FIELD)
+    if not isinstance(raw, dict):
+        return HardNoTouchMatcher.invalid("field_not_map", home=home)
+    if set(raw) - _HARD_NO_TOUCH_KEYS:
+        return HardNoTouchMatcher.invalid("unknown_key", home=home)
+
+    errors: list[str] = []
+    normalized: dict[str, list[str]] = {
+        HARD_NO_TOUCH_EXACT_ROOTS: [],
+        HARD_NO_TOUCH_MANAGED_PREFIXES: [],
+    }
+    for key in (HARD_NO_TOUCH_EXACT_ROOTS, HARD_NO_TOUCH_MANAGED_PREFIXES):
+        values = raw.get(key, [])
+        if not isinstance(values, list):
+            errors.append(f"{key}_not_list")
+            continue
+        for item in values:
+            path = _lexical_hard_no_touch_path(
+                item,
+                home=normalized_home,
+                policy_entry=True,
+            )
+            if path is None:
+                errors.append(f"{key}_invalid_entry")
+            elif path not in normalized[key]:
+                normalized[key].append(path)
+    if errors:
+        return HardNoTouchMatcher.invalid(*errors, home=home)
+    return HardNoTouchMatcher(
+        exact_roots=tuple(normalized[HARD_NO_TOUCH_EXACT_ROOTS]),
+        managed_namespace_prefixes=tuple(
+            normalized[HARD_NO_TOUCH_MANAGED_PREFIXES]
+        ),
+        home=normalized_home,
+    )
+
+
+def hard_no_touch_matcher_from_text(
+    text: str,
+    *,
+    home: str | Path | None = None,
+) -> HardNoTouchMatcher:
+    """Strictly ingest the new field while legacy policy keys keep their parser."""
+    try:
+        value, version = _hard_no_touch_value_from_text(text)
+    except (TypeError, ValueError):
+        return HardNoTouchMatcher.invalid("field_syntax", home=home)
+    strict_data: dict[str, object] = {
+        "version": 1 if version is _HARD_NO_TOUCH_ABSENT else version
+    }
+    if value is not _HARD_NO_TOUCH_ABSENT:
+        strict_data[HARD_NO_TOUCH_FIELD] = value
+    return hard_no_touch_matcher_from_data(strict_data, home=home)
+
+
+def load_hard_no_touch_matcher(
+    path: str | Path,
+    *,
+    home: str | Path | None = None,
+) -> HardNoTouchMatcher:
+    """Read only the trusted policy file; unreadable/malformed policy fails closed."""
+    try:
+        return hard_no_touch_matcher_from_text(
+            _read_regular_text(path),
+            home=home,
+        )
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return HardNoTouchMatcher.invalid("policy_unreadable", home=home)
+
+
 def _resolve_modes(data: dict, policy_path: str | Path) -> tuple[dict, str]:
     """Resolve the explicit modes map + default_mode from inline policy values and an
     optional `modes_file:` pointer.
@@ -187,6 +716,9 @@ class PolicyConfig:
     read_only_paths: list[str] = field(default_factory=list)
     overrides_include: list[str] = field(default_factory=list)
     overrides_exclude: list[str] = field(default_factory=list)
+    hard_no_touch_paths: HardNoTouchMatcher = field(
+        default_factory=HardNoTouchMatcher.empty
+    )
     # Explicit per-repo modes (rel-glob -> on|off). Empty by default so a host
     # that configures nothing behaves byte-for-byte as before.
     modes: dict = field(default_factory=dict)
@@ -195,11 +727,38 @@ class PolicyConfig:
     default_mode: str = "on"
 
     @classmethod
-    def load(cls, path: str | Path) -> "PolicyConfig":
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        home: str | Path | None = None,
+    ) -> "PolicyConfig":
         p = Path(path)
         if not p.exists():
-            return cls()
-        data = parse_mini_yaml(p.read_text(encoding="utf-8"))
+            return cls(
+                hard_no_touch_paths=HardNoTouchMatcher.invalid(
+                    "policy_unreadable",
+                    home=home,
+                )
+            )
+        text = p.read_text(encoding="utf-8")
+        data = parse_mini_yaml(text)
+        return cls._from_data(
+            data,
+            path,
+            home=home,
+            hard_no_touch_paths=hard_no_touch_matcher_from_text(text, home=home),
+        )
+
+    @classmethod
+    def _from_data(
+        cls,
+        data: dict,
+        path: str | Path,
+        *,
+        home: str | Path | None = None,
+        hard_no_touch_paths: HardNoTouchMatcher | None = None,
+    ) -> "PolicyConfig":
         detectors = data.get("detectors", {}) if isinstance(data.get("detectors"), dict) else {}
         overrides = data.get("overrides", {}) if isinstance(data.get("overrides"), dict) else {}
         modes, default_mode = _resolve_modes(data, path)
@@ -215,9 +774,28 @@ class PolicyConfig:
             read_only_paths=list(detectors.get("read_only_paths", []) or []),
             overrides_include=list(overrides.get("include", []) or []),
             overrides_exclude=list(overrides.get("exclude", []) or []),
+            hard_no_touch_paths=(
+                hard_no_touch_paths
+                if hard_no_touch_paths is not None
+                else hard_no_touch_matcher_from_data(data, home=home)
+            ),
             modes=modes,
             default_mode=default_mode,
         )
+
+
+def hard_no_touch_decision(
+    path: object,
+    cfg: PolicyConfig,
+) -> HardNoTouchDecision:
+    """Classify before repository access; an invalid config object fails closed."""
+    if not isinstance(cfg, PolicyConfig):
+        return HardNoTouchDecision(True, "invalid_policy", False)
+    return cfg.hard_no_touch_paths.classify(path)
+
+
+def is_hard_no_touch(path: object, cfg: PolicyConfig) -> bool:
+    return hard_no_touch_decision(path, cfg).matched
 
 
 def _match_any(rel: str, patterns: list[str]) -> bool:

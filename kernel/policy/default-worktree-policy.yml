@@ -42,6 +42,15 @@ default_mode: on
 include: []
 exclude: []
 
+# Host-supplied paths that a consumer must classify BEFORE opening a child
+# directory or repository. Both kinds match the normalized root and descendants
+# on path-component boundaries. Matching is lexical only: trusted `~` expansion
+# plus `.`/`..`/separator normalization, with no target filesystem or Git access.
+# Concrete host values belong only in the machine-local host overlay.
+hard_no_touch_paths:
+  exact_roots: []
+  managed_namespace_prefixes: []
+
 # Host-supplied absolute or ~/absolute exact paths/globs that lifecycle
 # reconciliation and integrity repair must preserve. No product instances.
 lifecycle_no_touch: []

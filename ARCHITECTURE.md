@@ -195,7 +195,7 @@ stop; the Cursor chat remains open because no chat-close API exists.
 | `paths` | XDG state/recovery/detection/lock dirs; `700`/`600` perms (S4); local-disk-only assertion (WAL safety, H6) |
 | `identity` | Stable worktree identity = hash(path + branch + common-dir + boot-id); **never** a bare pid |
 | `gitutil` | Thin, testable `git` wrapper (no shelling pitfalls) |
-| `policy` | Generic repo classifier: include/exclude globs + governed-marker & foreign-hook detectors + per-repo mode resolution (`default_mode` + a `modes_file`), all supplied by a host policy file (mirror of `kernel/lib/awa_policy.py`) |
+| `policy` | Generic repo classifier plus the pre-access `hard_no_touch_paths` lexical matcher: include/exclude globs + governed-marker & foreign-hook detectors + per-repo mode resolution (`default_mode` + a `modes_file`), all supplied by a host policy file (mirror of `kernel/lib/awa_policy.py`) |
 | `modes` | Generic mode-management verbs (`list`/`get`/`set`/`remove`/`repair`/`sync`/`doctor`) over the tool-owned `awa-modes/v1` modes file; atomic + schema-validated + path-scoped (never touches a repo, git, or a primary checkout) |
 | `lock` | Per-common-dir advisory flock — the real write-serialization/collision boundary |
 | `state` | SQLite (WAL) store: leases, append-only **redacted** audit events, detections, quarantine refs, recovery artifacts (+ Phase-3 `recovery_source_deleted` age clock, `recovery_tombstones`, maintenance meta) |
@@ -474,6 +474,27 @@ mutation denies with `deny_shape` present and that `afterFileEdit` allows (obser
 generic kernel — e.g. from a host's `_ops/` into `KleinPerkins/awa/kernel/` — needs no contract
 bump, because location was never the interface. `kernel/checks/awa-contract-freeze.sh` enforces the
 behavior floor against the live shims *wherever they are installed* (role-resolved via `AWA_HOME`).
+
+## Pre-access hard-no-touch policy
+
+Host policy version 1 has one additive optional `hard_no_touch_paths` map with
+`exact_roots` and `managed_namespace_prefixes` lists. Both entry kinds protect their normalized
+root and descendants on component boundaries, while the typed decision preserves which kind
+matched. Field absence is a valid empty matcher and leaves old policies unchanged.
+
+`kernel/lib/awa_policy.py` owns the engine-off implementation;
+`engine/policy.py` independently mirrors it. Both produce frozen matchers and closed decisions
+(`exact_root | managed_namespace | none | invalid_policy | invalid_candidate`). Invalid policy or
+candidate input is matched/fail-closed. `policy-check` rejects a present malformed field.
+
+Normalization is string-only: trusted `~` expansion plus lexical separator, `.`, and `..`
+normalization. Candidate classification performs no `realpath`, resolve, stat/lstat, open/read,
+directory traversal, Git, or subprocess operation. It therefore must run before a consumer touches
+a child directory or repository. Lexical aliases are independent and must be listed separately.
+
+This is not a new repository classification. Existing include/exclude, mode, read-only/reference,
+artifact, and lifecycle-only no-touch behavior stays distinct. AWA owns the generic primitive;
+the host overlay owns concrete values; downstream consumers own their pre-access call sites.
 
 ## Zero-link (the product names no organization)
 
