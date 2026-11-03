@@ -246,57 +246,103 @@ def _config_value(raw):
         if escaped:
             if c not in escapes:
                 raise AssociationError("physical_identity_unavailable")
-            out.append(escapes[c]); escaped = False
+            out.append((escapes[c], True)); escaped = False
         elif c == "\\":
             escaped = True
         elif c == '"':
+            # An empty quoted fragment still ends outer whitespace trimming.
+            out.append(("", True))
             quoted = not quoted
         elif c in "#;" and not quoted:
             break
         else:
-            out.append(c)
+            out.append((c, quoted))
     if quoted or escaped:
         raise AssociationError("physical_identity_unavailable")
-    return "".join(out).strip()
+    # Git trims only unquoted outer whitespace. Quoted/escaped whitespace is
+    # part of the value and must not turn an invalid boolean into "true".
+    start, end = 0, len(out)
+    while start < end and out[start][0] in " \t" and not out[start][1]:
+        start += 1
+    while end > start and out[end - 1][0] in " \t" and not out[end - 1][1]:
+        end -= 1
+    return "".join(c for c, quoted in out[start:end])
 
 
-def _config_supported(raw):
-    """Closed identity-affecting config subset; no include is ever followed."""
-    section, version, object_format = None, None, "sha1"
+def _config_entries(raw, *, worktree=False):
+    """Parse the bounded grammar without evaluating or following any value."""
+    section, subsection = None, False
     decoded = raw.decode("utf-8")
     if any(ord(c) < 32 and c not in "\n\t" or 127 <= ord(c) <= 159 for c in decoded):
         raise AssociationError("physical_identity_unavailable")
     for line in decoded.split("\n"):
-        line = line.strip()
+        line = line.strip(" \t")
         if not line or line.startswith(("#", ";")):
             continue
         if line.endswith("\\"):
             raise AssociationError("physical_identity_unavailable")
         if line.startswith("["):
-            m = re.fullmatch(r'\[([A-Za-z][A-Za-z0-9-]*)(?:\s+"(?:[^"\\]|\\["\\])*")?\]\s*(?:[#;].*)?', line)
+            m = re.fullmatch(r'\[([A-Za-z][A-Za-z0-9-]*)(?:[ \t]+"(?:[^"\\]|\\["\\])*")?\][ \t]*(?:[#;].*)?', line)
             if not m:
                 raise AssociationError("physical_identity_unavailable")
             section = m[1].lower()
+            subsection = '"' in line.split("]", 1)[0]
             if section in ("include", "includeif"):
                 raise AssociationError("physical_identity_unavailable")
+            if worktree and (section != "codex" or subsection):
+                raise AssociationError("physical_identity_unavailable")
         else:
-            m = re.fullmatch(r"([A-Za-z][A-Za-z0-9-]*)(?:\s*=\s*(.*))?", line)
+            m = re.fullmatch(r"([A-Za-z][A-Za-z0-9-]*)(?:[ \t]*=[ \t]*(.*))?", line)
             if not m or section is None:
                 raise AssociationError("physical_identity_unavailable")
-            key, val = m[1].lower(), _config_value(m[2] or "").lower()
-            if section == "core" and (key == "worktree" or key == "bare" and val != "false"):
+            yield section, subsection, m[1].lower(), _config_value(m[2] or "")
+
+
+def _config_supported(raw):
+    """Closed identity-affecting common config subset; no includes."""
+    version, object_format, worktree_config = None, "sha1", False
+    for section, subsection, key, value in _config_entries(raw):
+        val = value.lower()
+        if section == "core" and (key == "worktree" or key == "bare" and val != "false"):
+            raise AssociationError("physical_identity_unavailable")
+        if section in ("core", "extensions") and subsection:
+            raise AssociationError("physical_identity_unavailable")
+        if section == "core" and key == "repositoryformatversion":
+            if val not in ("0", "1"):
                 raise AssociationError("physical_identity_unavailable")
-            if section == "core" and key == "repositoryformatversion":
-                if val not in ("0", "1"):
-                    raise AssociationError("physical_identity_unavailable")
-                version = val
-            if section == "extensions" and not (key == "objectformat" and val in ("sha1", "sha256")):
-                raise AssociationError("physical_identity_unavailable")
-            if section == "extensions" and key == "objectformat":
+            version = val
+        if section == "extensions":
+            if key == "objectformat" and val in ("sha1", "sha256"):
                 object_format = val
+            elif key == "worktreeconfig" and val in ("true", "false"):
+                worktree_config = val == "true"
+            else:
+                raise AssociationError("physical_identity_unavailable")
     if version is None or object_format == "sha256" and version != "1":
         raise AssociationError("physical_identity_unavailable")
-    return 64 if object_format == "sha256" else 40
+    return (64 if object_format == "sha256" else 40), worktree_config
+
+
+def _worktree_config(access, path, enabled):
+    """Optional owned metadata only; never access Codex's referenced path."""
+    access.check(path)
+    with access.directory(os.path.dirname(path)) as directory:
+        try:
+            before = os.stat(os.path.basename(path), dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if (not enabled or not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
+                or before.st_mode & 0o022 or before.st_nlink != 1):
+            raise AssociationError("physical_identity_unavailable")
+        raw = access.read(path, FILE_CAP, parent_fd=directory)
+        after = os.stat(os.path.basename(path), dir_fd=directory, follow_symlinks=False)
+        identity = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns, s.st_uid, s.st_mode)
+        if identity(before) != identity(after):
+            raise AssociationError("identity_changed")
+        for section, subsection, key, value in _config_entries(raw, worktree=True):
+            if section != "codex" or subsection or key != "localenvironmentconfigpath":
+                raise AssociationError("physical_identity_unavailable")
+        return raw, identity(after)
 
 
 def probe(request, matcher):
@@ -323,9 +369,8 @@ def probe(request, matcher):
             raise AssociationError("physical_identity_unavailable")
         common_id = access.directory_identity(common)
         config = access.read(common + "/config", FILE_CAP)
-        oid_length = _config_supported(config)
-        if access.exists(gitdir + "/config.worktree"):
-            raise AssociationError("physical_identity_unavailable")
+        oid_length, worktree_enabled = _config_supported(config)
+        worktree_config = _worktree_config(access, gitdir + "/config.worktree", worktree_enabled)
         cwd = request["before"]["current_workspace"]
         if not inside(root, cwd):
             raise AssociationError("association_conflict")
@@ -367,7 +412,8 @@ def probe(request, matcher):
         if (access.read(root + "/.git", 8192).decode("utf-8") != locator
                 or access.read(gitdir + "/commondir", 8192) != common_raw
                 or access.read(gitdir + "/gitdir", 8192) != back_raw
-                or access.read(common + "/config", FILE_CAP) != config):
+                or access.read(common + "/config", FILE_CAP) != config
+                or _worktree_config(access, gitdir + "/config.worktree", worktree_enabled) != worktree_config):
             raise AssociationError("identity_changed")
         out = {"root": root, "git_dir": gitdir, "common_dir": common, "head": head_raw, "branch": branch}
         for prefix, ident in (("root", root_id), ("git", git_id), ("common", common_id)):
