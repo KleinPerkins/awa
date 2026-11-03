@@ -81,6 +81,7 @@ lands — this directory already follows the reference shape it derived from.
 | [0021](0021-verification-and-discovery-velocity.md) | Accepted — 2026-08-29 | Adopt one measured verification DAG with explicit feedback/authority lanes, evidence-only receipts, equivalence-gated process isolation, independent fixtures, and display-only discovery optimization; narrowly supersede ADR 0020's guard-byte freeze only for equivalence-gated invocation-local probe collection, never guard behavior. |
 | [0022](0022-two-worker-verification-default.md) | Accepted — 2026-08-30 | Make two process-isolated module workers the ordinary verification default after the owner accepted M2's equivalent, repeatable 22.376% gain; keep explicit serial fallback and all failure, cleanup, receipt, inventory, and dashboard guarantees. |
 | [0023](0023-native-entry-registration-and-honest-worktree-metrics.md) | Accepted — 2026-09-23 | Add fail-open exact post-`sessionStart` adoption/attestation and private native-entry evidence for native Cursor worktrees; seed read-only lifecycle discovery from observations and report computed linked/managed/active/problem populations without changing cleanup authority. |
+| [0027](0027-hard-no-touch-host-policy.md) | Accepted — 2026-10-06 | Add an optional version-1 hard-no-touch host-policy field with immutable kernel/engine lexical matchers, component-boundary roots, fail-closed malformed input, and zero target access. |
 
 ## Related conventions
 
