@@ -90,6 +90,7 @@ lands — this directory already follows the reference shape it derived from.
 | [0030](0030-codex-association-registration.md) | Accepted | Codex association registration |
 | [0031](0031-one-time-administrator-release-route-for-awa-v1-8-2.md) | Accepted; initial linear-history bootstrap ordering superseded by [0032](0032-bootstrap-exact-awa-v1-8-1-history-before-linear-enforcement.md) | One-time administrator release route for AWA v1.8.2 |
 | [0032](0032-bootstrap-exact-awa-v1-8-1-history-before-linear-enforcement.md) | Accepted | Bootstrap exact AWA v1.8.1 history before linear enforcement |
+| [0033](0033-adopt-the-released-lexical-hard-no-touch-classifier-api-for-external-consumers.md) | Accepted | Adopt the released lexical hard-no-touch classifier API for external consumers |
 
 ## Related conventions
 
