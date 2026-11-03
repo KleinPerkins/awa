@@ -207,7 +207,7 @@ class AssociationTest(unittest.TestCase):
         rr = self.request(root=alias)
         self.assertEqual(self.send(rr)[0]["reason"], "physical_identity_unavailable")
         config = pathlib.Path(edge["common_dir"]) / "config"; saved = config.read_bytes()
-        for addition in ['\n[include]\n path = /unrelated/never-access\n', '\n[core]\n worktree = /unrelated/never-access\n', '\n[extensions]\n worktreeConfig = true\n',
+        for addition in ['\n[include]\n path = /unrelated/never-access\n', '\n[core]\n worktree = /unrelated/never-access\n', '\n[extensions]\n unsupported = true\n',
                          '\n[core]\n repositoryformatversion = 99\n', '\n[remote "fixture"]\n url = "unterminated\n', '\n[remote "fixture"]\n url = bad\x00value\n']:
             config.write_bytes(saved + addition.encode())
             with self.subTest(addition=addition):
@@ -216,6 +216,142 @@ class AssociationTest(unittest.TestCase):
         back = pathlib.Path(edge["git_dir"]) / "gitdir"; back.write_text(str(self.primary / ".git") + "\n")
         self.assertEqual(self.send(self.request())[0]["reason"], "physical_identity_unavailable")
         self.assertFalse(self.record_path().exists())
+
+    def worktree_config_fixture(self):
+        request = abi.parse_request(abi.canonical(self.request()), "record", self.now)
+        edge = abi.probe(request, self.matcher)
+        common_config = pathlib.Path(edge["common_dir"]) / "config"
+        common_config.write_bytes(common_config.read_bytes() + b"\n[extensions]\n worktreeConfig = true\n")
+        return request, edge, pathlib.Path(edge["git_dir"]) / "config.worktree"
+
+    def test_codex_worktree_config_matches_git_without_following_values_or_starting_helpers(self):
+        request, expected, config = self.worktree_config_fixture()
+        self.assertEqual(abi.probe(request, self.matcher), expected)  # Optional file absent.
+        target = str(self.root / "never-read-environment.toml")
+        for value in [target, '"' + target + '" # comment', '""']:
+            config.write_text('[Codex]\n LocalEnvironmentConfigPath = ' + value + '\n')
+            self.assertEqual(self.git("-C", str(self.wt), "rev-parse", "--show-toplevel"), str(self.wt))
+            self.assertEqual(self.git("-C", str(self.wt), "rev-parse", "--absolute-git-dir"), expected["git_dir"])
+            original = os.open
+            def guarded(path, *args, **kwargs):
+                self.assertNotEqual(str(path), target)
+                self.assertNotEqual(str(path), os.path.basename(target))
+                return original(path, *args, **kwargs)
+            with mock.patch("os.open", side_effect=guarded), mock.patch("subprocess.Popen", side_effect=AssertionError("no helpers")):
+                self.assertEqual(abi.probe(request, self.matcher), expected)
+        self.positive()
+
+    def test_worktree_config_rejects_identity_indirection_and_unknown_grammar(self):
+        request, edge, config = self.worktree_config_fixture()
+        for raw in [b'[core]\n worktree = /unrelated/never-access\n', b'[core]\n bare = false\n',
+                    b'[extensions]\n objectFormat = sha256\n', b'[include]\n path = /unrelated/never-access\n',
+                    b'[includeIf "gitdir:/x"]\n path = /unrelated/never-access\n', b'[core]\n',
+                    b'[codex "subsection"]\n localEnvironmentConfigPath = x\n', b'[codex]\n unknown = x\n',
+                    b'[codex]\n localEnvironmentConfigPath = "unterminated\n',
+                    b'[codex]\n localEnvironmentConfigPath = x\\\ny\n', b'[codex]\n localEnvironmentConfigPath = x\x00y\n',
+                    b'[codex]\n localEnvironmentConfigPath = \xff\n']:
+            config.write_bytes(raw)
+            with self.subTest(raw=raw), self.assertRaisesRegex(abi.AssociationError, "physical_identity_unavailable"):
+                abi.probe(request, self.matcher)
+        config.write_bytes(b'[codex]\n localEnvironmentConfigPath = /unrelated/never-access\n')
+        common = pathlib.Path(edge["common_dir"]) / "config"
+        original = common.read_bytes()
+        for enabled in [b"false", b"invalid"]:
+            common.write_bytes(original.replace(b"worktreeConfig = true", b"worktreeConfig = " + enabled))
+            with self.assertRaisesRegex(abi.AssociationError, "physical_identity_unavailable"):
+                abi.probe(request, self.matcher)
+
+    def test_worktree_config_rejects_unsafe_files_and_foreign_ownership(self):
+        request, edge, config = self.worktree_config_fixture()
+        benign = b'[codex]\n localEnvironmentConfigPath = /unrelated/never-access\n'
+        for mode in [0o620, 0o602]:
+            config.write_bytes(benign); config.chmod(mode)
+            with self.subTest(mode=mode), self.assertRaisesRegex(abi.AssociationError, "physical_identity_unavailable"):
+                abi.probe(request, self.matcher)
+        config.chmod(0o600)
+        with mock.patch("os.getuid", return_value=os.getuid() + 1), self.assertRaisesRegex(abi.AssociationError, "physical_identity_unavailable"):
+            abi.probe(request, self.matcher)
+        config.write_bytes(b"#" * (abi.FILE_CAP + 1))
+        with self.assertRaisesRegex(abi.AssociationError, "physical_identity_unavailable"):
+            abi.probe(request, self.matcher)
+        config.write_bytes(benign)
+        held = config.with_name("held-config"); config.rename(held)
+        for kind in ["symlink", "hardlink", "fifo", "directory"]:
+            if kind == "symlink": config.symlink_to(held)
+            elif kind == "hardlink": os.link(held, config)
+            elif kind == "fifo": os.mkfifo(config)
+            else: config.mkdir()
+            with self.subTest(kind=kind), self.assertRaisesRegex(abi.AssociationError, "physical_identity_unavailable"):
+                abi.probe(request, self.matcher)
+            if kind == "directory": config.rmdir()
+            else: config.unlink()
+        self.assertEqual(held.read_bytes(), benign)
+
+    def test_worktree_extension_boolean_matches_git_quoted_whitespace_rejection(self):
+        request, edge, config = self.worktree_config_fixture()
+        common = pathlib.Path(edge["common_dir"]) / "config"
+        original = common.read_bytes()
+        for value in [b'" true "', b'"true\\t"', b'"true\\n"', b'\xc2\xa0true', b'true\xc2\xa0',
+                      b'true ""', b'"true" ""', b'true\t"" # comment']:
+            common.write_bytes(original.replace(b"worktreeConfig = true", b"worktreeConfig = " + value))
+            with self.subTest(value=value):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    self.git("-C", str(self.wt), "rev-parse", "--absolute-git-dir")
+                with self.assertRaisesRegex(abi.AssociationError, "physical_identity_unavailable"):
+                    abi.probe(request, self.matcher)
+        for value in [b'"true"', b' true # comment', b'\ttrue\t']:
+            common.write_bytes(original.replace(b"worktreeConfig = true", b"worktreeConfig = " + value))
+            self.assertEqual(self.git("-C", str(self.wt), "rev-parse", "--absolute-git-dir"), edge["git_dir"])
+            self.assertEqual(abi.probe(request, self.matcher), edge)
+        # Differential coverage of concatenated/empty quoted fragments. The
+        # supported subset may refuse valid Git values, but never accepts a
+        # boolean that Git rejects or interprets differently.
+        atoms = [b'true', b'false', b'"true"', b'"false"', b'""', b'" "']
+        for left in atoms:
+            for right in atoms:
+                for separator in [b'', b' ', b'\t', b'\xc2\xa0']:
+                    value = left + separator + right
+                    raw = original.replace(b"worktreeConfig = true", b"worktreeConfig = " + value)
+                    common.write_bytes(raw)
+                    try:
+                        oid_length, enabled = abi._config_supported(raw)
+                    except abi.AssociationError:
+                        continue
+                    with self.subTest(concatenated=value):
+                        self.assertEqual(self.git("config", "--file", str(common), "--bool", "extensions.worktreeConfig"),
+                                         "true" if enabled else "false")
+
+    def test_worktree_config_presence_bytes_and_inode_are_rechecked(self):
+        request, edge, config = self.worktree_config_fixture()
+        benign = b'[codex]\n localEnvironmentConfigPath = /unrelated/never-access\n'
+        original = Access.read
+        for change in ["appear", "disappear", "bytes", "inode"]:
+            if config.exists(): config.unlink()
+            if change != "appear": config.write_bytes(benign)
+            count = 0
+            def drift(access, path, *args, **kwargs):
+                nonlocal count
+                # Change once between the two physical configuration observations.
+                if path == edge["common_dir"] + "/config" and kwargs.get("parent_fd") is None:
+                    count += 1
+                    if count == 2:
+                        if change in ("disappear", "inode"): config.unlink()
+                        if change != "disappear": config.write_bytes(benign + (b"# changed\n" if change == "bytes" else b""))
+                return original(access, path, *args, **kwargs)
+            with self.subTest(change=change), mock.patch.object(Access, "read", drift), self.assertRaisesRegex(abi.AssociationError, "identity_changed"):
+                abi.probe(request, self.matcher)
+
+    def test_worktree_config_policy_refuses_before_file_access(self):
+        request, edge, config = self.worktree_config_fixture()
+        config.write_text('[codex]\n localEnvironmentConfigPath = /unrelated/never-access\n')
+        matcher = hard_no_touch_matcher_from_data({"version": 1, "hard_no_touch_paths": {"exact_roots": [str(config)], "managed_namespace_prefixes": []}})
+        original = os.open
+        def guarded(path, *args, **kwargs):
+            self.assertNotEqual(str(path), str(config))
+            self.assertNotEqual(str(path), config.name)
+            return original(path, *args, **kwargs)
+        with mock.patch("os.open", side_effect=guarded), self.assertRaisesRegex(abi.AssociationError, "policy_refused"):
+            abi.probe(request, matcher)
 
     def test_probe_rechecked_under_lock_binding_drift_never_promotes(self):
         self.positive()
