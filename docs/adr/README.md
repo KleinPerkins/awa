@@ -88,7 +88,8 @@ lands — this directory already follows the reference shape it derived from.
 | [0028](0028-govern-v1-8-maintenance-release-line.md) | Accepted; controller/merge dependency superseded for v1.8.2 only by [0031](0031-one-time-administrator-release-route-for-awa-v1-8-2.md) | Govern one protected `release/1.8` line from exact v1.8.1 for the PR #184 safety backport, with controller/ruleset-before-ref gates, reviewer-App-only merge, separate Release GO, one-way provenance, and explicit EOL. |
 | [0029](0029-native-codex-interoperability-boundary.md) | Draft — 2026-10-28 | Propose a host-tagged Codex identity and evidence boundary, preserving explicit owner choice between bounded registration with visible residuals and full-parity unsupported status; no implementation authority. |
 | [0030](0030-codex-association-registration.md) | Accepted | Codex association registration |
-| [0031](0031-one-time-administrator-release-route-for-awa-v1-8-2.md) | Accepted | One-time administrator release route for AWA v1.8.2 |
+| [0031](0031-one-time-administrator-release-route-for-awa-v1-8-2.md) | Accepted; initial linear-history bootstrap ordering superseded by [0032](0032-bootstrap-exact-awa-v1-8-1-history-before-linear-enforcement.md) | One-time administrator release route for AWA v1.8.2 |
+| [0032](0032-bootstrap-exact-awa-v1-8-1-history-before-linear-enforcement.md) | Accepted | Bootstrap exact AWA v1.8.1 history before linear enforcement |
 
 ## Related conventions
 
