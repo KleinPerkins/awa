@@ -8,6 +8,7 @@
 #
 #   bash ./install.sh                 install/reconcile (idempotent)
 #   bash ./install.sh --repair        force re-copy the runtime + re-wire hooks/mcp
+#   bash ./install.sh --runtime-only  advance an existing compatible external-owner runtime only
 #   bash ./install.sh --doctor        read-only health check of the install
 #   bash ./install.sh --check         CI-safe static preflight (no writes to $HOME)
 #   bash ./install.sh --uninstall [--keep-state]   remove the install (--keep-state preserves recovery state)
@@ -380,24 +381,20 @@ persist_hook_owner() {
   chmod 600 "$HOOK_OWNER_FILE" 2>/dev/null || awa_die "cannot protect hook-owner selection"
 }
 
-do_install() {
-  local force="${1:-0}"
-  local selected_hook_owner resolve_rc
-  if selected_hook_owner="$(awa_hook_owner_resolve "$HOOK_OWNER_FILE" "$POINTER")"; then
-    :
-  else
-    resolve_rc=$?
-    return "$resolve_rc"
-  fi
-
+copy_runtime() {
   awa_log "installing AWA runtime -> $RUNTIME"
   for d in "${COPY_TREES[@]}"; do
-    [ -d "$SRC_ROOT/$d" ] && awa_sync_tree "$SRC_ROOT/$d" "$RUNTIME/$d"
+    if [ -d "$SRC_ROOT/$d" ]; then
+      awa_sync_tree "$SRC_ROOT/$d" "$RUNTIME/$d" || return $?
+    fi
   done
-  mkdir -p "$RUNTIME"
+  mkdir -p "$RUNTIME" || return $?
   for f in "${COPY_FILES[@]}"; do
-    [ -f "$SRC_ROOT/$f" ] && install -m 0644 "$SRC_ROOT/$f" "$RUNTIME/$f" 2>/dev/null || \
-      { [ -f "$SRC_ROOT/$f" ] && cp "$SRC_ROOT/$f" "$RUNTIME/$f"; }
+    if [ -f "$SRC_ROOT/$f" ]; then
+      if ! install -m 0644 "$SRC_ROOT/$f" "$RUNTIME/$f" 2>/dev/null; then
+        cp "$SRC_ROOT/$f" "$RUNTIME/$f" || return $?
+      fi
+    fi
   done
   # Preserve executability of shims.
   chmod +x "$RUNTIME"/install.sh "$RUNTIME"/bootstrap.sh 2>/dev/null || true
@@ -410,6 +407,101 @@ do_install() {
   # Host scheduling/activation stays exclusively with local-jobs.
   validate_integrity_product_assets "$RUNTIME" || \
     awa_die "installed integrity product assets are missing or invalid"
+
+}
+
+resolve_source_commit() {
+  AWA_UPDATE_SOURCE="$SRC_ROOT" python3 - <<'PY'
+import os
+import re
+import subprocess
+import sys
+
+try:
+    environment = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    environment.update(GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_NOSYSTEM="1",
+                       GIT_CONFIG_GLOBAL="/dev/null", GIT_TERMINAL_PROMPT="0",
+                       GIT_NO_LAZY_FETCH="1")
+    commit = subprocess.check_output(
+        ["git", "-C", os.environ["AWA_UPDATE_SOURCE"], "rev-parse", "--verify", "HEAD"],
+        env=environment, stderr=subprocess.DEVNULL, timeout=10,
+    ).decode("ascii").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError
+    print(commit)
+except (OSError, ValueError, subprocess.SubprocessError):
+    print("awa-install: cannot verify the runtime update source revision", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+write_release_pointer() {
+  local selected_hook_owner="$1"
+  local default_policy="$RUNTIME/kernel/policy/default-worktree-policy.yml"
+  # Self-describing release pointer. `installed_at` is preserved across re-installs whose
+  # identity (version/commit/runtime/source/policy) is unchanged, so a re-install is a no-op.
+  local version commit contract_sha256
+  version="$(awa_engine_version "$RUNTIME")"
+  if [ -n "${2:-}" ]; then
+    commit="$(resolve_source_commit)" || return $?
+    if [ "$commit" != "$2" ]; then
+      awa_warn "source revision changed; release pointer was not advanced. Restore the captured runtime before use"
+      return 1
+    fi
+  else
+    commit="$(git -C "$SRC_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+  fi
+  contract_sha256="$(awa_sha256_file "$RUNTIME/contracts/awa-contract.v1.json")" || \
+    awa_die "cannot digest installed hook-owner contract"
+  AWA_PTR="$POINTER" AWA_V="$version" AWA_COMMIT="$commit" AWA_SRC="$SRC_ROOT" \
+  AWA_RUNTIME="$RUNTIME" AWA_POL="$default_policy" \
+  AWA_HOOK_OWNER_MODE="$selected_hook_owner" AWA_HOOK_OWNER_SHA256="$contract_sha256" \
+  python3 - <<'PY' || return $?
+import datetime, json, os
+ptr = os.environ["AWA_PTR"]
+identity = {
+    "schema": "awa-release-pointer/v1",
+    "version": os.environ["AWA_V"],
+    "source": os.environ["AWA_SRC"],
+    "commit": os.environ["AWA_COMMIT"],
+    "runtime": os.environ["AWA_RUNTIME"],
+    "policy": os.environ["AWA_POL"],
+    "hook_owner_contract": "awa-hook-owner/v1",
+    "hook_owner_mode": os.environ["AWA_HOOK_OWNER_MODE"],
+    "hook_owner_contract_sha256": os.environ["AWA_HOOK_OWNER_SHA256"],
+}
+installed_at = None
+if os.path.exists(ptr):
+    try:
+        cur = json.load(open(ptr))
+        if all(cur.get(k) == v for k, v in identity.items()):
+            installed_at = cur.get("installed_at")  # unchanged identity -> keep timestamp
+    except Exception:
+        pass
+if installed_at is None:
+    installed_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+out = dict(identity)
+out["installed_at"] = installed_at
+os.makedirs(os.path.dirname(ptr), exist_ok=True)
+new = json.dumps(out, indent=2) + "\n"
+old = open(ptr).read() if os.path.exists(ptr) else None
+if old != new:
+    open(ptr, "w").write(new)
+PY
+  awa_log "wrote release pointer -> $POINTER (version $version)"
+}
+
+do_install() {
+  local force="${1:-0}"
+  local selected_hook_owner resolve_rc
+  if selected_hook_owner="$(awa_hook_owner_resolve "$HOOK_OWNER_FILE" "$POINTER")"; then
+    :
+  else
+    resolve_rc=$?
+    return "$resolve_rc"
+  fi
+
+  copy_runtime || return $?
 
   local default_policy="$RUNTIME/kernel/policy/default-worktree-policy.yml"
   mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR" 2>/dev/null || true
@@ -472,54 +564,205 @@ AWA_GOVERNED_ROOT=${governed_root}"
 
   configure_dashboard_refresh "$host_policy"
 
-  # Self-describing release pointer. `installed_at` is preserved across re-installs whose
-  # identity (version/commit/runtime/source/policy) is unchanged, so a re-install is a no-op.
-  local version commit contract_sha256
-  version="$(awa_engine_version "$RUNTIME")"
-  commit="$(git -C "$SRC_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
-  contract_sha256="$(awa_sha256_file "$RUNTIME/contracts/awa-contract.v1.json")" || \
-    awa_die "cannot digest installed hook-owner contract"
-  AWA_PTR="$POINTER" AWA_V="$version" AWA_COMMIT="$commit" AWA_SRC="$SRC_ROOT" \
-  AWA_RUNTIME="$RUNTIME" AWA_POL="$default_policy" \
-  AWA_HOOK_OWNER_MODE="$selected_hook_owner" AWA_HOOK_OWNER_SHA256="$contract_sha256" \
-  python3 - <<'PY'
-import datetime, json, os
-ptr = os.environ["AWA_PTR"]
-identity = {
-    "schema": "awa-release-pointer/v1",
-    "version": os.environ["AWA_V"],
-    "source": os.environ["AWA_SRC"],
-    "commit": os.environ["AWA_COMMIT"],
-    "runtime": os.environ["AWA_RUNTIME"],
-    "policy": os.environ["AWA_POL"],
-    "hook_owner_contract": "awa-hook-owner/v1",
-    "hook_owner_mode": os.environ["AWA_HOOK_OWNER_MODE"],
-    "hook_owner_contract_sha256": os.environ["AWA_HOOK_OWNER_SHA256"],
-}
-installed_at = None
-if os.path.exists(ptr):
-    try:
-        cur = json.load(open(ptr))
-        if all(cur.get(k) == v for k, v in identity.items()):
-            installed_at = cur.get("installed_at")  # unchanged identity -> keep timestamp
-    except Exception:
-        pass
-if installed_at is None:
-    installed_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-out = dict(identity)
-out["installed_at"] = installed_at
-os.makedirs(os.path.dirname(ptr), exist_ok=True)
-new = json.dumps(out, indent=2) + "\n"
-old = open(ptr).read() if os.path.exists(ptr) else None
-if old != new:
-    open(ptr, "w").write(new)
-PY
-  awa_log "wrote release pointer -> $POINTER (version $version)"
+  write_release_pointer "$selected_hook_owner" || return $?
   if [ "$force" = "1" ]; then
     awa_log "(--repair) forced re-copy complete."
   fi
   awa_log "install OK. Source '$ENV_FILE' (or add it to your shell profile) to put AWA on PATH."
   return 0
+}
+
+# A deliberately narrower update profile. It reads only the product's closed owner
+# selection, release pointer and contract/version files. In particular, do not use
+# awa_hook_owner_resolve here: an environment override must not turn a direct or
+# unconfigured installation into an externally managed one.
+runtime_only_preflight() {
+  local source_commit
+  if [ "${AWA_HOOK_OWNER+x}" = "x" ] && [ "$AWA_HOOK_OWNER" != "external" ]; then
+    awa_warn "runtime-only update requires the existing external hook owner"
+    return 1
+  fi
+  source_commit="$(resolve_source_commit)" || return $?
+  AWA_UPDATE_COMMIT="$source_commit" AWA_UPDATE_SOURCE="$SRC_ROOT" AWA_UPDATE_RUNTIME="$RUNTIME" \
+    AWA_UPDATE_OWNER="$HOOK_OWNER_FILE" AWA_UPDATE_POINTER="$POINTER" \
+    python3 - <<'PY'
+import ast
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+
+def directory(path):
+    if not path.is_absolute():
+        raise ValueError
+    for part in reversed((path, *path.parents)):
+        if not stat.S_ISDIR(part.lstat().st_mode):
+            raise ValueError
+
+
+def regular(path, maximum=1_000_000):
+    directory(path.parent)
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or path.is_symlink()
+            or info.st_nlink != 1 or info.st_size > maximum):
+        raise ValueError
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        opened = os.fstat(fd)
+        raw = bytearray()
+        while len(raw) <= maximum:
+            chunk = os.read(fd, min(65536, maximum + 1 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        identity = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+        if (len(raw) > maximum or identity(info) != identity(opened)
+                or identity(opened) != identity(os.fstat(fd))
+                or identity(opened) != identity(path.lstat())):
+            raise ValueError
+        return bytes(raw)
+    finally:
+        os.close(fd)
+
+
+def document(path):
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise ValueError
+            value[key] = item
+        return value
+    return json.loads(regular(path), object_pairs_hook=pairs)
+
+
+def copy_paths(root):
+    # A destination link could otherwise make a plain install/cp follow a host
+    # configuration path. Inspect names only, never follow a link or open payloads.
+    count = 0
+    for name in ("kernel", "engine", "dashboard", "contracts", "bin", "consumer"):
+        parent = root / name
+        directory(parent)
+        pending = [parent]
+        while pending:
+            current = pending.pop()
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    count += 1
+                    if count > 10000:
+                        raise ValueError
+                    info = entry.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(info.st_mode):
+                        pending.append(Path(entry.path))
+                    elif not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise ValueError
+    for name in ("pyproject.toml", "Makefile", "install.sh", "bootstrap.sh",
+                 "ARCHITECTURE.md", "README.md", "SECURITY.md", "LICENSE"):
+        info = (root / name).lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError
+
+
+def version(root):
+    tree = ast.parse(regular(root / "engine" / "__init__.py"))
+    values = [node.value.value for node in tree.body
+              if isinstance(node, ast.Assign) and len(node.targets) == 1
+              and isinstance(node.targets[0], ast.Name)
+              and node.targets[0].id == "__version__"
+              and isinstance(node.value, ast.Constant)
+              and isinstance(node.value.value, str)]
+    if len(values) != 1 or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", values[0]):
+        raise ValueError
+    return values[0]
+
+
+try:
+    source = Path(os.environ["AWA_UPDATE_SOURCE"])
+    runtime = Path(os.environ["AWA_UPDATE_RUNTIME"])
+    if source == runtime:
+        raise ValueError
+    directory(source)
+    directory(runtime)
+    owner = document(Path(os.environ["AWA_UPDATE_OWNER"]))
+    if owner != {"schema": "awa-hook-owner-selection/v1",
+                 "contract": "awa-hook-owner/v1", "mode": "external"}:
+        raise ValueError
+    pointer = document(Path(os.environ["AWA_UPDATE_POINTER"]))
+    required = {"schema", "version", "source", "commit", "runtime", "policy",
+                "hook_owner_contract", "hook_owner_mode",
+                "hook_owner_contract_sha256", "installed_at"}
+    if not isinstance(pointer, dict) or set(pointer) != required:
+        raise ValueError
+    if (pointer["schema"] != "awa-release-pointer/v1"
+            or pointer["source"] != str(source)
+            or pointer["runtime"] != str(runtime)
+            or pointer["policy"] != str(runtime / "kernel/policy/default-worktree-policy.yml")
+            or pointer["hook_owner_contract"] != "awa-hook-owner/v1"
+            or pointer["hook_owner_mode"] != "external"
+            or not isinstance(pointer["commit"], str)
+            or not re.fullmatch(r"[0-9a-f]{40}", pointer["commit"])
+            or not isinstance(pointer["installed_at"], str)):
+        raise ValueError
+    installed_version, target_version = version(runtime), version(source)
+    if pointer["version"] != installed_version:
+        raise ValueError
+    directory(runtime / "contracts")
+    directory(source / "contracts")
+    installed_contracts = {p.name for p in (runtime / "contracts").iterdir()}
+    source_contracts = {p.name for p in (source / "contracts").iterdir()}
+    if installed_contracts != source_contracts:
+        raise ValueError
+    for name in installed_contracts:
+        if regular(runtime / "contracts" / name) != regular(source / "contracts" / name):
+            raise ValueError
+    contract = regular(runtime / "contracts/awa-contract.v1.json")
+    if hashlib.sha256(contract).hexdigest() != pointer["hook_owner_contract_sha256"]:
+        raise ValueError
+    copy_paths(source)
+    copy_paths(runtime)
+    commit = os.environ["AWA_UPDATE_COMMIT"]
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError
+    if commit == pointer["commit"] and target_version == installed_version:
+        print("present")
+    elif tuple(map(int, target_version.split("."))) > tuple(map(int, installed_version.split("."))):
+        print("update:" + commit)
+    else:
+        raise ValueError
+except (OSError, ValueError, TypeError, KeyError, SyntaxError, RecursionError):
+    print("awa-install: runtime-only preflight refused; require an existing compatible "
+          "external-owner runtime, its exact source path, intact contracts and an advancing "
+          "stable version. No runtime files were changed.", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+do_runtime_only() {
+  local action
+  action="$(runtime_only_preflight)" || return $?
+  if [ "$action" = "present" ]; then
+    awa_log "release pointer already selects this source release; no runtime repair or host changes made"
+    return 0
+  fi
+  case "$action" in update:*) ;; *) return 1 ;; esac
+  validate_integrity_product_assets "$SRC_ROOT" source || {
+    awa_warn "runtime-only source assets failed validation; nothing changed"
+    return 1
+  }
+  # Keep the established copy/validation behavior. This is an in-place update,
+  # not a writer window, atomic runtime swap, backup or automatic rollback.
+  # The caller must hold the host's update window and retain a recoverable prior
+  # runtime before invocation. Publish the release identity only after copying.
+  if ! copy_runtime; then
+    awa_warn "runtime update incomplete; release pointer was not advanced. Restore the captured runtime before use"
+    return 1
+  fi
+  write_release_pointer external "${action#update:}" || return $?
+  awa_log "runtime and release pointer updated; host configuration was not reconciled"
 }
 
 do_uninstall() {
@@ -937,9 +1180,15 @@ PY
 # BASH_SOURCE[0] always equals $0 — identical to how this script tests BASH_SOURCE when locating
 # its own SRC_ROOT above.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  for argument in "$@"; do
+    if [ "$argument" = "--runtime-only" ] && [ "$#" -ne 1 ]; then
+      awa_die "--runtime-only is a standalone profile; do not combine it with other arguments"
+    fi
+  done
   case "${1:-install}" in
     install|"")   do_install 0 ;;
     --repair)     do_install 1 ;;
+    --runtime-only) do_runtime_only ;;
     --doctor)     do_doctor ;;
     --check)      do_check ;;
     --uninstall)  shift; do_uninstall "${1:-}" ;;

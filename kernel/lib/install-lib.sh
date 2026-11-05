@@ -158,11 +158,14 @@ PY
 awa_sync_tree() {
   local src="$1" dest="$2"
   [ -d "$src" ] || awa_die "missing source tree: $src"
-  mkdir -p "$dest"
+  # Callers may inspect this function's status, which disables Bash errexit
+  # inside it. Propagate setup failures before the eventual copier can hide them.
+  mkdir -p "$dest" || return $?
   if command -v rsync >/dev/null 2>&1; then
     rsync -a --delete --exclude '__pycache__' --exclude '*.pyc' --exclude '.pytest_cache' "$src/" "$dest/"
   else
-    rm -rf "$dest"; mkdir -p "$dest"
+    rm -rf "$dest" || return $?
+    mkdir -p "$dest" || return $?
     ( cd "$src" && tar cf - --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' . ) | ( cd "$dest" && tar xf - )
   fi
 }

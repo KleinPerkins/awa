@@ -288,9 +288,35 @@ the referenced file forward to `on`.
 |---|---|
 | `bash ./install.sh` | Install / reconcile (idempotent) |
 | `bash ./install.sh --repair` | Force re-copy the runtime + reconcile the selected hook-owner mode and MCP |
+| `bash ./install.sh --runtime-only` | Advance an existing compatible external-owner runtime and its release pointer; leave host configuration and state untouched |
 | `bash ./install.sh --doctor` | Read-only health check of the install |
 | `bash ./install.sh --check` | CI-safe static preflight (writes nothing to `$HOME`) |
 | `bash ./install.sh --uninstall [--keep-state]` | Remove the install (`--keep-state` preserves recovery state) |
+
+`make runtime-update` selects the same `--runtime-only` profile. It requires an
+existing, intact external-owner installation at the same source checkout path,
+byte-identical contract files, and a strictly newer stable version. A matching
+recorded version/commit is a no-op; this profile does not repair a same-release
+runtime. Missing, direct-owner, malformed, linked, mismatched or contract-changing installs
+refuse before copying. An environment override cannot migrate the persisted owner.
+The profile must be the sole argument; mixing it with `--repair` refuses before
+either operation starts.
+
+This profile never reads or stages MCP configuration, hooks, operator rules,
+generated environment, host policy/modes, dashboard output or ordinary state. It
+reuses the normal in-place runtime copy and publishes the release pointer last.
+The installation owner must first establish the consumer update window and retain
+a recoverable prior runtime/pointer. A failed copy can leave a partial runtime;
+the command reports failure and does not advance the pointer or attempt rollback.
+The source revision is resolved independently of inherited Git overrides and must
+remain unchanged through pointer publication; a changed revision also stops publication.
+
+A source merge does not authorize installation or release. Use only a separately
+approved exact released payload. In particular, adding this profile on `main`
+does not modify immutable v1.8.2 or authorize installing unreleased registration
+work. A maintenance backport/release and updated Skills binding require their own
+existing owner process. Invoke a GCB verb only after its descriptor/installer
+supports it: older shelves treat unknown flags as a default full install.
 
 Equivalent `make` targets exist (`make install|repair|doctor|check|uninstall`); `make help` lists
 them. `make verify-install` exercises the whole install lifecycle in a throwaway `HOME`.
