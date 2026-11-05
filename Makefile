@@ -1,12 +1,13 @@
 # AWA — Agent Worktree Automation (standalone system). Make targets: help-first, .PHONY.
 .DEFAULT_GOAL := help
-.PHONY: help install repair doctor check uninstall verify verify-docs verify-focused verify-pre-pr verify-performance verify-release verify-install verify-guard-installed-full test trial version
+.PHONY: help install repair runtime-update doctor check uninstall verify verify-docs verify-focused verify-pre-pr verify-performance verify-release verify-install verify-guard-installed-full test trial version
 unexport VERIFY_BASE TESTS
 
 help: ## Show available targets
 	@echo "AWA — Agent Worktree Automation (standalone system: generic kernel + engine + dashboard)"
 	@echo "  make install         - install AWA into your XDG dirs (idempotent)"
 	@echo "  make repair          - force re-copy runtime + reconcile hook owner/mcp"
+	@echo "  make runtime-update  - advance a compatible external-owner runtime; preserve host configuration"
 	@echo "  make doctor          - read-only health check of the install"
 	@echo "  make check           - CI-safe static preflight (no writes to HOME)"
 	@echo "  make uninstall       - remove the install (KEEP_STATE=1 preserves recovery state)"
@@ -27,6 +28,9 @@ install: ## Install AWA (idempotent)
 
 repair: ## Force re-copy the runtime and reconcile hook owner/mcp
 	@bash ./install.sh --repair
+
+runtime-update: ## Advance an existing compatible external-owner runtime without host reconciliation
+	@bash ./install.sh --runtime-only
 
 doctor: ## Read-only health check of the install
 	@bash ./install.sh --doctor

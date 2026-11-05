@@ -603,7 +603,10 @@ class PublicationOrderedRecoveryTest(FinalHardeningBase):
             **{key: dialogue["target"][key] for key in (
                 "git_dir", "common_dir", "branch", "head")},
         }
-        with mock.patch.object(UX, "_load_finish", return_value=FIN), \
+        # Recovery filters by the caller's session. Bind this synthetic index to
+        # its fixture session rather than inheriting the test runner's identity.
+        with mock.patch.dict(os.environ, {"DEV_SESSION_ID": index["session_id"]}), \
+                mock.patch.object(UX, "_load_finish", return_value=FIN), \
                 mock.patch.object(
                 FIN, "read_removal_journal", return_value=(journal, "ok")), \
                 mock.patch.object(FIN, "reconcile_removal", return_value={
