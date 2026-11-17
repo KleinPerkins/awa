@@ -688,9 +688,11 @@ print(json.dumps({
     def test_total_deadline_covers_both_calls(self):
         release = threading.Event()
         worker_names = []
+        clock = mock.Mock(return_value=0.0)
 
         def open_response():
-            time.sleep(0.03)
+            # Consume the same budget without relying on host sleep precision.
+            clock.return_value = 0.03
             return response(
                 200,
                 {"ok": True, "channel": {"id": CHANNEL_ID}},
@@ -704,11 +706,14 @@ print(json.dumps({
         http = FakeHTTP(open_response, blocked_post)
         started = time.monotonic()
         try:
-            result = self._send(
-                http,
-                timeout_s=0.07,
-                max_retries=0,
-            )
+            # Replace only this module's clock; real elapsed timing, thread
+            # deadlines and every other default-clock test remain unchanged.
+            with mock.patch.object(integrity_slack, "time", mock.Mock(monotonic=clock)):
+                result = self._send(
+                    http,
+                    timeout_s=0.07,
+                    max_retries=0,
+                )
         finally:
             release.set()
         elapsed = time.monotonic() - started
@@ -716,6 +721,8 @@ print(json.dumps({
         self.assertLess(elapsed, 0.3)
         self.assertEqual(len(http.calls), 2)
         self.assertTrue(worker_names)
+        self.assertAlmostEqual(http.calls[0]["timeout_s"], 0.07)
+        self.assertAlmostEqual(http.calls[1]["timeout_s"], 0.04)
 
     def test_total_deadline_includes_keychain_lookup(self):
         release = threading.Event()

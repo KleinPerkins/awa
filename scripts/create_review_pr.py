@@ -189,6 +189,8 @@ def create(repo, request, policy, enrollment, receipt, title, body, output, jour
             and isinstance(body, str) and len(body.encode()) <= 60000
             and '<!-- g1-pr-' not in body, 'invalid title/body or supplied origin marker')
     require(request.get('repository') in NAME_PHASES and request.get('repository_id') == REPOSITORY_ID, 'wrong repository request')
+    require(policy == review.private_read(Path(repo) / '.github/review-enrollments.json', require_private=False),
+            'creation policy differs from checked-in registry')
     producer = validate_policy(policy, enrollment)
     account = review.account_read(cli, enrollment['credential_store'])
     review.validate_enrollment(enrollment, account, request['origin_account'])

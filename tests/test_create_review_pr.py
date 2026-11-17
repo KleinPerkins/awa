@@ -85,6 +85,9 @@ class CreationTests(unittest.TestCase):
                 creation_adapter_sha256=m.review.digest(Path(m.__file__).read_bytes()),
                 capture_adapter_sha256=m.review.digest(Path(m.review.__file__).read_bytes()))]}
         self.policy = m.review.canonical(self.policy_value).encode()
+        self.registry = self.root / '.github/review-enrollments.json'
+        self.registry.parent.mkdir()
+        self.registry.write_bytes(self.policy)
         self.request = {'repository': m.REPOSITORY, 'repository_id': m.REPOSITORY_ID, 'head_sha': 'a' * 40,
                         'base_sha': 'b' * 40, 'merge_base_sha': 'c' * 40, 'diff_sha256': 'd' * 64,
                         'policy_sha256': m.review.digest(self.policy), 'origin_account': 'work'}
@@ -166,6 +169,22 @@ class CreationTests(unittest.TestCase):
         self.assertEqual(self.api.calls, [])
         self.assertFalse(self.journal.exists())
 
+    def test_private_substituted_identity_policy_cannot_override_checked_in_registry(self):
+        supplied = copy.deepcopy(self.policy_value)
+        alternate = dict(self.enrollment, email='alternate@example.invalid')
+        supplied['producers'][0]['account_email_sha256'] = m.review.digest(alternate['email'])
+        policy = m.review.canonical(supplied).encode()
+        request = dict(self.request, policy_sha256=m.review.digest(policy))
+        receipt = copy.deepcopy(self.receipt);receipt['tuple'] = dict(request)
+        self.account_mock.return_value = {'type':'chatgpt','email':alternate['email']}
+        with self.assertRaisesRegex(m.review.CaptureError, 'checked-in registry'):
+            self.create(policy=policy, enrollment=alternate, request=request, receipt=receipt)
+        self.assertEqual(self.registry.read_bytes(),self.policy)
+        self.account_mock.assert_not_called()
+        self.assertEqual(self.api.calls,[])
+        self.assertFalse(self.journal.exists())
+        self.assertFalse(self.output.exists())
+
     def test_unenrolled_adapters_or_disabled_producers_cannot_create_pr(self):
         changes = [lambda v: v.update(enabled=False),
                    lambda v: v.update(repository_id=7),
@@ -176,8 +195,10 @@ class CreationTests(unittest.TestCase):
         for change in changes:
             value = copy.deepcopy(self.policy_value)
             change(value)
+            supplied = m.review.canonical(value).encode()
+            self.registry.write_bytes(supplied)
             with self.subTest(policy=value), self.assertRaises(m.review.CaptureError):
-                self.create(policy=m.review.canonical(value).encode())
+                self.create(policy=supplied)
             self.assertEqual(self.api.calls, [])
             self.assertFalse(self.journal.exists())
 
@@ -251,6 +272,7 @@ class CreationTests(unittest.TestCase):
         self.assertFalse(self.journal.exists())
         self.policy_value['producers'][0]['allowed_startup_notice_sha256'] = [notice]
         self.policy = m.review.canonical(self.policy_value).encode()
+        self.registry.write_bytes(self.policy)
         self.request['policy_sha256'] = m.review.digest(self.policy)
         self.receipt['tuple'] = copy.deepcopy(self.request)
         self.create()

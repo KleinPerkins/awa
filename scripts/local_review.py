@@ -269,6 +269,7 @@ def captured_report(raw,last,report_validator=validate_report):
  return starts[0]['thread_id'],report
 
 def capture(repo,request,policy,enrollment,cli='codex',timeout=600):
+ require(policy==private_read(Path(repo)/'.github/review-enrollments.json',require_private=False),'review policy differs from checked-in registry')
  validate_producer(policy,enrollment)
  account=account_read(cli,enrollment['credential_store']);validate_enrollment(enrollment,account,request['origin_account'])
  version=run([cli,'--version']).decode().strip()
