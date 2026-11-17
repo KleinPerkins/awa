@@ -47,6 +47,18 @@ Automatically obtain a fresh independent review under the originating PR-creatio
 account with `scripts/local_review.py`, then create through
 `scripts/create_review_pr.py` and publish the unedited review receipt. No human
 technical review or cross-account substitution replaces that review.
+
+Trusted-main admission requires that complete passing independent review of the exact
+head, base, whole canonical diff and current policy before accepting CI as PR-admission
+evidence, including CI and governance changes. A CI receipt binds execution/contract identity; it is not
+a formal proof of arbitrary candidate semantics. Q16 operationally trusts the
+enrolled local receipt tooling and accepts same-access receipt forgery as a limit.
+The [live GitHub GraphQL input schema](https://docs.github.com/en/graphql/reference/input-objects),
+checked through read-only `__type` introspection on 2026-11-17, exposes
+`expectedHeadOid: GitObjectID` in both `MergePullRequestInput` and
+`EnablePullRequestAutoMergeInput`; both native branches intentionally retain that
+API head condition. These facts establish neither delivery nor activation.
+
 Only the qualified App approves and requests native squash or eligible auto-merge;
 agents never merge, arm auto-merge or bypass protections. Initial owner admission,
 merged-main checks and actual App qualification precede writer activation.
