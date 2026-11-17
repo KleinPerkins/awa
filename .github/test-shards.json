@@ -1,0 +1,13 @@
+{
+  "schema": "awa-test-sharding/v1",
+  "state": "prepared-router-source-required",
+  "aggregate": "ci-required",
+  "shards": [
+    "source-portable",
+    "source-native",
+    "install-fixture",
+    "dashboard",
+    "router-seam",
+    "review-admission"
+  ]
+}

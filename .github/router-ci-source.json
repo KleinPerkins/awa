@@ -1,0 +1,10 @@
+{
+  "schema": "awa-router-ci-source/v1",
+  "enabled": false,
+  "repository": "KleinPerkins/intent-router",
+  "repository_id": null,
+  "revision": null,
+  "review_receipt_sha256": null,
+  "public_source": false,
+  "reason": "Exact reviewed accessible router source and source identity remain owner prerequisites. consumer/router-pin.json remains unchanged; historical base_sha is not a current checkout selector."
+}
