@@ -1,0 +1,53 @@
+{
+  "schema": "awa-ci-adapter-provenance/v1",
+  "source_repository": "KleinPerkins/dev",
+  "source_revision": "d57009cb004d404adf9daa5a374a1c2b37b8288e",
+  "source_file_sha256": {
+    "scripts/local_review.py": "667158a6b1f5e537a67e45d9539a484667068b76c83ef4f08c0d0766d2e00af2",
+    "scripts/create_review_pr.py": "4133e086f9f01f17e906e0c018f770bc49182fe50cabb11a5b0f06ae940abbaf",
+    "scripts/reviewer_app.py": "73ec3d0ebe18e61bfa04bb1ecbdcc76792ecd043d914d25843241b17d5cde0ad",
+    "tests/test_local_review.py": "2374e98fb098b5541bb9d0c90ea2cfa7dab1f378846066e2ed9192a99aff4403",
+    "tests/test_create_review_pr.py": "531ff0ea2cf24b1d88d6653bfdc34a50be73f37dee10327b78866e50c8955d0f",
+    "tests/test_reviewer_app.py": "27c9dbe8ec3d16aa54505dc02b79479c24d2e097c1fa946bfe20e69ee1257289",
+    "scripts/verify.py": "d5bb94dfbab67909f2616dd621daf5cfad9fe582f648fd487ef3ec5510d7f622",
+    ".github/workflows/ci.yml": "abe73b7b0f4ebce38386f6ec9a45c476452a0bb1322595183972d0969f7da530",
+    ".github/workflows/reviewer-app.yml": "5846f782da247434d452633762bb7bbb3faa59ca6c807521fda6a565063c2398"
+  },
+  "adaptations": [
+    "AWA exact original private repository identity; no public-successor alias",
+    "Qualified WORK/PERSONAL producer source mappings rebound to exact AWA capture/creation/instruction hashes; privileged workflow runtime flags stay OFF",
+    "AWA CI aggregate/shard names",
+    "Retain source review/creation/App safety tests; replace Dev migration/workflow tests with AWA preparation controls",
+    "CI identity/bounded-process/exact-run aggregate helpers reused; owner full runner remains intact",
+    "Require native SQLite>=3.51.3 and chflags; full native runtime pin3.14.6",
+    "Exact reviewed router binding and live public immutable-ID check are mandatory; CI-only exact reviewed public binding now prepared"
+  ],
+  "trust": "Accepted Q16 operational local receipt trust and accepted concurrent-writer auto-merge race limit unchanged. Not provider attestation.",
+  "incremental_sources": [
+    {
+      "repository": "KleinPerkins/intent-router",
+      "revision": "9a9af7f2fb72d600a6dc01a7f99dfa9d2c822668",
+      "review_receipt_sha256": "effa7d60c3542a87b62237d260f1fc7f873ba5ed48e1b1d7fe62a1487626ad88",
+      "files": {
+        "scripts/create_review_pr.py": "4538c95fafea06d1107b86c472a3c7b0b05dfefb5b08b024e3ca6510464867f3",
+        "scripts/reviewer_app.py": "1c23857f8d721af56fe21b09588126ae9f1bafd35ed9197ab647780b0fe96fb6",
+        "tests/test_create_review_pr.py": "ca1db205c9f3c73ace5ea74c111162b2ddb3e0c5388ff380de542ded4f49c9ef",
+        "tests/test_reviewer_app.py": "e708ebd731705a811f5ada2400b077e10d688e9f71992f75e482320599d7baff"
+      },
+      "adaptations": [
+        "Policy-bound creator validation and producer-specific notice allowlist; retain AWA phase identity check",
+        "Re-read actual App approval before delivery; retain AWA exact job/contract hash and control validation",
+        "Port independent creator and delivery fixture tests; preserve AWA-specific admission tests",
+        "Actual App writer credential non-bypass reads before approval and native operation; preserve AWA effective-review/control validation",
+        "Required sixteen original router seam/golden/real-loop/disposable lifecycle tests; multiline unittest identity parser corrected after observed refusal"
+      ],
+      "merged_revision": "f559159e76c6d9786b41f6fc566f921d55303f1b",
+      "reviewed_and_merged_tree": "b054043db227ff00e7fe6d2be0db8e1ad6212b74"
+    }
+  ],
+  "producer_source_provenance": {
+    "policy_sha256": "57f2d7782aa6303acf37e6e1add365d331280851a0339510c2302b0d4de3133b",
+    "work_review_receipt_sha256": "effa7d60c3542a87b62237d260f1fc7f873ba5ed48e1b1d7fe62a1487626ad88",
+    "personal_qualification": "Existing actual canary PR101 App delivery and trusted enrollment policy; not a new live personal-account qualification"
+  }
+}
