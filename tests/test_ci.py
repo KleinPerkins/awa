@@ -60,9 +60,9 @@ class IsolationTests(unittest.TestCase):
         with self.assertRaises(ci.ContractError):ci.bounded([sys.executable,'-c','raise SystemExit(9)'],2)
         with self.assertRaises(ci.ContractError):ci.bounded([sys.executable,'-c','import time;time.sleep(5)'],.05)
         with patch.object(ci,'MAX_OUTPUT',32),self.assertRaises(ci.ContractError):ci.bounded([sys.executable,'-c','print("a"*40)'],2)
-        with patch.dict(os.environ,GH_TOKEN='fixture',GITHUB_TOKEN='fixture',AWA_FULL_INSTALLED_GUARD_MATRIX='1',PYTHONPATH='foreign'):
-            raw=ci.bounded([sys.executable,'-I','-c','import os,json;print(json.dumps({k:os.environ.get(k) for k in ["GH_TOKEN","GITHUB_TOKEN","AWA_FULL_INSTALLED_GUARD_MATRIX","PYTHONPATH","HOME"]}))'],2,overrides={'HOME':'/fixture-only'})
-        self.assertEqual(json.loads(raw),dict(GH_TOKEN=None,GITHUB_TOKEN=None,AWA_FULL_INSTALLED_GUARD_MATRIX=None,PYTHONPATH=None,HOME='/fixture-only'))
+        with patch.dict(os.environ,GH_TOKEN='fixture',GITHUB_TOKEN='fixture',CI_READ_TOKEN='metadata-only-fixture',AWA_FULL_INSTALLED_GUARD_MATRIX='1',PYTHONPATH='foreign'):
+            raw=ci.bounded([sys.executable,'-I','-c','import os,json;print(json.dumps({k:os.environ.get(k) for k in ["GH_TOKEN","GITHUB_TOKEN","CI_READ_TOKEN","AWA_FULL_INSTALLED_GUARD_MATRIX","PYTHONPATH","HOME"]}))'],2,overrides={'HOME':'/fixture-only'})
+        self.assertEqual(json.loads(raw),dict(GH_TOKEN=None,GITHUB_TOKEN=None,CI_READ_TOKEN=None,AWA_FULL_INSTALLED_GUARD_MATRIX=None,PYTHONPATH=None,HOME='/fixture-only'))
     def test_private_fixture_base_has_secure_ancestry_and_darwin_uses_os_temp(self):
         base=ci.private_fixture_base();self.assertTrue(base.is_dir())
         if ci.platform.system()=='Darwin':self.assertNotIn('/Users/',str(base))
@@ -128,6 +128,16 @@ class IsolationTests(unittest.TestCase):
         with patch.object(ci.urllib.request,'urlopen',return_value=io.BytesIO(json.dumps(valid).encode())):ci.verify_router_public_identity(binding)
         for mutation in [{'id':124},{'id':True},{'full_name':'KleinPerkins/other'},{'private':True},{'archived':True}]:
             with patch.object(ci.urllib.request,'urlopen',return_value=io.BytesIO(json.dumps(dict(valid,**mutation)).encode())),self.assertRaises(ci.ContractError):ci.verify_router_public_identity(binding)
+    def test_metadata_read_token_is_scoped_to_exact_public_api_request(self):
+        binding=ci.router_binding();valid={'id':binding['repository_id'],'full_name':binding['repository'],'private':False,'archived':False}
+        with patch.dict(os.environ,CI_READ_TOKEN='metadata-only-fixture'),patch.object(ci.urllib.request,'urlopen',return_value=io.BytesIO(json.dumps(valid).encode())) as request:
+            ci.verify_router_public_identity(binding)
+        sent=request.call_args.args[0]
+        self.assertEqual(sent.full_url,'https://api.github.com/repos/KleinPerkins/intent-router')
+        self.assertEqual(sent.get_header('Authorization'),'Bearer metadata-only-fixture')
+        with patch.dict(os.environ,CI_READ_TOKEN=''),patch.object(ci.urllib.request,'urlopen',return_value=io.BytesIO(json.dumps(valid).encode())) as request:
+            ci.verify_router_public_identity(binding)
+        self.assertIsNone(request.call_args.args[0].get_header('Authorization'))
 class WorkflowTests(unittest.TestCase):
     def test_closed_required_native_and_disposable_lanes(self):
         workflow=json.loads((ROOT/'.github/workflows/ci.yml').read_bytes());jobs=workflow['jobs']
@@ -139,7 +149,7 @@ class WorkflowTests(unittest.TestCase):
             for step in jobs[shard]['steps']:
                 if 'uses' in step:self.assertRegex(step['uses'],r'@[0-9a-f]{40}$')
                 if step.get('uses','').startswith('actions/checkout@'):self.assertIs(step['with']['persist-credentials'],False)
-        seam=jobs['router-seam']['steps'];self.assertEqual(seam[2]['run'],'python3 -I -B scripts/verify.py router-binding');self.assertEqual(seam[3]['with']['ref'],'${{ steps.router.outputs.revision }}')
+        seam=jobs['router-seam']['steps'];self.assertEqual(seam[2]['env'],{'CI_READ_TOKEN':'${{ github.token }}'});self.assertEqual(seam[-1]['env']['CI_READ_TOKEN'],'${{ github.token }}');self.assertTrue(all('CI_READ_TOKEN' not in step.get('env',{}) for step in seam if 'uses' in step));self.assertEqual(seam[2]['run'],'python3 -I -B scripts/verify.py router-binding');self.assertEqual(seam[3]['with']['ref'],'${{ steps.router.outputs.revision }}')
     def test_manual_receipt_mode_validates_required_pr_without_traceback(self):
         workflow=json.loads((ROOT/'.github/workflows/reviewer-app.yml').read_bytes())
         resolver=next(x for x in workflow['jobs']['admit']['steps'] if x.get('id')=='target')

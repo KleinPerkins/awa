@@ -63,7 +63,7 @@ def bounded(argv,timeout,cwd=ROOT,overrides=None):
     for k in list(env):
         # Shell startup files/functions can silently displace fixture PATH stubs.
         if k.startswith(('GIT_', 'BASH_FUNC_', 'AWA_')) or k in ('BASH_ENV', 'ENV','PYTHONPATH','PYTHONHOME',
-                'GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'):
+                'GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'CI_READ_TOKEN'):
             env.pop(k)
     env.update(overrides or {})
     p=subprocess.Popen(argv,cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,start_new_session=True)
@@ -143,7 +143,13 @@ def verify_router_checkout(binding,path):
     require(not subprocess.check_output(['git','-C',str(path),'status','--porcelain']),'dirty router checkout')
 
 def verify_router_public_identity(binding):
-    request=urllib.request.Request('https://api.github.com/repos/'+binding['repository'],headers={'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'})
+    headers={'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
+    # A step-scoped read token avoids shared runner-IP quota exhaustion. The
+    # authoritative private flag must still be false, and credentials
+    # are removed before any source/test/router subprocess is started.
+    token=os.environ.get('CI_READ_TOKEN')
+    if token:headers['Authorization']='Bearer '+token
+    request=urllib.request.Request('https://api.github.com/repos/'+binding['repository'],headers=headers)
     with urllib.request.urlopen(request,timeout=20) as response:
         raw=response.read(65537)
     require(len(raw)<=65536,'router source metadata exceeds bound')

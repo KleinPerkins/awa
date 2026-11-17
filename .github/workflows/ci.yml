@@ -185,7 +185,10 @@
         {
           "name": "Require exact owner-reviewed accessible router binding",
           "id": "router",
-          "run": "python3 -I -B scripts/verify.py router-binding"
+          "run": "python3 -I -B scripts/verify.py router-binding",
+          "env": {
+            "CI_READ_TOKEN": "${{ github.token }}"
+          }
         },
         {
           "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
@@ -203,7 +206,8 @@
           "env": {
             "CI_HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
             "CI_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
-            "AWA_CI_ROUTER_PATH": "${{ github.workspace }}/ci-router-source"
+            "AWA_CI_ROUTER_PATH": "${{ github.workspace }}/ci-router-source",
+            "CI_READ_TOKEN": "${{ github.token }}"
           },
           "run": "python3 -I -B scripts/verify.py shard --shard router-seam"
         }
