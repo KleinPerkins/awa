@@ -80,6 +80,19 @@ class IsolationTests(unittest.TestCase):
         damaged=b'\n'.join(line for line in output.split(b'\n') if not line.startswith(b'test_count_is_25_to_30 ('))
         with patch.object(ci,'bounded',return_value=damaged),patch('sys.stdout',new=io.StringIO()),self.assertRaises(ci.ContractError):
             ci.measured('dashboard',allow_cross_host=True)
+    def test_native_full_corpus_uses_supported_serial_override_only(self):
+        class StopBeforeCorpus(Exception):pass
+        seen={}
+        def capture(_argv,_timeout,**kwargs):
+            seen.update(kwargs['overrides']);raise StopBeforeCorpus()
+        with tempfile.TemporaryDirectory() as raw:
+            for shard in ('source-native','source-portable'):
+                seen.clear()
+                with patch.object(ci,'private_fixture_base',return_value=Path(raw).resolve()),patch.object(ci.sqlite3,'sqlite_version_info',(3,51,3)),patch.object(ci.shutil,'which',return_value='/fixture/chflags'),patch.object(ci.importlib.util,'find_spec',return_value=None),patch.object(ci,'bounded',side_effect=capture),patch.dict(os.environ,AWA_TEST_JOBS='8'),self.assertRaises(StopBeforeCorpus):
+                    ci.measured(shard,allow_cross_host=True)
+                self.assertIn('AWA_PERFORMANCE_RECEIPT',seen)
+                self.assertEqual(seen.get('AWA_TEST_JOBS'),'1' if shard=='source-native' else None)
+        self.assertEqual(ci.policy()[0]['runtime_requirements']['native_test_jobs'],1)
     def test_unknown_router_binding_is_hard_failure(self):
         self.assertEqual(ci.router_binding()['repository_id'],1294651532)
         with tempfile.TemporaryDirectory() as d:

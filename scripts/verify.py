@@ -107,6 +107,7 @@ def policy(root=ROOT):
         require(digest((root/name).read_bytes())==sha,'owner source changed: '+name)
     require(c['engine_modules']==sorted(str(p.relative_to(root)) for p in (root/'engine/tests').glob('test_*.py')),'engine module inventory changed')
     require(c['adapter_tests']==sorted(str(p.relative_to(root)) for p in (root/'tests').glob('test_*.py')),'adapter test inventory changed')
+    require(type(c['runtime_requirements'].get('native_test_jobs')) is int and c['runtime_requirements']['native_test_jobs']==1,'native full corpus serial setting differs')
     allowed=c.get('native_allowed_skip_ids')
     require(isinstance(allowed,list) and allowed==sorted(set(allowed)) and len(allowed)==15
             and all(isinstance(case,str) and re.fullmatch(r'engine\.tests\.test_consumer_[A-Za-z0-9_.]+',case) for case in allowed),'invalid native skip-ID policy')
@@ -188,6 +189,10 @@ def measured(shard,allow_cross_host=False):
         if shard.startswith('source-'):
             require(importlib.util.find_spec('intent_router') is None,'off-switch source lane requires router absent')
             env['AWA_PERFORMANCE_RECEIPT']=str(receipt)
+            if shard=='source-native':
+                # Existing owner-supported serial fallback: preserve the full corpus
+                # while avoiding cross-module contention on shared hosted macOS.
+                env['AWA_TEST_JOBS']='1'
         if shard=='router-seam':
             binding=router_binding();verify_router_public_identity(binding);path=Path(os.environ.get('AWA_CI_ROUTER_PATH','')).resolve()
             verify_router_checkout(binding,path)
