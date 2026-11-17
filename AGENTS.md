@@ -50,5 +50,7 @@ technical review or cross-account substitution replaces that review.
 Only the qualified App approves and requests native squash or eligible auto-merge;
 agents never merge, arm auto-merge or bypass protections. Initial owner admission,
 merged-main checks and actual App qualification precede writer activation.
+After owner initial source admission, `AWA_CI_ADAPTER_ENROLLED=true` permits
+read-only qualification; `REVIEWER_APP_ENABLED` stays OFF until its gates pass.
 Source CI and source enrollment do not authorize installation, held AWA rollout,
 live host activation or a product release. Original frozen plans and router pin remain unchanged.
