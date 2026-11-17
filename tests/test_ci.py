@@ -40,6 +40,17 @@ class AggregateTests(unittest.TestCase):
         for reason in ('meaningful only where chflags exists to shadow away','ADR 0025 requires stock SQLite >=3.51.3'):
             n=evidence();v=json.loads(n['source-native']['outputs']['receipt']);v['measurement']['skips']=[{'case':'native-fixture','reason':reason}];n['source-native']['outputs']['receipt']=json.dumps(v)
             with self.assertRaises(ci.ContractError):ci.validate_aggregate(n,ci.identity(ENV))
+    def test_native_unknown_skip_ids_fail_regardless_of_reason_and_known_offswitch_passes(self):
+        c,_,_=ci.policy()
+        for case in ('engine.tests.test_registration_clock.ClockTests.test_required','native-fixture'):
+            for reason in ('fixture unavailable','not supported here','macOS requirement'):
+                n=evidence();v=json.loads(n['source-native']['outputs']['receipt']);v['measurement']['skips']=[{'case':case,'reason':reason}];n['source-native']['outputs']['receipt']=json.dumps(v)
+                with self.subTest(case=case,reason=reason),self.assertRaises(ci.ContractError):ci.validate_aggregate(n,ci.identity(ENV))
+        allowed=[{'case':case,'reason':'router off-switch'} for case in c['native_allowed_skip_ids']]
+        ci.validate_native_skips(allowed,c)
+        n=evidence();v=json.loads(n['source-native']['outputs']['receipt']);v['measurement'].update(case_count=16,skips=allowed);n['source-native']['outputs']['receipt']=json.dumps(v)
+        ci.validate_aggregate(n,ci.identity(ENV))
+        with self.assertRaises(ci.ContractError):ci.validate_native_skips(allowed+[{'case':'unexpected','reason':'router off-switch'}],c)
     def test_main_identity_is_distinct_from_pull_request(self):
         env=dict(ENV,GITHUB_EVENT_NAME='push',GITHUB_REF='refs/heads/main',CI_HEAD_SHA='',CI_BASE_SHA='',GITHUB_WORKFLOW_REF='KleinPerkins/awa/.github/workflows/ci.yml@refs/heads/main')
         current=ci.identity(env)

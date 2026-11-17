@@ -200,6 +200,24 @@
     "python": "3.14.6",
     "native_stock_sqlite_minimum": "3.51.3",
     "native_chflags": "required; skip refuses native receipt",
-    "portable_coverage": "Linux separately explicit; all skips reported"
-  }
+    "portable_coverage": "Linux separately explicit; all skips reported",
+    "native_skip_policy": "Only the fifteen exact router-dependent off-switch test IDs may skip in full source-native; the dedicated router-seam lane requires all sixteen selected tests with zero skips. Every other native skip fails regardless of reason."
+  },
+  "native_allowed_skip_ids": [
+    "engine.tests.test_consumer_golden.TestGoldenAgainstRealRouter.test_router_reproduces_every_pinned_proposal",
+    "engine.tests.test_consumer_loop.TestOperatorLoop.test_real_router_benign_status_reads",
+    "engine.tests.test_consumer_loop.TestOperatorLoop.test_real_router_destructive_utterance_confirms",
+    "engine.tests.test_consumer_seam.TestRouterSeam.test_awa_egress_snapshot_is_superset_of_router_tiers",
+    "engine.tests.test_consumer_seam.TestRouterSeam.test_catalog_contract_schema_string_matches_pin",
+    "engine.tests.test_consumer_seam.TestRouterSeam.test_catalog_schema_string_matches_pin",
+    "engine.tests.test_consumer_seam.TestRouterSeam.test_constitution_egress_check_active_if_declared",
+    "engine.tests.test_consumer_seam.TestRouterSeam.test_constitution_schema_string_matches_pin",
+    "engine.tests.test_consumer_seam.TestRouterSeam.test_matcher_logic_agrees_with_router",
+    "engine.tests.test_consumer_seam.TestRouterSeam.test_proposal_contract_is_frozen_at_pinned_version",
+    "engine.tests.test_consumer_seam.TestRouterSeam.test_router_authoritative_catalog_verify_accepts_awa_catalog",
+    "engine.tests.test_consumer_trial_runner.TestRouterLifecycleSeam.test_isolated_install_on_uninstall_off_restore",
+    "engine.tests.test_consumer_trial_runner.TestRouterLifecycleSeam.test_production_run_trial_all_seven_has_pm_safe_complete_stream",
+    "engine.tests.test_consumer_trial_runner.TestRouterLifecycleSeam.test_production_run_trial_restores_after_injected_post_uninstall_failure",
+    "engine.tests.test_consumer_trial_runner.TestRouterLifecycleSeam.test_real_post_uninstall_failure_and_interrupt_restore"
+  ]
 }

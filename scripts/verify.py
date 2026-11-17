@@ -107,6 +107,9 @@ def policy(root=ROOT):
         require(digest((root/name).read_bytes())==sha,'owner source changed: '+name)
     require(c['engine_modules']==sorted(str(p.relative_to(root)) for p in (root/'engine/tests').glob('test_*.py')),'engine module inventory changed')
     require(c['adapter_tests']==sorted(str(p.relative_to(root)) for p in (root/'tests').glob('test_*.py')),'adapter test inventory changed')
+    allowed=c.get('native_allowed_skip_ids')
+    require(isinstance(allowed,list) and allowed==sorted(set(allowed)) and len(allowed)==15
+            and all(isinstance(case,str) and re.fullmatch(r'engine\.tests\.test_consumer_[A-Za-z0-9_.]+',case) for case in allowed),'invalid native skip-ID policy')
     return c,m,digest(raw+b'\0'+mraw)
 
 def router_binding(root=ROOT):
@@ -147,8 +150,11 @@ def verify_router_public_identity(binding):
     observed=parse(raw)
     require(type(observed.get('id')) is int and observed['id']==binding['repository_id'] and observed.get('full_name')==binding['repository'] and observed.get('private') is False and observed.get('archived') is False,'router source identity/accessibility differs')
 
-def native_skip_unqualified(reason):
-    return any(token in reason for token in ('macOS','Darwin','chflags','stock SQLite'))
+def validate_native_skips(skips,contract):
+    # The off-switch corpus deliberately excludes router code; its fifteen exact
+    # cases run without skips in router-seam. No reason text can waive a native test.
+    allowed=set(contract['native_allowed_skip_ids'])
+    require(all(item['case'] in allowed for item in skips),'required native case skipped')
 
 def private_fixture_base():
     # Darwin secure-walk fixtures reject /tmp; dashboard fixtures reject /Users.
@@ -191,7 +197,7 @@ def measured(shard,allow_cross_host=False):
             skips=[{'case':record['test_id'],'reason':record['skip_reason']} for record in owner['records'] if record['outcome']=='skipped']
             require(len(skips)<count,'all source cases skipped')
             if shard=='source-native':
-                require(not any(native_skip_unqualified(item['reason']) for item in skips),'required Darwin case skipped')
+                validate_native_skips(skips,c)
         else:
             counts=re.findall(rb'Ran ([0-9]+) tests? in ',output)
             require(counts,'test runner did not report executed cases')
@@ -215,7 +221,7 @@ def validate_measurement(value,shard,c,m,hash_):
     if not shard.startswith('source-'):require(not value['skips'],'required dedicated lane skipped')
     for skip in value['skips']:
         closed(skip,'case reason');require(all(isinstance(x,str) and x for x in skip.values()),'skip ledger incomplete')
-        if shard=='source-native':require(not native_skip_unqualified(skip['reason']),'required native case skipped')
+        if shard=='source-native':validate_native_skips([skip],c)
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('mode',choices=('local','shard','aggregate','router-binding'));p.add_argument('--shard',choices=SHARDS);p.add_argument('--allow-cross-host',action='store_true');a=p.parse_args()
