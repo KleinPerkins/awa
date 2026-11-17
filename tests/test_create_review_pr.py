@@ -81,6 +81,7 @@ class CreationTests(unittest.TestCase):
             'enabled': True, 'producers': [dict(id='work-local', origin_account='work', enabled=True,
                 github_user_id=m.OWNER_ID, cli_version=self.enrollment['cli_version'], credential_store='keyring',
                 instructions_sha256=m.review.digest(m.review.INSTRUCTIONS), allowed_startup_notice_sha256=[],
+                account_email_sha256=m.review.digest(self.enrollment['email']),
                 creation_adapter_sha256=m.review.digest(Path(m.__file__).read_bytes()),
                 capture_adapter_sha256=m.review.digest(Path(m.review.__file__).read_bytes()))]}
         self.policy = m.review.canonical(self.policy_value).encode()
@@ -155,6 +156,15 @@ class CreationTests(unittest.TestCase):
                 self.enrollment = old
                 self.account_mock.return_value = self.account
                 self.run_mock.return_value = old['cli_version'].encode()
+
+    def test_paired_account_substitution_rejected_before_creation(self):
+        self.enrollment['email'] = 'other@example.invalid'
+        self.account_mock.return_value = {'type': 'chatgpt', 'email': self.enrollment['email']}
+        with self.assertRaisesRegex(m.review.CaptureError, 'trusted policy'):
+            self.create()
+        self.account_mock.assert_not_called()
+        self.assertEqual(self.api.calls, [])
+        self.assertFalse(self.journal.exists())
 
     def test_unenrolled_adapters_or_disabled_producers_cannot_create_pr(self):
         changes = [lambda v: v.update(enabled=False),

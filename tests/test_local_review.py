@@ -16,6 +16,26 @@ class CaptureTests(unittest.TestCase):
   self.enrollment={'id':'e1','origin_account':'origin1','email':'owner@example.invalid','workspace':'workspace1','cli_version':'codex-cli 0.148.0','credential_store':'keyring','codex_home':str(Path(os.environ.get('CODEX_HOME',str(Path.home()/'.codex'))).resolve())}
   self.account={'type':'chatgpt','email':'owner@example.invalid'}
   self.report={'verdict':'pass','coverage':'complete','summary':'All changed lines inspected.','findings':[],'unresolved_findings':[]}
+ def policy(self):
+  return m.canonical({'schema':'g1-review-enrollments/v1','repository_id':1289571438,'enabled':True,'producers':[
+   dict(id=self.enrollment['id'],enabled=True,github_user_id=49759187,origin_account=self.enrollment['origin_account'],
+        cli_version=self.enrollment['cli_version'],credential_store=self.enrollment['credential_store'],
+        account_email_sha256=m.digest('owner@example.invalid'),instructions_sha256=m.digest(m.INSTRUCTIONS),
+        capture_adapter_sha256=m.digest(Path(m.__file__).read_bytes()))]}).encode()
+ def test_policy_identity_commitment_rejects_paired_substitution_before_reviewer(self):
+  policy=self.policy()
+  m.validate_producer(policy,self.enrollment)
+  changed={**self.enrollment,'email':'other@example.invalid'}
+  account={'type':'chatgpt','email':changed['email']}
+  m.validate_enrollment(changed,account,'origin1')
+  with patch.object(m,'account_read') as probe,patch.object(m,'run') as runner:
+   with self.assertRaisesRegex(m.CaptureError,'account identity'):m.capture(Path('/unused'),{'origin_account':'origin1'},policy,changed)
+   probe.assert_not_called();runner.assert_not_called()
+  for key,value in [('origin_account','other'),('credential_store','file'),('cli_version','other')]:
+   with self.subTest(key=key),self.assertRaises(m.CaptureError):m.validate_producer(policy,{**self.enrollment,key:value})
+  for field in ('account_email_sha256','capture_adapter_sha256','instructions_sha256'):
+   value=json.loads(policy);value['producers'][0][field]='f'*64
+   with self.subTest(field=field),self.assertRaises(m.CaptureError):m.validate_producer(m.canonical(value),self.enrollment)
  def events(self,report=None):
   return [{'type':'thread.started','thread_id':'fresh-thread'}, {'type':'turn.started'}, {'type':'item.completed','item':{'type':'agent_message','text':json.dumps(report or self.report)}}, {'type':'turn.completed','usage':{}}]
  def raw(self,events):return ('\n'.join(json.dumps(e) for e in events)+'\n').encode()
@@ -132,7 +152,7 @@ class CaptureTests(unittest.TestCase):
   for after in (self.account,{'type':'chatgpt','email':'wrong@example.invalid'}):
    with patch.object(m,'account_read',side_effect=[self.account,after]),patch.object(m,'run',side_effect=fake_run),patch.object(m,'frozen_input',return_value={'tuple':request}):
     if after==self.account:
-     receipt=m.capture(Path('/unused'),request,b'policy',self.enrollment)
+     receipt=m.capture(Path('/unused'),request,self.policy(),self.enrollment)
      self.assertNotIn(self.enrollment['email'],json.dumps(receipt))
      self.assertNotIn(self.enrollment['codex_home'],json.dumps(receipt))
      self.assertNotIn('startup_notices',receipt['runtime'])
@@ -140,7 +160,7 @@ class CaptureTests(unittest.TestCase):
      self.assertTrue(all(n not in json.dumps(receipt) for n in m.STARTUP_NOTICES))
      self.assertEqual(receipt['report_sha256'],m.digest(m.canonical(self.report)))
     else:
-     with self.assertRaises(m.CaptureError):m.capture(Path('/unused'),request,b'policy',self.enrollment)
+     with self.assertRaises(m.CaptureError):m.capture(Path('/unused'),request,self.policy(),self.enrollment)
   self.assertTrue(all(not root.exists() for root in roots))
  def test_api_environment_overrides_removed(self):
   with patch.dict(os.environ,{'OPENAI_API_KEY':'fixture','CODEX_API_KEY':'fixture','OPENAI_BASE_URL':'https://fixture.invalid'}):
@@ -210,6 +230,7 @@ class GitBindingTests(unittest.TestCase):
   account={'type':'chatgpt','email':'owner@example.invalid'}
   with self.assertRaises(m.CaptureError):m.validate_enrollment({**enrollment,'codex_home':'/wrong/profile'},account,'origin1')
   with self.assertRaises(m.CaptureError):m.validate_enrollment({**enrollment,'codex_home':'relative/profile'},account,'origin1')
-  with patch.object(m,'account_read',return_value=account),patch.object(m,'run',return_value=b'codex-cli 0.149.0'),self.assertRaises(m.CaptureError):m.capture(self.repo,self.request,self.policy,enrollment)
+  fixture=CaptureTests();fixture.enrollment=enrollment;policy=fixture.policy()
+  with patch.object(m,'account_read',return_value=account),patch.object(m,'run',return_value=b'codex-cli 0.149.0'),self.assertRaisesRegex(m.CaptureError,'unenrolled CLI version'):m.capture(self.repo,self.request,policy,enrollment)
 
 if __name__=='__main__':unittest.main()

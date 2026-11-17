@@ -171,7 +171,8 @@ def validate_policy(policy, enrollment):
     require(producer.get('enabled') is True and producer.get('github_user_id') == OWNER_ID
             and producer.get('origin_account') == enrollment['origin_account']
             and producer.get('cli_version') == enrollment['cli_version']
-            and producer.get('credential_store') == enrollment['credential_store'],
+            and producer.get('credential_store') == enrollment['credential_store']
+            and producer.get('account_email_sha256') == review.digest(enrollment['email']),
             'creation enrollment differs from trusted policy')
     require(producer.get('instructions_sha256') == review.digest(review.INSTRUCTIONS)
             and producer.get('creation_adapter_sha256') == review.digest(Path(__file__).read_bytes())

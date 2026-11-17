@@ -114,10 +114,30 @@ def router_binding(root=ROOT):
     closed(binding,'schema enabled repository repository_id revision review_receipt_sha256 public_source reason')
     require(binding['schema']=='awa-router-ci-source/v1' and binding['repository']=='KleinPerkins/intent-router','router source owner changed')
     require(binding['enabled'] is True and binding['public_source'] is True,'required seam prerequisite unavailable: exact reviewed accessible router source is not enrolled')
-    require(type(binding['repository_id']) is int and binding['repository_id']>0,'router immutable source identity required')
+    require(type(binding['repository_id']) is int and binding['repository_id']==1294651532,'router immutable source identity differs')
     for key,n in [('revision',40),('review_receipt_sha256',64)]:
         require(isinstance(binding[key],str) and re.fullmatch('[0-9a-f]{'+str(n)+'}',binding[key]),'reviewed exact router binding required')
-    return binding
+    provenance=parse((root/'.github/ci-adapter-provenance.json').read_bytes())
+    require(isinstance(provenance,dict) and provenance.get('schema')=='awa-ci-adapter-provenance/v1','invalid adapter provenance')
+    sources=provenance.get('incremental_sources')
+    require(isinstance(sources,list) and all(isinstance(s,dict) for s in sources),'invalid source provenance')
+    matches=[s for s in sources if s.get('repository')==binding['repository']]
+    require(len(matches)==1,'router source provenance missing or duplicated')
+    source=matches[0]
+    for key,n in [('revision',40),('merged_revision',40),('reviewed_and_merged_tree',40),('review_receipt_sha256',64)]:
+        require(isinstance(source.get(key),str) and re.fullmatch('[0-9a-f]{'+str(n)+'}',source[key]),'reviewed router provenance malformed')
+    require(binding['revision']==source['merged_revision'] and binding['review_receipt_sha256']==source['review_receipt_sha256'],'router binding differs from reviewed provenance')
+    # Receipt digest remains an audit commitment; no receipt bytes are loaded here.
+    # The reviewed source policy, not a second hardcoded revision, is the trust root.
+    return dict(binding,reviewed_head=source['revision'],reviewed_and_merged_tree=source['reviewed_and_merged_tree'])
+
+def verify_router_checkout(binding,path):
+    require((path/'.git').exists(),'exact router checkout required')
+    require(subprocess.check_output(['git','-C',str(path),'rev-parse','HEAD'],text=True).strip()==binding['revision'],'router checkout revision differs')
+    require(subprocess.check_output(['git','-C',str(path),'rev-parse','HEAD^{tree}'],text=True).strip()==binding['reviewed_and_merged_tree'],'router checkout tree differs from reviewed tree')
+    remote=subprocess.check_output(['git','-C',str(path),'remote','get-url','origin'],text=True).strip()
+    require(remote in ['https://github.com/'+binding['repository'], 'https://github.com/'+binding['repository']+'.git','git@github.com:'+binding['repository']+'.git'],'router remote identity differs')
+    require(not subprocess.check_output(['git','-C',str(path),'status','--porcelain']),'dirty router checkout')
 
 def verify_router_public_identity(binding):
     request=urllib.request.Request('https://api.github.com/repos/'+binding['repository'],headers={'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'})
@@ -158,11 +178,7 @@ def measured(shard,allow_cross_host=False):
             env['AWA_PERFORMANCE_RECEIPT']=str(receipt)
         if shard=='router-seam':
             binding=router_binding();verify_router_public_identity(binding);path=Path(os.environ.get('AWA_CI_ROUTER_PATH','')).resolve()
-            require((path/'.git').exists(),'exact router checkout required')
-            require(subprocess.check_output(['git','-C',str(path),'rev-parse','HEAD'],text=True).strip()==binding['revision'],'router checkout revision differs')
-            remote=subprocess.check_output(['git','-C',str(path),'remote','get-url','origin'],text=True).strip()
-            require(remote in ['https://github.com/'+binding['repository'], 'https://github.com/'+binding['repository']+'.git','git@github.com:'+binding['repository']+'.git'],'router remote identity differs')
-            require(not subprocess.check_output(['git','-C',str(path),'status','--porcelain']),'dirty router checkout')
+            verify_router_checkout(binding,path)
             env.update(PYTHONPATH=str(ROOT)+os.pathsep+str(path),AWA_SEAM_REQUIRE_ROUTER='1',AWA_TRIAL_REQUIRE_ROUTER_LIFECYCLE='1',AWA_TRIAL_ROUTER_SOURCE=str(path))
         output=bounded(COMMANDS[shard],3600,overrides=env);print(output.decode(errors='replace'))
         skips=[];count=None;case_digest=None

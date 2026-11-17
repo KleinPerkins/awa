@@ -78,6 +78,39 @@ class IsolationTests(unittest.TestCase):
             binding.update(enabled=True,public_source=True,revision='f44dbadd')
             (root/'.github/router-ci-source.json').write_text(json.dumps(binding))
             with self.assertRaises(ci.ContractError):ci.router_binding(root)
+    def test_router_binding_requires_immutable_id_and_consistent_provenance(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw);(root/'.github').mkdir()
+            binding=json.loads((ROOT/'.github/router-ci-source.json').read_bytes())
+            provenance=json.loads((ROOT/'.github/ci-adapter-provenance.json').read_bytes())
+            def write(b,p):
+                (root/'.github/router-ci-source.json').write_text(json.dumps(b))
+                (root/'.github/ci-adapter-provenance.json').write_text(json.dumps(p))
+            write(binding,provenance)
+            current=ci.router_binding(root)
+            self.assertEqual(current['reviewed_head'],'9a9af7f2fb72d600a6dc01a7f99dfa9d2c822668')
+            self.assertEqual(current['reviewed_and_merged_tree'],'b054043db227ff00e7fe6d2be0db8e1ad6212b74')
+            for field,value in [('repository_id',123),('revision','a'*40),('review_receipt_sha256','a'*64)]:
+                write(dict(binding,**{field:value}),provenance)
+                with self.subTest(field=field),self.assertRaises(ci.ContractError):ci.router_binding(root)
+            for field,value in [('revision','short'),('merged_revision','b'*40),('reviewed_and_merged_tree',None),('review_receipt_sha256','b'*64)]:
+                changed=copy.deepcopy(provenance);changed['incremental_sources'][0][field]=value;write(binding,changed)
+                with self.subTest(field=field),self.assertRaises(ci.ContractError):ci.router_binding(root)
+            changed=copy.deepcopy(provenance);changed['incremental_sources']=[];write(binding,changed)
+            with self.assertRaises(ci.ContractError):ci.router_binding(root)
+    def test_router_fetched_revision_tree_remote_and_cleanliness_before_execution(self):
+        binding=ci.router_binding()
+        with tempfile.TemporaryDirectory() as raw:
+            path=Path(raw);(path/'.git').mkdir()
+            valid=[binding['revision'],binding['reviewed_and_merged_tree'],'https://github.com/'+binding['repository'],b'']
+            with patch.object(ci.subprocess,'check_output',side_effect=valid):ci.verify_router_checkout(binding,path)
+            for index,value in [(0,'a'*40),(1,'b'*40),(2,'https://github.com/foreign/router'),(3,b' M tracked')]:
+                output=list(valid);output[index]=value
+                with self.subTest(index=index),patch.object(ci.subprocess,'check_output',side_effect=output),self.assertRaises(ci.ContractError):ci.verify_router_checkout(binding,path)
+            # A failed source check cannot reach the command runner or router import path.
+            with patch.object(ci,'verify_router_public_identity'),patch.dict(os.environ,AWA_CI_ROUTER_PATH=str(path)),patch.object(ci,'verify_router_checkout',side_effect=ci.ContractError('tree differs')),patch.object(ci,'bounded') as runner,self.assertRaises(ci.ContractError):
+                ci.measured('router-seam',allow_cross_host=True)
+            runner.assert_not_called()
     def test_router_public_identity_checks_actual_id_name_visibility_and_archive(self):
         binding={'repository':'KleinPerkins/intent-router','repository_id':123}
         valid={'id':123,'full_name':'KleinPerkins/intent-router','private':False,'archived':False}

@@ -153,6 +153,25 @@ def validate_enrollment(enrollment,account,origin):
  require(enrollment['origin_account']==origin,'review origin differs from author origin')
  require(account.get('type')=='chatgpt' and account.get('email')==enrollment['email'],'runtime account differs from enrollment')
 
+def validate_producer(policy,enrollment):
+ # Trusted policy is tuple-bound; the email commitment excludes portable host paths.
+ # This is an operational misconfiguration guard under Q16, not provider attestation.
+ value=json.loads(policy)
+ require(isinstance(value,dict) and value.get('schema')=='g1-review-enrollments/v1'
+         and value.get('repository_id')==1289571438 and value.get('enabled') is True,'invalid review policy')
+ producers=value.get('producers')
+ require(isinstance(producers,list) and all(isinstance(p,dict) for p in producers),'invalid review producers')
+ matches=[p for p in producers if p.get('id')==enrollment['id']]
+ require(len(matches)==1,'unknown or duplicated review enrollment')
+ producer=matches[0]
+ require(producer.get('enabled') is True and producer.get('github_user_id')==49759187
+         and all(producer.get(k)==enrollment[k] for k in ('origin_account','cli_version','credential_store')),
+         'review enrollment differs from trusted policy')
+ require(producer.get('account_email_sha256')==digest(enrollment['email']),'enrolled account identity differs from trusted policy')
+ require(producer.get('instructions_sha256')==digest(INSTRUCTIONS)
+         and producer.get('capture_adapter_sha256')==digest(Path(__file__).read_bytes()),'unenrolled capture adapter')
+ return producer
+
 def git(repo,*args):
  # Local inspection needs repository objects/index/config but must not execute
  # repository filters, fsmonitor, hooks, a pager or inherited Git overrides.
@@ -249,6 +268,7 @@ def captured_report(raw,last,report_validator=validate_report):
  return starts[0]['thread_id'],report
 
 def capture(repo,request,policy,enrollment,cli='codex',timeout=600):
+ validate_producer(policy,enrollment)
  account=account_read(cli,enrollment['credential_store']);validate_enrollment(enrollment,account,request['origin_account'])
  version=run([cli,'--version']).decode().strip()
  require(version==enrollment['cli_version'],'unenrolled CLI version')
