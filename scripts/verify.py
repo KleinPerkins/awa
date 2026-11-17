@@ -58,6 +58,50 @@ def check_checkout(expected):
     if expected['event']=='pull_request':
         require(subprocess.check_output(['git','show','-s','--format=%P','HEAD'],cwd=ROOT,text=True).split()==[expected['base_sha'],expected['head_sha']],'merge parent ordering differs')
 
+def terminal_without_reaping(p):
+    require(p.returncode is None,'child already reaped')
+    observed=os.waitid(os.P_PID,p.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT)
+    if observed is None:return None
+    require(observed.si_pid==p.pid and observed.si_code in (os.CLD_EXITED,os.CLD_KILLED,os.CLD_DUMPED),'unexpected child status')
+    return observed.si_status if observed.si_code==os.CLD_EXITED else -observed.si_status
+
+def group_members(p):
+    require(p.returncode is None,'group anchor already reaped')
+    result=subprocess.run(['/usr/bin/pgrep','-g',str(p.pid)],env={'PATH':'/usr/bin:/bin','LANG':'C'},capture_output=True,timeout=1)
+    require(result.returncode in (0,1) and not result.stderr and len(result.stdout)<=16384,'owned group observation failed')
+    lines=result.stdout.decode('ascii').splitlines()
+    require(all(line.isdecimal() and int(line)>1 for line in lines) and len(lines)==len(set(lines)) and (result.returncode==1)==(not lines),'invalid group observation')
+    return {int(line) for line in lines}-{p.pid}
+
+def stop(p):
+    require(p.returncode is None,'cannot signal a released process-group anchor')
+    # Every caller starts a private process group. Its descendants may still be
+    # alive after the leader exits, so leader completion is not group cleanup.
+    def terminate(sig):
+        try:os.killpg(p.pid,sig)
+        except ProcessLookupError:pass
+        except PermissionError:
+            # Darwin can report EPERM while an orphaned group is disappearing. Accept
+            # only observed absence; a still-present or inaccessible group fails closed.
+            deadline=time.monotonic()+.25
+            while time.monotonic()<deadline:
+                try:os.killpg(p.pid,0)
+                except ProcessLookupError:return
+                except PermissionError:pass
+                time.sleep(.01)
+            raise
+    for sig,seconds in ((signal.SIGTERM,3),(signal.SIGKILL,5)):
+        if terminal_without_reaping(p) is not None and not group_members(p):
+            p.wait();return
+        terminate(sig)
+        deadline=time.monotonic()+seconds
+        while time.monotonic()<deadline:
+            if terminal_without_reaping(p) is not None and not group_members(p):
+                p.wait();return
+            time.sleep(.01)
+    raise ContractError('owned command process group did not drain')
+
+
 def bounded(argv,timeout,cwd=ROOT,overrides=None):
     env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
     for k in list(env):
@@ -75,17 +119,15 @@ def bounded(argv,timeout,cwd=ROOT,overrides=None):
                 data=os.read(key.fileobj.fileno(),65536)
                 if not data:selector.unregister(key.fileobj);continue
                 out.extend(data);require(len(out)<=MAX_OUTPUT,'command output exceeded bound')
-        p.wait(timeout=max(.1,deadline-time.monotonic()))
-        require(p.returncode==0,'command failed: '+str(argv)+'\n'+out.decode(errors='replace'))
+        code=terminal_without_reaping(p)
+        while code is None:
+            require(time.monotonic()<deadline,'command timeout')
+            time.sleep(.01);code=terminal_without_reaping(p)
+        require(code==0,'command failed: '+str(argv)+'\n'+out.decode(errors='replace'))
         return bytes(out)
     finally:
-        try:os.killpg(p.pid,signal.SIGTERM)
-        except ProcessLookupError:pass
-        try:p.wait(timeout=2)
-        except subprocess.TimeoutExpired:pass
-        try:os.killpg(p.pid,signal.SIGKILL)
-        except ProcessLookupError:pass
-        p.wait();selector.close();p.stdout.close()
+        try:stop(p)
+        finally:selector.close();p.stdout.close()
 
 def validate_aggregate(needs,expected):
     c,m,hash_=policy()

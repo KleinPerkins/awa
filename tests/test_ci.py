@@ -1,7 +1,7 @@
 """Adversarial CI controls; only local fixture inputs, no credentials or API calls."""
 import copy, importlib.util, io, json, os, subprocess, sys, tempfile, unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 ROOT=Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location('awa_ci',ROOT/'scripts/verify.py');ci=importlib.util.module_from_spec(spec);spec.loader.exec_module(ci)
 ENV=dict(GITHUB_REPOSITORY='KleinPerkins/awa',GITHUB_REPOSITORY_ID='1289571438',GITHUB_EVENT_NAME='pull_request',GITHUB_SHA='a'*40,GITHUB_WORKFLOW_SHA='a'*40,GITHUB_RUN_ID='100',GITHUB_RUN_ATTEMPT='2',GITHUB_REF='refs/pull/12/merge',CI_HEAD_SHA='c'*40,CI_BASE_SHA='d'*40,GITHUB_WORKFLOW_REF='KleinPerkins/awa/.github/workflows/ci.yml@refs/pull/12/merge',GITHUB_WORKFLOW='CI')
@@ -63,6 +63,31 @@ class IsolationTests(unittest.TestCase):
         with patch.dict(os.environ,GH_TOKEN='fixture',GITHUB_TOKEN='fixture',CI_READ_TOKEN='metadata-only-fixture',AWA_FULL_INSTALLED_GUARD_MATRIX='1',PYTHONPATH='foreign'):
             raw=ci.bounded([sys.executable,'-I','-c','import os,json;print(json.dumps({k:os.environ.get(k) for k in ["GH_TOKEN","GITHUB_TOKEN","CI_READ_TOKEN","AWA_FULL_INSTALLED_GUARD_MATRIX","PYTHONPATH","HOME"]}))'],2,overrides={'HOME':'/fixture-only'})
         self.assertEqual(json.loads(raw),dict(GH_TOKEN=None,GITHUB_TOKEN=None,CI_READ_TOKEN=None,AWA_FULL_INSTALLED_GUARD_MATRIX=None,PYTHONPATH=None,HOME='/fixture-only'))
+    def test_normal_command_retains_anchor_until_cleanup(self):
+        original=ci.stop;states=[]
+        def checked(p):
+            states.append(p.returncode);return original(p)
+        with patch.object(ci,'stop',side_effect=checked):
+            self.assertEqual(ci.bounded([sys.executable,'-c','print("fixture")'],2),b'fixture\n')
+        self.assertEqual(states,[None])
+    def test_released_or_missing_child_anchor_never_signalled(self):
+        for code in (0,None):
+            p=Mock(pid=12345,returncode=code)
+            with patch.object(ci.os,'waitid',side_effect=ChildProcessError()),patch.object(ci.os,'killpg') as signal_group:
+                with self.assertRaises((ci.ContractError,ChildProcessError)):ci.stop(p)
+            signal_group.assert_not_called()
+    def test_group_signals_precede_only_final_reap(self):
+        p=Mock(pid=12345,returncode=None);events=[]
+        p.wait.side_effect=lambda:events.append('reap')
+        with patch.object(ci,'terminal_without_reaping',side_effect=[None,0]),patch.object(ci,'group_members',return_value=set()),patch.object(ci.os,'killpg',side_effect=lambda *args:events.append('signal')):
+            ci.stop(p)
+        self.assertEqual(events,['signal','reap'])
+    def test_kill_escalation_precedes_final_reap(self):
+        p=Mock(pid=12345,returncode=None);events=[]
+        p.wait.side_effect=lambda:events.append('reap')
+        with patch.object(ci,'terminal_without_reaping',side_effect=[None,None,0]),patch.object(ci,'group_members',return_value=set()),patch.object(ci.time,'monotonic',side_effect=[0,4,4,5]),patch.object(ci.os,'killpg',side_effect=lambda pid,sig:events.append(sig)):
+            ci.stop(p)
+        self.assertEqual(events,[ci.signal.SIGTERM,ci.signal.SIGKILL,'reap'])
     def test_private_fixture_base_has_secure_ancestry_and_darwin_uses_os_temp(self):
         base=ci.private_fixture_base();self.assertTrue(base.is_dir())
         if ci.platform.system()=='Darwin':self.assertNotIn('/Users/',str(base))
