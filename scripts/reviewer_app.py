@@ -418,6 +418,11 @@ def require_unarmed(pr):
             'existing or unknown native auto-merge request; read-only reconciliation required')
 
 
+def repository_control_projection(repo):
+    return {k: repo[k] for k in ('id', 'default_branch', 'private', 'allow_squash_merge',
+            'allow_merge_commit', 'allow_rebase_merge', 'allow_auto_merge')}
+
+
 def snapshot(api, number, policy, policy_hash, now, *, require_successor_only=False):
     prefix = '/repos/' + REPOSITORY
     repo = repository_snapshot(api)
@@ -445,7 +450,7 @@ def snapshot(api, number, policy, policy_hash, now, *, require_successor_only=Fa
     receipt = choose_receipt(comments, policy, current, policy_hash, now, origin)
     ci = validate_ci(api, prefix, pr, merge_sha)
     return {'tuple': current, 'origin': origin, 'receipt': receipt, 'ci': ci, 'merge_sha': merge_sha,
-            'node_id': pr['node_id'], 'contributing_rulesets': sorted({r['ruleset_id'] for r in rules}), 'bypass_visibility': {str(r['id']): ('visible' if 'bypass_actors' in r else 'redacted-or-unavailable') for r in rulesets}, 'controls_sha256': digest(canonical([{k: repo[k] for k in ('id', 'default_branch', 'private', 'allow_squash_merge', 'allow_merge_commit', 'allow_rebase_merge', 'allow_auto_merge')}, rules, rulesets]))}
+            'node_id': pr['node_id'], 'contributing_rulesets': sorted({r['ruleset_id'] for r in rules}), 'bypass_visibility': {str(r['id']): ('visible' if 'bypass_actors' in r else 'redacted-or-unavailable') for r in rulesets}, 'controls_sha256': digest(canonical([repository_control_projection(repo), rules, rulesets]))}
 
 def app_non_bypass(rules, rulesets):
     """Caller-specific evidence; the caller must be the validated App token."""
@@ -480,7 +485,7 @@ def controls_snapshot(api, *, require_legacy=False, require_successor_only=False
     rulesets = [api.request(prefix + '/rulesets/' + str(s['id'])) for s in summaries]
     validate_controls(repo, rules, rulesets, require_legacy=require_legacy,
                       require_successor_only=require_successor_only)
-    result = {'controls_sha256': digest(canonical([repo, rules, rulesets])),
+    result = {'controls_sha256': digest(canonical([repository_control_projection(repo), rules, rulesets])),
               'contributing_rulesets': sorted({r['ruleset_id'] for r in rules}),
               'bypass_visibility': {str(r['id']): ('visible' if 'bypass_actors' in r else 'redacted-or-unavailable') for r in rulesets}}
     if require_app_non_bypass:

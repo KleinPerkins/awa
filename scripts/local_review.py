@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import selectors
 import signal
+import stat
 import subprocess
 import tempfile
 import time
@@ -293,17 +294,37 @@ def capture(repo,request,policy,enrollment,cli='codex',timeout=600):
   'runtime':{'cli_version':version,'credential_store':enrollment['credential_store'],'thread_id':thread,'turn_id':None,'status':'completed','event_stream_sha256':digest(raw),'startup_notice_sha256':[digest(e['item']['message']) for e in map(json.loads,raw.decode().splitlines()) if e.get('type')=='item.completed' and e['item'].get('type')=='error']},
   'started_at':started,'completed_at':utc(),'review':report,'report_sha256':digest(canonical(report))}
 
+def private_read(path,*,require_private=True):
+ # Bound and validate the CLI's local inputs before parsing; no symlink/FIFO read.
+ fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+ with os.fdopen(fd,'rb') as source:
+  info=os.fstat(source.fileno())
+  require(stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid()
+          and (not require_private or not info.st_mode & 0o077) and info.st_size<=MAX_INPUT,'private regular input required')
+  data=source.read(MAX_INPUT+1)
+  require(len(data)<=MAX_INPUT,'input exceeds bound')
+  return data
+
+def private_destination(path):
+ path=Path(path).absolute()
+ require(path.parent.resolve()==path.parent,'symlink destination parent')
+ info=path.parent.stat()
+ require(stat.S_ISDIR(info.st_mode) and info.st_uid==os.getuid()
+         and not info.st_mode & 0o077,'private destination directory required')
+ require(not os.path.lexists(path),'output already exists')
+ return path
+
 def main():
  parser=argparse.ArgumentParser(description=__doc__)
  for name in ('repo','request','policy','enrollment','output'):parser.add_argument('--'+name,required=True)
  parser.add_argument('--cli',default='codex');parser.add_argument('--timeout',type=int,default=600)
  args=parser.parse_args()
  try:
-  registry=json.loads((Path(args.repo)/'.github/review-enrollments.json').read_text())
+  registry=json.loads(private_read(Path(args.repo)/'.github/review-enrollments.json',require_private=False))
   require(registry.get('repository_id')==1289571438 and registry.get('enabled') is True and registry.get('producers'), 'AWA review enrollment disabled')
   require(1<=args.timeout<=1800,'timeout out of bounds')
-  output=Path(args.output);require(not output.exists(),'output already exists')
-  request=json.loads(Path(args.request).read_text());enrollment=json.loads(Path(args.enrollment).read_text());policy=Path(args.policy).read_bytes()
+  output=private_destination(args.output)
+  request=json.loads(private_read(args.request));enrollment=json.loads(private_read(args.enrollment));policy=private_read(args.policy)
   result=capture(Path(args.repo).resolve(),request,policy,enrollment,args.cli,args.timeout)
   # No receipt is created until all checks pass; exclusive creation avoids overwriting old evidence.
   with tempfile.NamedTemporaryFile(mode='w',dir=output.parent,prefix='.review-',delete=False) as f:

@@ -150,6 +150,13 @@ class WorkflowTests(unittest.TestCase):
                 if 'uses' in step:self.assertRegex(step['uses'],r'@[0-9a-f]{40}$')
                 if step.get('uses','').startswith('actions/checkout@'):self.assertIs(step['with']['persist-credentials'],False)
         seam=jobs['router-seam']['steps'];self.assertEqual(seam[2]['env'],{'CI_READ_TOKEN':'${{ github.token }}'});self.assertEqual(seam[-1]['env']['CI_READ_TOKEN'],'${{ github.token }}');self.assertTrue(all('CI_READ_TOKEN' not in step.get('env',{}) for step in seam if 'uses' in step));self.assertEqual(seam[2]['run'],'python3 -I -B scripts/verify.py router-binding');self.assertEqual(seam[3]['with']['ref'],'${{ steps.router.outputs.revision }}')
+    def test_native_runtime_pin_preserves_sqlite_floor_and_other_lanes(self):
+        workflow=json.loads((ROOT/'.github/workflows/ci.yml').read_bytes());c,_,_=ci.policy()
+        self.assertEqual(c['runtime_requirements']['native_stock_sqlite_minimum'],'3.51.3')
+        self.assertEqual(c['runtime_requirements']['native_python'],'3.15.2')
+        for name in ci.SHARDS:
+            setup=next(x for x in workflow['jobs'][name]['steps'] if x.get('uses','').startswith('actions/setup-python@'))
+            self.assertEqual(setup['with']['python-version'],'3.15.2' if name=='source-native' else '3.14.6')
     def test_manual_receipt_mode_validates_required_pr_without_traceback(self):
         workflow=json.loads((ROOT/'.github/workflows/reviewer-app.yml').read_bytes())
         resolver=next(x for x in workflow['jobs']['admit']['steps'] if x.get('id')=='target')

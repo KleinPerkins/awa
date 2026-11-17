@@ -233,4 +233,36 @@ class GitBindingTests(unittest.TestCase):
   fixture=CaptureTests();fixture.enrollment=enrollment;policy=fixture.policy()
   with patch.object(m,'account_read',return_value=account),patch.object(m,'run',return_value=b'codex-cli 0.149.0'),self.assertRaisesRegex(m.CaptureError,'unenrolled CLI version'):m.capture(self.repo,self.request,policy,enrollment)
 
+class PrivateCLITests(unittest.TestCase):
+ def test_private_regular_input_is_bounded_and_rejects_symlink_fifo_and_public_mode(self):
+  with tempfile.TemporaryDirectory() as raw:
+   root=Path(raw).resolve();source=root/'input.json';source.write_bytes(b'{}');source.chmod(0o600)
+   self.assertEqual(m.private_read(source),b'{}')
+   source.chmod(0o644)
+   self.assertEqual(m.private_read(source,require_private=False),b'{}')
+   with self.assertRaises(m.CaptureError):m.private_read(source)
+   source.chmod(0o600);link=root/'link';link.symlink_to(source)
+   with self.assertRaises(OSError):m.private_read(link)
+   fifo=root/'fifo';os.mkfifo(fifo,0o600)
+   with self.assertRaises(m.CaptureError):m.private_read(fifo)
+   with patch.object(m,'MAX_INPUT',1),self.assertRaises(m.CaptureError):m.private_read(source)
+ def test_output_requires_private_real_parent_and_absent_path(self):
+  with tempfile.TemporaryDirectory() as raw:
+   root=Path(raw).resolve();out=root/'receipt.json'
+   self.assertEqual(m.private_destination(out),out)
+   root.chmod(0o755)
+   with self.assertRaises(m.CaptureError):m.private_destination(out)
+   root.chmod(0o700);out.symlink_to(root/'absent')
+   with self.assertRaises(m.CaptureError):m.private_destination(out)
+   out.unlink();link=root/'linked-parent';link.symlink_to(root,target_is_directory=True)
+   with self.assertRaises(m.CaptureError):m.private_destination(link/'receipt.json')
+ def test_invalid_cli_input_does_not_start_capture_or_create_receipt(self):
+  import io,sys
+  with tempfile.TemporaryDirectory() as raw:
+   root=Path(raw).resolve();(root/'.github').mkdir();(root/'.github/review-enrollments.json').write_text(json.dumps({'repository_id':1289571438,'enabled':True,'producers':[{}]}))
+   source=root/'input';os.mkfifo(source,0o600);out=root/'receipt'
+   argv=['local_review','--repo',str(root),'--request',str(source),'--policy',str(source),'--enrollment',str(source),'--output',str(out)]
+   with patch.object(sys,'argv',argv),patch('sys.stderr',new=io.StringIO()),patch.object(m,'capture') as capture,self.assertRaises(SystemExit) as error:m.main()
+   self.assertEqual(error.exception.code,1);capture.assert_not_called();self.assertFalse(out.exists())
+
 if __name__=='__main__':unittest.main()

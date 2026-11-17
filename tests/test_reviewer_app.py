@@ -658,6 +658,17 @@ class AppNonBypassTests(unittest.TestCase):
         self.assertEqual(value['bypass_visibility'],{'1':'redacted-or-unavailable'})
         self.assertEqual(value['contributing_rulesets'],[1])
         self.assertNotIn('bypass_actors',sets[0],'caller-specific evidence must not invent a hidden list')
+    def test_noncontrol_repository_metadata_is_excluded_but_real_control_drift_stays_bound(self):
+        app,repo,rules,sets=self.fixture();before=self.snapshot(app,repo)
+        repo.update(updated_at='new-time',stargazers_count=42,open_issues_count=99,description='new description')
+        self.assertEqual(self.snapshot(app,repo),before)
+        for key in ('allow_squash_merge','allow_merge_commit','allow_rebase_merge','allow_auto_merge'):
+            changed=dict(repo,**{key:not repo[key]})
+            self.assertNotEqual(gate.repository_control_projection(repo),gate.repository_control_projection(changed))
+            with self.assertRaises(gate.Rejected):self.snapshot(app,changed)
+        # Effective rules/rulesets/bypass evidence are still validated and hashed in full.
+        sets[0]['current_user_can_bypass']='always'
+        with self.assertRaises(gate.Rejected):self.snapshot(app,repo)
     def test_every_missing_unknown_or_capable_status_refuses(self):
         for value in (None,'','always','pull_requests_only','pull_request','exempt','unknown',True,False,0,[],{}):
             app,repo,rules,sets=self.fixture();sets[0]['current_user_can_bypass']=value
