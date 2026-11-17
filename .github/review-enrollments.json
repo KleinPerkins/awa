@@ -4,9 +4,48 @@
   "repository_names": [
     "KleinPerkins/awa"
   ],
-  "enabled": false,
-  "producers": [],
+  "enabled": true,
+  "producers": [
+    {
+      "id": "enrollment-24c0a5f2",
+      "enabled": true,
+      "origin_account": "origin-7612de79",
+      "github_user_id": 49759187,
+      "instructions_sha256": "7efd718dd897e06155b8e49eca37d18b15fb1e47610d9cf4b2d26e294a99e10b",
+      "cli_version": "codex-cli 0.148.0",
+      "credential_store": "keyring",
+      "allowed_startup_notice_sha256": [
+        "b2fc6975a5637afa2ac999a3260fc7980db0be97b0474c7a8a14c57e18d4a6e1",
+        "de8c81bdbcbc27db4d16d6ea11b6463544d5351492a5b397d3d31af1fbc78ca3"
+      ],
+      "creation_adapter_sha256": "d85e15683099b8505564bbb72ff2c166bb2a58a824f3b7d9c58e00c3e1ef0c43",
+      "capture_adapter_sha256": "bcb61dde99d9dd7454a2e6d5578e8d37c0a84c54c13110eeed6cae24d774ea2d"
+    },
+    {
+      "id": "enrollment-e876e8eb",
+      "enabled": true,
+      "origin_account": "origin-6a644d43",
+      "github_user_id": 49759187,
+      "instructions_sha256": "7efd718dd897e06155b8e49eca37d18b15fb1e47610d9cf4b2d26e294a99e10b",
+      "cli_version": "codex-cli 0.148.0",
+      "credential_store": "file",
+      "allowed_startup_notice_sha256": [
+        "b2fc6975a5637afa2ac999a3260fc7980db0be97b0474c7a8a14c57e18d4a6e1"
+      ],
+      "creation_adapter_sha256": "d85e15683099b8505564bbb72ff2c166bb2a58a824f3b7d9c58e00c3e1ef0c43",
+      "capture_adapter_sha256": "bcb61dde99d9dd7454a2e6d5578e8d37c0a84c54c13110eeed6cae24d774ea2d"
+    }
+  ],
   "governance": {
-    "accepted_delivery_boundary": "The operator accepted the documented concurrent-writer auto-merge race on 2026-11-17. App-only delivery is an authorization and operating rule, not atomic technical exclusion: another write-capable actor may arm native auto-merge after the last read and before App approval, and that approval may release the other request. Agents remain forbidden from manual merge, pre-arming, cancelling auto-merge or bypass. Fresh originating-account independent review, exact CI, the App own approval and all admission gates remain mandatory. Observed foreign or unknown auto-merge requests still reject. Coexisting unsolicited approvals never substitute for App admission evidence and are not themselves prohibited. Existing-approval reconciliation addresses lost responses, not the first-approval race. This limitation is separately accepted from Q16 receipt trust; no human technical-review gate or broader actor permission is added."
+    "accepted_delivery_boundary": "The operator accepted the documented concurrent-writer auto-merge race on 2026-11-17. App-only delivery is an authorization and operating rule, not atomic technical exclusion: another write-capable actor may arm native auto-merge after the last read and before App approval, and that approval may release the other request. Agents remain forbidden from manual merge, pre-arming, cancelling auto-merge or bypass. Fresh originating-account independent review, exact CI, the App own approval and all admission gates remain mandatory. Observed foreign or unknown auto-merge requests still reject. Coexisting unsolicited approvals never substitute for App admission evidence and are not themselves prohibited. Existing-approval reconciliation addresses lost responses, not the first-approval race. This limitation is separately accepted from Q16 receipt trust; no human technical-review gate or broader actor permission is added.",
+    "review_authority": "The authoring agent automatically captures a fresh enrolled independent review under the originating PR-creation account before every ready PR and after any head, current base or trusted policy change. Use a qualified same-account cloud route when available, otherwise the qualified trusted local adapter. No human technical review or cross-account substitution.",
+    "native_delivery_authority": "The qualified Chaos Scheduler App4217367 is the only authorized automatic approver and native delivery actor. It supplies or reconciles its own exact-head approval and requests native SQUASH immediately when merge-ready or native SQUASH auto-merge when eligible blocked, after fresh originating-account independent review, exact-tuple meaningful CI and strict protections. Other approvals never substitute for the App evidence; coexisting unsolicited approvals are not inherently prohibited. Agents cannot merge, pre-arm, cancel auto-merge or bypass checks. No failed/ambiguous mutation permits blind retry or fallback.",
+    "concurrent_writer_boundary": "On 2026-11-17 the operator explicitly accepted the documented GitHub concurrent-writer race and directed execution to proceed. App-only delivery is an authorization and operating rule, not atomic exclusion of all other write-capable actors. Another actor may arm auto-merge between the final null read and App approval, and that approval may release its request. Unknown or observed existing auto-merge still fails admission. Existing-review reconciliation does not eliminate the first-approval race. This acceptance is distinct from Q16 review-receipt operational trust and weakens no review/CI/identity gate or actor prohibition.",
+    "administrative_visibility": "The owner qualifies the complete bypass-actor policy with owner-visible reads during cutover; omitted full lists remain unknown, never assumed empty. Runtime uses the actual validated App writer token for GET-only effective-main/contributing-ruleset reads before approval and before native delivery, requiring complete active contributing coverage, current_user_can_bypass exactly never on every contributor, and unchanged App control evidence. CI_READ_TOKEN does not prove App-specific status. Trusted-main read-only qualification exercises the same check with its scoped App credential; each write independently rechecks its actual writer credential. These reads neither reveal other hidden actors nor atomically exclude later administrative drift. Existing visible actor checks, owner qualification, permission scopes and credential cleanup remain required.",
+    "approval_reconciliation": "Approval reconciliation uses currently visible GitHub records after fresh complete admission. A visible single current App approval is reused; visible duplicates or unknown/conflicting matching state stop. A later fully revalidated approval submission when no record is observed is not a blind fallback within a failed invocation. Delayed list visibility can leave a redundant authorized exact-head App approval audit record; no strong API consistency, at-most-once or exactly-once submission guarantee is claimed. No durable attempt store or new write endpoint is introduced; fresh independent review, exact CI, App identity and native-operation checks remain mandatory.",
+    "phase": "G1-qualified-producer-source-preparation-writer-off",
+    "source_limits": "CI and delivery source preparation only. Mappings reuse the separately qualified WORK and PERSONAL origin identities with exact AWA adapter/instruction hashes. Runtime App flags remain OFF; no new live account qualification, source publication, installation, activation or release is asserted.",
+    "qualification_provenance": "WORK review009 actual pass in the Intent Router cohort; PERSONAL existing canary PR101 App delivery and trusted enrollment policy. Shared GitHub user does not identify a Codex account.",
+    "bootstrap_limits": "Combined initial source admission only. Keep AWA_CI_ADAPTER_ENROLLED and REVIEWER_APP_ENABLED OFF until parent publication, exact review/creation, hosted CI and owner-controlled main/App qualification gates pass. No redundant account bootstrap inferred."
   }
 }

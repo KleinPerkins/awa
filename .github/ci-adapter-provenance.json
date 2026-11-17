@@ -15,12 +15,39 @@
   },
   "adaptations": [
     "AWA exact original private repository identity; no public-successor alias",
-    "Disabled empty account enrollment and disabled privileged workflow",
+    "Qualified WORK/PERSONAL producer source mappings rebound to exact AWA capture/creation/instruction hashes; privileged workflow runtime flags stay OFF",
     "AWA CI aggregate/shard names",
     "Retain source review/creation/App safety tests; replace Dev migration/workflow tests with AWA preparation controls",
     "CI identity/bounded-process/exact-run aggregate helpers reused; owner full runner remains intact",
     "Require native SQLite>=3.51.3 and chflags; full native runtime pin3.14.6",
-    "Exact reviewed router binding and live public immutable-ID check are mandatory; binding disabled/unresolved"
+    "Exact reviewed router binding and live public immutable-ID check are mandatory; CI-only exact reviewed public binding now prepared"
   ],
-  "trust": "Accepted Q16 operational local receipt trust and accepted concurrent-writer auto-merge race limit unchanged. Not provider attestation."
+  "trust": "Accepted Q16 operational local receipt trust and accepted concurrent-writer auto-merge race limit unchanged. Not provider attestation.",
+  "incremental_sources": [
+    {
+      "repository": "KleinPerkins/intent-router",
+      "revision": "9a9af7f2fb72d600a6dc01a7f99dfa9d2c822668",
+      "review_receipt_sha256": "effa7d60c3542a87b62237d260f1fc7f873ba5ed48e1b1d7fe62a1487626ad88",
+      "files": {
+        "scripts/create_review_pr.py": "4538c95fafea06d1107b86c472a3c7b0b05dfefb5b08b024e3ca6510464867f3",
+        "scripts/reviewer_app.py": "1c23857f8d721af56fe21b09588126ae9f1bafd35ed9197ab647780b0fe96fb6",
+        "tests/test_create_review_pr.py": "ca1db205c9f3c73ace5ea74c111162b2ddb3e0c5388ff380de542ded4f49c9ef",
+        "tests/test_reviewer_app.py": "e708ebd731705a811f5ada2400b077e10d688e9f71992f75e482320599d7baff"
+      },
+      "adaptations": [
+        "Policy-bound creator validation and producer-specific notice allowlist; retain AWA phase identity check",
+        "Re-read actual App approval before delivery; retain AWA exact job/contract hash and control validation",
+        "Port independent creator and delivery fixture tests; preserve AWA-specific admission tests",
+        "Actual App writer credential non-bypass reads before approval and native operation; preserve AWA effective-review/control validation",
+        "Required sixteen original router seam/golden/real-loop/disposable lifecycle tests; multiline unittest identity parser corrected after observed refusal"
+      ],
+      "merged_revision": "f559159e76c6d9786b41f6fc566f921d55303f1b",
+      "reviewed_and_merged_tree": "b054043db227ff00e7fe6d2be0db8e1ad6212b74"
+    }
+  ],
+  "producer_source_provenance": {
+    "policy_sha256": "57f2d7782aa6303acf37e6e1add365d331280851a0339510c2302b0d4de3133b",
+    "work_review_receipt_sha256": "effa7d60c3542a87b62237d260f1fc7f873ba5ed48e1b1d7fe62a1487626ad88",
+    "personal_qualification": "Existing actual canary PR101 App delivery and trusted enrollment policy; not a new live personal-account qualification"
+  }
 }

@@ -15,7 +15,7 @@ COMMANDS={
  'source-portable':['make','verify'], 'source-native':['make','verify'],
  'install-fixture':['make','verify-install'],
  'dashboard':['python3','-B','dashboard/test_render.py'],
- 'router-seam':['python3','-B','-m','unittest','-v','engine.tests.test_consumer_seam'],
+ 'router-seam':['python3', '-B', '-m', 'unittest', '-v', 'engine.tests.test_consumer_seam', 'engine.tests.test_consumer_golden.TestGoldenAgainstRealRouter', 'engine.tests.test_consumer_loop.TestOperatorLoop.test_real_router_benign_status_reads', 'engine.tests.test_consumer_loop.TestOperatorLoop.test_real_router_destructive_utterance_confirms', 'engine.tests.test_consumer_trial_runner.TestRouterLifecycleSeam'],
  'review-admission':['python3','-B','-m','unittest','discover','-v','-s','tests','-p','test_*.py']}
 HOSTS={'source-portable':'Linux','source-native':'Darwin','install-fixture':'Darwin','dashboard':'Linux','router-seam':'Linux','review-admission':'Linux'}
 class ContractError(ValueError): pass
@@ -163,7 +163,7 @@ def measured(shard,allow_cross_host=False):
             remote=subprocess.check_output(['git','-C',str(path),'remote','get-url','origin'],text=True).strip()
             require(remote in ['https://github.com/'+binding['repository'], 'https://github.com/'+binding['repository']+'.git','git@github.com:'+binding['repository']+'.git'],'router remote identity differs')
             require(not subprocess.check_output(['git','-C',str(path),'status','--porcelain']),'dirty router checkout')
-            env.update(PYTHONPATH=str(ROOT)+os.pathsep+str(path),AWA_SEAM_REQUIRE_ROUTER='1')
+            env.update(PYTHONPATH=str(ROOT)+os.pathsep+str(path),AWA_SEAM_REQUIRE_ROUTER='1',AWA_TRIAL_REQUIRE_ROUTER_LIFECYCLE='1',AWA_TRIAL_ROUTER_SOURCE=str(path))
         output=bounded(COMMANDS[shard],3600,overrides=env);print(output.decode(errors='replace'))
         skips=[];count=None;case_digest=None
         if shard.startswith('source-'):
@@ -184,7 +184,7 @@ def measured(shard,allow_cross_host=False):
             require(not re.search(rb'(?:skipped=|\.\.\. skipped )',output),'dedicated source lane skipped cases')
             ids=re.findall(rb'^START (\S+)\s*$',output,re.MULTILINE)
             if not ids:
-                ids=[name+b' ('+scope+b')' for name,scope in re.findall(rb'^(\S+) \(([^\n]+)\) \.\.\.',output,re.MULTILINE)]
+                ids=[name+b' ('+scope+b')' for name,scope in re.findall(rb'^(\S+) \(([^\n]+)\)(?: \.\.\.|$)',output,re.MULTILINE)]
             require(len(ids)==count and len(set(ids))==count,'case identity evidence incomplete')
             case_digest=digest(canonical(sorted(case.decode() for case in ids)))
         return {'commands':[COMMANDS[shard]],'case_count':count,'case_ids_sha256':case_digest,'skips':skips,'logs_sha256':digest(output),'contract_sha256':contract,'host':platform.system(),'architecture':platform.machine()}

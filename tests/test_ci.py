@@ -59,10 +59,23 @@ class IsolationTests(unittest.TestCase):
             parent=Path(raw);parent.chmod(0o777)
             with patch.object(ci.platform,'system',return_value='Darwin'),patch.object(ci.subprocess,'check_output',return_value=str(parent)):
                 with self.assertRaises(ci.ContractError):ci.private_fixture_base()
+    def test_real_multiline_unittest_labels_produce_complete_case_evidence(self):
+        output=ci.bounded([sys.executable,'-B','-m','unittest','-v',
+            'engine.tests.test_consumer_golden.TestGoldenSetShape'],20)
+        with patch.object(ci,'bounded',return_value=output),patch('sys.stdout',new=io.StringIO()):
+            measurement=ci.measured('dashboard',allow_cross_host=True)
+        self.assertEqual(measurement['case_count'],7)
+        self.assertEqual(measurement['skips'],[])
+        damaged=b'\n'.join(line for line in output.split(b'\n') if not line.startswith(b'test_count_is_25_to_30 ('))
+        with patch.object(ci,'bounded',return_value=damaged),patch('sys.stdout',new=io.StringIO()),self.assertRaises(ci.ContractError):
+            ci.measured('dashboard',allow_cross_host=True)
     def test_unknown_router_binding_is_hard_failure(self):
-        with self.assertRaisesRegex(ci.ContractError,'prerequisite unavailable'):ci.router_binding()
+        self.assertEqual(ci.router_binding()['repository_id'],1294651532)
         with tempfile.TemporaryDirectory() as d:
-            root=Path(d);(root/'.github').mkdir();binding=json.loads((ROOT/'.github/router-ci-source.json').read_bytes());binding.update(enabled=True,public_source=True,revision='f44dbadd')
+            root=Path(d);(root/'.github').mkdir();binding=json.loads((ROOT/'.github/router-ci-source.json').read_bytes());binding.update(enabled=False)
+            (root/'.github/router-ci-source.json').write_text(json.dumps(binding))
+            with self.assertRaisesRegex(ci.ContractError,'prerequisite unavailable'):ci.router_binding(root)
+            binding.update(enabled=True,public_source=True,revision='f44dbadd')
             (root/'.github/router-ci-source.json').write_text(json.dumps(binding))
             with self.assertRaises(ci.ContractError):ci.router_binding(root)
     def test_router_public_identity_checks_actual_id_name_visibility_and_archive(self):
@@ -83,8 +96,11 @@ class WorkflowTests(unittest.TestCase):
                 if 'uses' in step:self.assertRegex(step['uses'],r'@[0-9a-f]{40}$')
                 if step.get('uses','').startswith('actions/checkout@'):self.assertIs(step['with']['persist-credentials'],False)
         seam=jobs['router-seam']['steps'];self.assertEqual(seam[2]['run'],'python3 -I -B scripts/verify.py router-binding');self.assertEqual(seam[3]['with']['ref'],'${{ steps.router.outputs.revision }}')
-    def test_review_creation_and_app_remain_disabled_before_enrollment(self):
-        registry=json.loads((ROOT/'.github/review-enrollments.json').read_bytes());self.assertIs(registry['enabled'],False);self.assertEqual(registry['producers'],[])
+    def test_source_producers_are_bound_while_privileged_workflow_stays_flag_gated(self):
+        registry=json.loads((ROOT/'.github/review-enrollments.json').read_bytes());self.assertIs(registry['enabled'],True);self.assertEqual({p['credential_store'] for p in registry['producers']},{'keyring','file'});self.assertEqual({p['origin_account'] for p in registry['producers']},{'origin-7612de79','origin-6a644d43'})
+        for producer in registry['producers']:
+            self.assertEqual(producer['capture_adapter_sha256'],ci.digest((ROOT/'scripts/local_review.py').read_bytes()))
+            self.assertEqual(producer['creation_adapter_sha256'],ci.digest((ROOT/'scripts/create_review_pr.py').read_bytes()))
         workflow=json.loads((ROOT/'.github/workflows/reviewer-app.yml').read_bytes());self.assertTrue(workflow['jobs']['admit']['if'].startswith("vars.AWA_CI_ADAPTER_ENROLLED == 'true' && ("));self.assertIn('github.event.sender.id == 49759187',workflow['jobs']['admit']['if']);self.assertIn("github.ref == 'refs/heads/main'",workflow['jobs']['admit']['if']);self.assertIn("p['enabled'] is True",workflow['jobs']['admit']['steps'][1]['run'])
         for name,required in [('local_review.py',['repo','request','policy','enrollment','output']),('create_review_pr.py',['repo','request','policy','enrollment','review','title','body','output','journal'])]:
             args=[sys.executable,'-I','-B',str(ROOT/'scripts'/name)]
