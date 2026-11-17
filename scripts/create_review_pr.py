@@ -246,7 +246,9 @@ def create(repo, request, policy, enrollment, receipt, title, body, output, jour
                           'capture_adapter_sha256': review.digest(Path(review.__file__).read_bytes())}
                 comments_path = PREFIX + '/issues/' + str(pr['number']) + '/comments'
                 comments = api.call('GET', comments_path + '?per_page=100')
-                require(isinstance(comments, list) and not comments, 'existing or unknown comments; no first origin')
+                require(isinstance(comments, list) and len(comments) < 100
+                        and all(isinstance(row, dict) and isinstance(row.get('body'), str) for row in comments), 'unknown or incomplete comments; no first origin')
+                require(not any(row['body'].startswith('<!-- g1-pr-origin:') for row in comments), 'existing or unknown origin; no first origin')
                 comment_body = ORIGIN_MARKER + review.canonical(origin)
                 state['status'] = 'comment-attempted'
                 write_state(journal_file, state)

@@ -210,6 +210,23 @@ class CreationTests(unittest.TestCase):
                 self.journal.unlink(missing_ok=True)
                 self.api = FakeGithub()
 
+    def test_unrelated_comments_do_not_block_first_origin(self):
+        self.api.comments=[{'body':'Automated CI has started.'},{'body':'Unrelated owner discussion.'}]
+        self.create()
+        self.assertEqual(json.loads(self.journal.read_text())['status'],'complete')
+        self.assertTrue(self.output.exists())
+
+    def test_unknown_incomplete_or_origin_prefixed_comments_refuse_without_retry(self):
+        variants=[None,[None],[{}],[{'body':42}],[{'body':'ordinary'}]*100,
+                  [{'body':'<!-- g1-pr-origin:v2 --> unknown'}],[{'body':'<!-- g1-pr-origin:v1 -->'}]]
+        for index,comments in enumerate(variants):
+            self.api=FakeGithub();self.api.comments=comments
+            self.output=self.root/('origin-'+str(index)+'.json');self.journal=self.root/('journal-'+str(index)+'.json')
+            with self.subTest(comments=comments),self.assertRaises(m.review.CaptureError):self.create()
+            self.assert_no_origin()
+            state=json.loads(self.journal.read_text());self.assertEqual(state['status'],'incomplete-no-retry')
+            self.assertFalse(any(method=='POST' and '/comments' in path for method,path,_ in self.api.calls))
+
     def test_existing_unknown_pr_and_origin_refused(self):
         for existing in ([{'number': 2}], {}, None):
             self.api.existing = existing

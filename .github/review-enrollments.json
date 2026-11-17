@@ -18,7 +18,7 @@
         "b2fc6975a5637afa2ac999a3260fc7980db0be97b0474c7a8a14c57e18d4a6e1",
         "de8c81bdbcbc27db4d16d6ea11b6463544d5351492a5b397d3d31af1fbc78ca3"
       ],
-      "creation_adapter_sha256": "d8ce236bbe8ec6e88f0dc773b47e5cfc5c06681eb1f3c6bc739ab77bbb79e8b1",
+      "creation_adapter_sha256": "450ed53c3a6491160b5379a8abbfd1b126498982caf457dbb42cefd12cda8821",
       "capture_adapter_sha256": "9aa546341d5a9d48f7fdbddecc4723ab1fac8e63c31db134ef080f9154e819b0",
       "account_email_sha256": "6e4f2fc6693529cee6621b184d9d5a45260f0ef57e60a34418ca769f2592b75a"
     },
@@ -33,7 +33,7 @@
       "allowed_startup_notice_sha256": [
         "b2fc6975a5637afa2ac999a3260fc7980db0be97b0474c7a8a14c57e18d4a6e1"
       ],
-      "creation_adapter_sha256": "d8ce236bbe8ec6e88f0dc773b47e5cfc5c06681eb1f3c6bc739ab77bbb79e8b1",
+      "creation_adapter_sha256": "450ed53c3a6491160b5379a8abbfd1b126498982caf457dbb42cefd12cda8821",
       "capture_adapter_sha256": "9aa546341d5a9d48f7fdbddecc4723ab1fac8e63c31db134ef080f9154e819b0",
       "account_email_sha256": "0b3a63bd0e38a8068039429abb29cb46146640763da52b8c8707d7d67420ba2d"
     }
