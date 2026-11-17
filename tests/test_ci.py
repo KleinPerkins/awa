@@ -140,6 +140,21 @@ class WorkflowTests(unittest.TestCase):
                 if 'uses' in step:self.assertRegex(step['uses'],r'@[0-9a-f]{40}$')
                 if step.get('uses','').startswith('actions/checkout@'):self.assertIs(step['with']['persist-credentials'],False)
         seam=jobs['router-seam']['steps'];self.assertEqual(seam[2]['run'],'python3 -I -B scripts/verify.py router-binding');self.assertEqual(seam[3]['with']['ref'],'${{ steps.router.outputs.revision }}')
+    def test_manual_receipt_mode_validates_required_pr_without_traceback(self):
+        workflow=json.loads((ROOT/'.github/workflows/reviewer-app.yml').read_bytes())
+        resolver=next(x for x in workflow['jobs']['admit']['steps'] if x.get('id')=='target')
+        self.assertIn("inputs.mode == 'receipt'",resolver['if'])
+        code='\n'.join(resolver['run'].splitlines()[1:-1])+'\n'
+        with tempfile.TemporaryDirectory() as raw:
+            event=Path(raw)/'event.json';output=Path(raw)/'output'
+            env=dict(os.environ,GITHUB_EVENT_NAME='workflow_dispatch',GITHUB_EVENT_PATH=str(event),GITHUB_OUTPUT=str(output))
+            for value in ('','invalid',None,'-1','0','1000000000'):
+                event.write_text(json.dumps({'inputs':{'mode':'receipt','pr':value}}))
+                result=subprocess.run([sys.executable,'-I','-B','-'],input=code.encode(),env=env,capture_output=True)
+                self.assertNotEqual(result.returncode,0);self.assertNotIn(b'Traceback',result.stderr);self.assertFalse(output.exists())
+            event.write_text(json.dumps({'inputs':{'mode':'receipt','pr':'19'}}))
+            result=subprocess.run([sys.executable,'-I','-B','-'],input=code.encode(),env=env,capture_output=True)
+            self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(output.read_text(),'pr=19\n')
     def test_source_producers_are_bound_while_privileged_workflow_stays_flag_gated(self):
         registry=json.loads((ROOT/'.github/review-enrollments.json').read_bytes());self.assertIs(registry['enabled'],True);self.assertEqual({p['credential_store'] for p in registry['producers']},{'keyring','file'});self.assertEqual({p['origin_account'] for p in registry['producers']},{'origin-7612de79','origin-6a644d43'})
         for producer in registry['producers']:
