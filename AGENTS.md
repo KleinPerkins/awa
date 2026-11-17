@@ -58,6 +58,12 @@ checked through read-only `__type` introspection on 2026-11-17, exposes
 `expectedHeadOid: GitObjectID` in both `MergePullRequestInput` and
 `EnablePullRequestAutoMergeInput`; both native branches intentionally retain that
 API head condition. These facts establish neither delivery nor activation.
+GitHub documents [active branch rules and repository ruleset GET endpoints](https://docs.github.com/en/rest/repos/rules)
+as requiring Metadata read, including installation tokens. `bypass_actors` may be redacted;
+App qualification still requires explicit `current_user_can_bypass: never`. The existing
+[same-App read-only qualification](https://github.com/KleinPerkins/intent-router/actions/runs/44165228588)
+passed with contents/pull-requests read and no Administration grant. This reference does
+not qualify AWA; its own actual qualification remains required.
 
 Only the qualified App approves and requests native squash or eligible auto-merge;
 agents never merge, arm auto-merge or bypass protections. Initial owner admission,
