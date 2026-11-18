@@ -1,5 +1,6 @@
 {
   "schema": "awa-ci-adapter-provenance/v1",
+  "provenance_scope": "Historical upstream source and review records; current AWA producer/policy pins are in .github/review-enrollments.json.",
   "source_repository": "KleinPerkins/dev",
   "source_revision": "d57009cb004d404adf9daa5a374a1c2b37b8288e",
   "source_file_sha256": {
@@ -46,6 +47,8 @@
     }
   ],
   "producer_source_provenance": {
+    "source_repository": "KleinPerkins/intent-router",
+    "policy_scope": "Historical Intent Router review009 policy, distinct from the current AWA enrollment policy.",
     "policy_sha256": "57f2d7782aa6303acf37e6e1add365d331280851a0339510c2302b0d4de3133b",
     "work_review_receipt_sha256": "effa7d60c3542a87b62237d260f1fc7f873ba5ed48e1b1d7fe62a1487626ad88",
     "personal_qualification": "Existing actual canary PR101 App delivery and trusted enrollment policy; not a new live personal-account qualification"

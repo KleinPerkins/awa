@@ -76,6 +76,9 @@ on 2026-11-17 downloaded the official `python-3.15.2-darwin-arm64.tar.gz` and re
 `Successfully set up CPython (3.15.2)`, then passed 1,788 tests (15 exact off-switch skips)
 and 33 native fixtures. All seven checks passed at `2e7c302`; this is historical runtime
 availability evidence, not qualification of a later candidate.
+Router declarations are source-reviewed policy covered by the same independent whole-diff
+review before CI admission. Producer-source provenance retains the historical upstream
+review policy; current AWA policy qualification comes from the current tuple receipt.
 
 Only the qualified App approves and requests native squash or eligible auto-merge;
 agents never merge, arm auto-merge or bypass protections. Initial owner admission,
