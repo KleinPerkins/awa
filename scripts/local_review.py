@@ -33,6 +33,7 @@ complete coverage and no findings. No author assertion is evidence of correctnes
 # CLI 0.148.0 emits these startup warnings as item.completed/type:error.
 # Exact text only: unknown errors remain fatal. Runtime completion is still required.
 STARTUP_NOTICES = frozenset({
+ 'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.',
  "Ignoring unknown `features` requirement `ultrafast_mode` from requirements layers: enterprise-managed requirements Ultra Fast mode access (rbac-ultrafast-mode), enterprise-managed requirements Computer History access (rbac-computer-history), /etc/codex/requirements.toml",
  "Configured value for `approval_policy` is disallowed by requirements; falling back to required value UnlessTrusted. Details: invalid value for `approval_policy`: `Never` is not in the allowed set [UnlessTrusted, OnRequest] (set by /etc/codex/requirements.toml)",
 })
@@ -277,6 +278,7 @@ def captured_report(raw,last,report_validator=validate_report):
    item=event.get('item') or {}
    notice=item.get('type')=='error' and item.get('message') in STARTUP_NOTICES
    require(not notice or kind=='item.completed','startup notice lacks completed event')
+   require(not notice or phase in ('startup','thread'),'startup notice after turn start')
    require(phase=='turn' or (notice and phase in ('startup','thread')),'review item out of order')
  starts=[e for e in events if e.get('type')=='thread.started']
  require(len(starts)==1 and isinstance(starts[0].get('thread_id'),str) and starts[0]['thread_id'],'fresh thread ID missing')

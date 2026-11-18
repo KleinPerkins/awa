@@ -98,6 +98,24 @@ class CaptureTests(unittest.TestCase):
   for kind in ('item.started','item.updated'):
    bad=self.events();bad.insert(2,{'type':kind,'item':{'type':'error','message':next(iter(m.STARTUP_NOTICES))}})
    with self.assertRaisesRegex(m.CaptureError,'completed event'):m.captured_report(self.raw(bad),json.dumps(self.report))
+ def test_disabled_code_mode_notice_is_exact_preturn_and_never_waives_tools(self):
+  message='Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.'
+  self.assertEqual(m.digest(message),'098e801ebc95c9c7312a945849442846324dcf639365a297313248993822711b')
+  policy=json.loads((Path(__file__).parents[1]/'.github/review-enrollments.json').read_bytes())
+  self.assertTrue(all(m.digest(message) in p['allowed_startup_notice_sha256'] for p in policy['producers']))
+  notice={'type':'item.completed','item':{'type':'error','message':message}}
+  for index in (0,1):
+   events=self.events();events.insert(index,notice)
+   self.assertEqual(m.captured_report(self.raw(events),json.dumps(self.report))[1],self.report)
+  for changed in (message+' ',message.replace('fail closed','continue')):
+   events=self.events();events.insert(0,{'type':'item.completed','item':{'type':'error','message':changed}})
+   with self.assertRaises(m.CaptureError):m.captured_report(self.raw(events),json.dumps(self.report))
+  events=self.events();events.insert(2,notice)
+  with self.assertRaisesRegex(m.CaptureError,'after turn start'):m.captured_report(self.raw(events),json.dumps(self.report))
+  events=self.events();events.insert(0,notice)
+  with self.assertRaises(m.CaptureError):m.captured_report(self.raw(events[:-1]),json.dumps(self.report))
+  events.insert(-1,{'type':'item.completed','item':{'type':'web_search','query':'untrusted'}})
+  with self.assertRaises(m.CaptureError):m.captured_report(self.raw(events),json.dumps(self.report))
  def test_process_limits_failure_timeout(self):
   import sys
   with self.assertRaises(m.CaptureError):m.run([sys.executable,'-c','raise SystemExit(1)'])
