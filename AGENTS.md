@@ -48,6 +48,13 @@ account with `scripts/local_review.py`, then create through
 `scripts/create_review_pr.py` and publish the unedited review receipt. No human
 technical review or cross-account substitution replaces that review.
 
+Ordinary capture and creation bind policy bytes to the exact `request.base_sha` registry
+Git blob. Use the admitted base versions of both helpers and their enrolled pins when
+proposing helper or policy updates; the proposed HEAD registry remains untrusted diff.
+Only already-authorized initial owner source evidence may use `--owner-bootstrap-policy`,
+which requires the base registry to be absent and explicitly binds the candidate registry.
+This local option adds no App admission, merge or activation authority.
+
 Trusted-main admission requires that complete passing independent review of the exact
 head, base, whole canonical diff and current policy before accepting CI as PR-admission
 evidence, including CI and governance changes. A CI receipt binds execution/contract identity; it is not
@@ -64,6 +71,11 @@ App qualification still requires explicit `current_user_can_bypass: never`. The 
 [same-App read-only qualification](https://github.com/KleinPerkins/intent-router/actions/runs/44165228588)
 passed with contents/pull-requests read and no Administration grant. This reference does
 not qualify AWA; its own actual qualification remains required.
+The actual [AWA native job](https://github.com/KleinPerkins/awa/actions/runs/44200977054/job/134454646356)
+on 2026-11-17 downloaded the official `python-3.15.2-darwin-arm64.tar.gz` and reported
+`Successfully set up CPython (3.15.2)`, then passed 1,788 tests (15 exact off-switch skips)
+and 33 native fixtures. All seven checks passed at `2e7c302`; this is historical runtime
+availability evidence, not qualification of a later candidate.
 
 Only the qualified App approves and requests native squash or eligible auto-merge;
 agents never merge, arm auto-merge or bypass protections. Initial owner admission,
