@@ -74,21 +74,38 @@ class TestNativeEntryPromptAdapter(unittest.TestCase):
             "time.sleep(30)\n",
             encoding="utf-8",
         )
+        owned_workers: list[subprocess.Popen] = []
+        popen = subprocess.Popen
+
+        def launch_owned_worker(*args, **kwargs):
+            process = popen(*args, **kwargs)
+            owned_workers.append(process)
+            return process
+
         started = time.monotonic()
-        adapter._supervise(
-            b'{"prompt":"never-in-argv-or-env-4f87"}',
-            command=[sys.executable, str(worker), str(pidfile)],
-            budget_seconds=2.0,
-        )
+        with mock.patch.object(adapter.subprocess, "Popen", side_effect=launch_owned_worker):
+            adapter._supervise(
+                b'{"prompt":"never-in-argv-or-env-4f87"}',
+                command=[sys.executable, str(worker), str(pidfile)],
+                budget_seconds=2.0,
+            )
         elapsed = time.monotonic() - started
         self.assertLessEqual(elapsed, 2.15)
         self.assertTrue(pidfile.is_file())
         pids = json.loads(pidfile.read_text(encoding="utf-8"))
         for _ in range(50):
+            # Reap only the exact direct child this fixture launched, if it
+            # exits after the adapter's fixed budget. poll() neither signals
+            # nor waits for a live child; kill(pid, 0) also counts zombies.
+            for process in owned_workers:
+                process.poll()
             if not any(self._alive(pid) for pid in pids):
                 break
             time.sleep(0.01)
-        self.assertFalse(any(self._alive(pid) for pid in pids), pids)
+        self.assertFalse(
+            any(self._alive(pid) for pid in pids),
+            {"pids": pids, "worker_returncodes": [p.returncode for p in owned_workers]},
+        )
 
     def test_worker_startup_consumes_the_fixed_recovery_deadline(self) -> None:
         clock = [100.0]
