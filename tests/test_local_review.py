@@ -175,6 +175,13 @@ class CaptureTests(unittest.TestCase):
    if '--version' in argv:return self.enrollment['cli_version'].encode()
    self.assertIn('--ignore-user-config',argv);self.assertIn('--ignore-rules',argv)
    self.assertIn('--ephemeral',argv);self.assertNotIn('resume',argv);self.assertNotIn('fork',argv)
+   # Check the invocation before the synthetic model turn: output rejection
+   # cannot undo a tool's side effect. Keep all confirmed 0.148 built-ins off.
+   config=dict(argv[i+1].split('=',1) for i,value in enumerate(argv[:-1]) if value=='-c')
+   self.assertEqual(config['web_search'],'"disabled"')
+   for feature in ('shell_tool','plugins','apps','multi_agent','view_image','image_generation',
+                   'code_mode_host','goals','memories','skill_search','tool_suggest','workspace_dependencies'):
+    self.assertEqual(config['features.'+feature],'false',feature)
    root=Path(kwargs['cwd']);roots.append(root)
    self.assertEqual((root/'instructions.txt').read_text(),m.INSTRUCTIONS)
    Path(argv[argv.index('--output-last-message')+1]).write_text(json.dumps(self.report))
