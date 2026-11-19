@@ -1,0 +1,10 @@
+{
+  "schema": "awa-router-ci-source/v1",
+  "enabled": true,
+  "repository": "KleinPerkins/intent-router",
+  "repository_id": 1294651532,
+  "revision": "f559159e76c6d9786b41f6fc566f921d55303f1b",
+  "review_receipt_sha256": "effa7d60c3542a87b62237d260f1fc7f873ba5ed48e1b1d7fe62a1487626ad88",
+  "public_source": true,
+  "reason": "CI-only binding to public immutable source merged by PR61. review009 independently reviewed head9a9af7f2fb72d600a6dc01a7f99dfa9d2c822668; squashf559159e76c6d9786b41f6fc566f921d55303f1b has identical treeb054043db227ff00e7fe6d2be0db8e1ad6212b74. All7 merged-main CI jobs passed in44164331792/1. Review receipt is not relabeled as reviewing the squash. consumer/router-pin.json unchanged."
+}

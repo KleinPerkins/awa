@@ -886,10 +886,15 @@ class TestIntegrityServer(EngineTestCase):
         committer.assert_called_once()
 
     def test_rejected_traffic_does_not_extend_idle(self):
-        server, thread, result = self._start(idle_timeout_s=0.18)
+        now = [0.0]
+        server, thread, result = self._start(idle_timeout_s=0.18, clock=lambda: now[0])
         started = time.monotonic()
-        time.sleep(0.09)
+        # Setup/scheduling must not expire the listener before rejected traffic
+        # reaches it. The domain clock still tests the original 0.18 deadline.
+        now[0] = 0.09
         self.assertEqual(self._request(server, "GET", "/wrong/")[0], 404)
+        self.assertEqual(server._last_activity, 0.0)
+        now[0] = 0.19  # Beyond original expiry; a wrong 0.09 touch would extend it.
         thread.join(timeout=1)
         elapsed = time.monotonic() - started
         self.assertFalse(thread.is_alive())
@@ -898,15 +903,33 @@ class TestIntegrityServer(EngineTestCase):
 
     def test_valid_activity_extends_idle(self):
         self._commit_status()
-        server, thread, result = self._start(idle_timeout_s=0.18)
+        now = [0.0]
+        observed_after_original_deadline = threading.Event()
+
+        def clock():
+            value = now[0]
+            if value == 0.22:
+                observed_after_original_deadline.set()
+            return value
+
+        server, thread, result = self._start(idle_timeout_s=0.18, clock=clock)
         started = time.monotonic()
-        time.sleep(0.11)
+        # The injected clock advances only after setup/request completion; host
+        # scheduling cannot consume the idle window before the request begins.
+        now[0] = 0.11
         self.assertEqual(
             self._request(server, "GET", server.capability_path)[0],
             200,
         )
-        time.sleep(0.11)
+        self.assertEqual(server._last_activity, 0.11)
+        now[0] = 0.22  # Past the original expiry, before the extended 0.29 expiry.
+        self.assertTrue(observed_after_original_deadline.wait(timeout=1))
         self.assertTrue(thread.is_alive())
+        # Retain the original real-elapsed lower bound independently of the
+        # simulated domain clock, and prove the server survives that interval.
+        threading.Event().wait(max(0.0, 0.26 - (time.monotonic() - started)))
+        self.assertTrue(thread.is_alive())
+        now[0] = 0.30
         thread.join(timeout=1)
         elapsed = time.monotonic() - started
         self.assertFalse(thread.is_alive())
