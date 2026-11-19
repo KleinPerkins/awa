@@ -59,5 +59,11 @@ that second guard corpus. Baselines are reviewed files and are never rewritten
 automatically.
 
 Receipts never skip verification, safety checks, install checks, or release
-rehearsals. No verification lane uses a paid GitHub Actions runner, hosted
-runner, or new remote service; the existing repository check is runnerless.
+rehearsals. These local verification lanes remain available independently of
+source CI. The G1 source CI workflow uses sharded standard GitHub-hosted runners
+under the current owner policy linked from [the agent instructions](../../AGENTS.md).
+Self-hosted runners remain forbidden. Hosted CI success does not establish App
+qualification or authorize installation, the held AWA rollout, host activation,
+or a product release. App writer activation additionally requires verified
+initial source admission, passing merged-main CI, effective successor controls,
+and actual read-only App qualification.
