@@ -2106,6 +2106,9 @@ class FairnessSchedulerTest(unittest.TestCase):
         self.assertFalse(context.processes[0].alive)
         self.assertTrue(all(endpoint.closed for endpoint in context.endpoints))
 
+    # Prove eight-way member-lock isolation with a finite shared-host I/O allowance.
+    # Production helper-budget behavior remains covered by separate tests.
+    @mock.patch.object(registration_runtime, "HELPER_DEADLINE_SECONDS", 15.0)
     def test_eight_mutating_lanes_hold_only_their_member_lock(self) -> None:
         context = multiprocessing.get_context("spawn")
         with tempfile.TemporaryDirectory() as tmp:
