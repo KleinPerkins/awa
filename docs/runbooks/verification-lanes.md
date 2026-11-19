@@ -62,7 +62,7 @@ Receipts never skip verification, safety checks, install checks, or release
 rehearsals. No local verification lane uses a paid GitHub Actions runner or a
 new remote service. These local lanes remain available independently of source
 CI. The G1 source CI workflow uses sharded standard GitHub-hosted runners
-under the current owner policy linked from [the agent instructions](../../AGENTS.md).
+under the [current owner policy](https://github.com/KleinPerkins/dev/blob/main/_ops/POLICY.md#5-enforcement--source-hosted-delivery-and-installed-host).
 Self-hosted runners remain forbidden. Hosted CI success does not establish App
 qualification or authorize installation, the held AWA rollout, host activation,
 or a product release. App writer activation additionally requires verified
